@@ -204,6 +204,8 @@ target_sources(AudioInsight
         src/plugin/PluginEditor.h
         src/plugin/PluginProcessor.cpp
         src/plugin/PluginProcessor.h
+        src/ui/FrameLatencyHistory.cpp
+        src/ui/FrameLatencyHistory.h
         src/ui/MetalVisualization.h
         src/ui/MetalVisualization.mm
         src/ui/PerformanceMetricsModel.cpp
@@ -256,6 +258,8 @@ source_group(TREE "${CMAKE_CURRENT_SOURCE_DIR}" FILES
     src/plugin/PluginEditor.h
     src/plugin/PluginProcessor.cpp
     src/plugin/PluginProcessor.h
+    src/ui/FrameLatencyHistory.cpp
+    src/ui/FrameLatencyHistory.h
     src/ui/MetalVisualization.h
     src/ui/MetalVisualization.mm
     src/ui/PerformanceMetricsModel.cpp
@@ -291,6 +295,8 @@ if(BUILD_TESTING)
             src/plugin/PluginEditor.h
             src/plugin/PluginProcessor.cpp
             src/plugin/PluginProcessor.h
+            src/ui/FrameLatencyHistory.cpp
+            src/ui/FrameLatencyHistory.h
             src/ui/MetalVisualization.h
             src/ui/MetalVisualization.mm
             src/ui/PerformanceMetricsModel.cpp
@@ -301,6 +307,7 @@ if(BUILD_TESTING)
             src/ui/PresentedFrameHistory.h
             tests/AnalysisCoordinatorTests.cpp
             tests/AnalysisCoreTests.cpp
+            tests/FrameLatencyHistoryTests.cpp
             tests/MetalVisualizationTests.cpp
             tests/PerformanceMetricsModelTests.cpp
             tests/PerformanceMetricsPanelTests.cpp
@@ -364,6 +371,8 @@ if(BUILD_TESTING)
         src/plugin/PluginEditor.h
         src/plugin/PluginProcessor.cpp
         src/plugin/PluginProcessor.h
+        src/ui/FrameLatencyHistory.cpp
+        src/ui/FrameLatencyHistory.h
         src/ui/MetalVisualization.h
         src/ui/MetalVisualization.mm
         src/ui/PerformanceMetricsModel.cpp
@@ -374,6 +383,7 @@ if(BUILD_TESTING)
         src/ui/PresentedFrameHistory.h
         tests/AnalysisCoordinatorTests.cpp
         tests/AnalysisCoreTests.cpp
+        tests/FrameLatencyHistoryTests.cpp
         tests/MetalVisualizationTests.cpp
         tests/PerformanceMetricsModelTests.cpp
         tests/PerformanceMetricsPanelTests.cpp

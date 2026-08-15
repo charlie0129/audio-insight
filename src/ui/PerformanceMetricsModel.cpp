@@ -130,6 +130,58 @@ PerformanceMetricRow rawPresentedHistory(const MetalRenderTelemetry& telemetry)
         PerformanceMetricKind::raw };
 }
 
+std::size_t boundedFrameLatencyHistoryCount(const MetalRenderTelemetry& telemetry) noexcept
+{
+    return std::min(telemetry.frameLatencyHistoryCount, telemetry.frameLatencyHistory.size());
+}
+
+std::string frameLatencyHistorySummary(const MetalRenderTelemetry& telemetry)
+{
+    const auto count = boundedFrameLatencyHistoryCount(telemetry);
+    if (count == 0)
+        return "0 samples";
+
+    const auto firstSequence = telemetry.frameLatencyHistory[0].sequence;
+    const auto lastSequence = telemetry.frameLatencyHistory[count - 1].sequence;
+    return formatUnsigned(count) + " samples, first sequence " + formatUnsigned(firstSequence)
+        + ", last sequence " + formatUnsigned(lastSequence);
+}
+
+constexpr std::string_view frameLatencyHistoryRawUnit
+    = "sequence:presented_host_timestamp_nanoseconds:cpu_encode_nanoseconds:"
+      "submit_queue_wait_nanoseconds:gpu_execution_nanoseconds:compositor_wait_nanoseconds:"
+      "total_nanoseconds:total_valid:components_valid";
+
+std::string frameLatencyHistoryRawValue(const MetalRenderTelemetry& telemetry)
+{
+    const auto count = boundedFrameLatencyHistoryCount(telemetry);
+    std::ostringstream stream;
+    stream.imbue(std::locale::classic());
+    stream << '[';
+
+    for (std::size_t index = 0; index < count; ++index) {
+        if (index != 0)
+            stream << ", ";
+
+        const auto& sample = telemetry.frameLatencyHistory[index];
+        stream << sample.sequence << ':' << sample.presentedHostTimestampNanoseconds << ':'
+               << sample.cpuEncodeNanoseconds << ':' << sample.submitQueueWaitNanoseconds << ':'
+               << sample.gpuExecutionNanoseconds << ':' << sample.compositorWaitNanoseconds << ':'
+               << sample.totalNanoseconds << ':' << (sample.totalValid ? "true" : "false") << ':'
+               << (sample.componentsValid ? "true" : "false");
+    }
+
+    stream << ']';
+    return stream.str();
+}
+
+PerformanceMetricRow rawFrameLatencyHistory(const MetalRenderTelemetry& telemetry)
+{
+    return { "metal.frameLatencyHistory", "Per-frame latency history",
+        frameLatencyHistorySummary(telemetry), { }, { }, std::string(frameLatencyHistoryRawUnit),
+        PerformanceMetricKind::raw };
+}
+
 void appendRawSections(
     const PerformanceMetricsSnapshot& snapshot, std::vector<PerformanceMetricGroup>& sections)
 {
@@ -180,12 +232,26 @@ void appendRawSections(
         metal.presentationLatenessUnclassifiableSamples));
     frameFlow.rows.emplace_back(rawUnsigned("metal.presentationHistoryDiscardedTimestamps",
         "History timestamps discarded", metal.presentationHistoryDiscardedTimestamps));
+    frameFlow.rows.emplace_back(rawUnsigned(
+        "metal.frameLatencySamples", "Frame-latency samples", metal.frameLatencySamples));
+    frameFlow.rows.emplace_back(rawUnsigned("metal.frameLatencyTotalTimingSamples",
+        "Valid total frame-latency timings", metal.frameLatencyTotalTimingSamples));
+    frameFlow.rows.emplace_back(rawUnsigned("metal.frameLatencyTotalTimingUnavailableSamples",
+        "Unavailable total frame-latency timings",
+        metal.frameLatencyTotalTimingUnavailableSamples));
+    frameFlow.rows.emplace_back(rawUnsigned("metal.frameLatencyComponentTimingSamples",
+        "Valid frame-latency component timings", metal.frameLatencyComponentTimingSamples));
+    frameFlow.rows.emplace_back(rawUnsigned("metal.frameLatencyComponentTimingUnavailableSamples",
+        "Unavailable frame-latency component timings",
+        metal.frameLatencyComponentTimingUnavailableSamples));
+    frameFlow.rows.emplace_back(rawUnsigned("metal.frameLatencyHistoryDiscardedSamples",
+        "Frame-latency history samples discarded", metal.frameLatencyHistoryDiscardedSamples));
     frameFlow.rows.emplace_back(rawUnsigned("metal.presentationsAfterTarget",
         "Presentations after target", metal.presentationsAfterTarget));
     frameFlow.rows.emplace_back(rawUnsigned(
         "metal.skippedPresentations", "Skipped presentations", metal.skippedPresentations));
     frameFlow.rows.emplace_back(rawUnsigned(
-        "metal.gpuBackpressureDrops", "GPU backpressure drops", metal.gpuBackpressureDrops));
+        "metal.gpuBackpressureDrops", "Render-buffer admission drops", metal.gpuBackpressureDrops));
     frameFlow.rows.emplace_back(rawUnsigned("metal.drawableUnavailableDrops",
         "Drawable-unavailable drops", metal.drawableUnavailableDrops));
     frameFlow.rows.emplace_back(rawUnsigned("metal.callbackHostDelaySamples",
@@ -262,6 +328,9 @@ void appendRawSections(
     timing.rows.emplace_back(rawPresentedHistory(metal));
     timing.rows.emplace_back(rawUnsigned("metal.presentedFrameIntervalHistoryCount",
         "Presented-frame history count", metal.presentedFrameIntervalHistoryCount, "samples"));
+    timing.rows.emplace_back(rawFrameLatencyHistory(metal));
+    timing.rows.emplace_back(rawUnsigned("metal.frameLatencyHistoryCount",
+        "Frame-latency history count", metal.frameLatencyHistoryCount, "samples"));
     sections.emplace_back(std::move(timing));
 
     PerformanceMetricGroup capture { "Analysis sample capture", { } };
@@ -437,11 +506,30 @@ void buildRates(const PerformanceMetricsSnapshot& current,
     addMetal("metal.presentationHistoryDiscardedTimestamps", "History timestamps discarded",
         "timestamps/s", current.metal.presentationHistoryDiscardedTimestamps,
         previous.metal.presentationHistoryDiscardedTimestamps);
+    addMetal("metal.frameLatencySamples", "Frame-latency samples", "samples/s",
+        current.metal.frameLatencySamples, previous.metal.frameLatencySamples);
+    addMetal("metal.frameLatencyTotalTimingSamples", "Valid total frame-latency timings",
+        "samples/s", current.metal.frameLatencyTotalTimingSamples,
+        previous.metal.frameLatencyTotalTimingSamples);
+    addMetal("metal.frameLatencyTotalTimingUnavailableSamples",
+        "Unavailable total frame-latency timings", "samples/s",
+        current.metal.frameLatencyTotalTimingUnavailableSamples,
+        previous.metal.frameLatencyTotalTimingUnavailableSamples);
+    addMetal("metal.frameLatencyComponentTimingSamples", "Valid frame-latency component timings",
+        "samples/s", current.metal.frameLatencyComponentTimingSamples,
+        previous.metal.frameLatencyComponentTimingSamples);
+    addMetal("metal.frameLatencyComponentTimingUnavailableSamples",
+        "Unavailable frame-latency component timings", "samples/s",
+        current.metal.frameLatencyComponentTimingUnavailableSamples,
+        previous.metal.frameLatencyComponentTimingUnavailableSamples);
+    addMetal("metal.frameLatencyHistoryDiscardedSamples", "Frame-latency history samples discarded",
+        "samples/s", current.metal.frameLatencyHistoryDiscardedSamples,
+        previous.metal.frameLatencyHistoryDiscardedSamples);
     addMetal("metal.presentationsAfterTarget", "Presentations after target", "events/s",
         current.metal.presentationsAfterTarget, previous.metal.presentationsAfterTarget);
     addMetal("metal.skippedPresentations", "Skipped presentations", "events/s",
         current.metal.skippedPresentations, previous.metal.skippedPresentations);
-    addMetal("metal.gpuBackpressureDrops", "GPU backpressure drops", "drops/s",
+    addMetal("metal.gpuBackpressureDrops", "Render-buffer admission drops", "drops/s",
         current.metal.gpuBackpressureDrops, previous.metal.gpuBackpressureDrops);
     addMetal("metal.drawableUnavailableDrops", "Drawable-unavailable drops", "drops/s",
         current.metal.drawableUnavailableDrops, previous.metal.drawableUnavailableDrops);
@@ -720,6 +808,9 @@ std::string makeReport(
 
             if (row.fieldName == "metal.presentedFrameIntervalHistory") {
                 stream << presentedHistoryRawValue(snapshot.metal) << " sequence:nanoseconds";
+            } else if (row.fieldName == "metal.frameLatencyHistory") {
+                stream << frameLatencyHistoryRawValue(snapshot.metal) << ' '
+                       << frameLatencyHistoryRawUnit;
             } else if (row.kind == PerformanceMetricKind::derivedRate) {
                 const auto sourceFieldName = row.fieldName.starts_with("rate.")
                     ? row.fieldName.substr(5)

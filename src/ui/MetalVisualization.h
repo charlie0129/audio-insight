@@ -3,6 +3,7 @@
 #pragma once
 
 #include "../core/VisualizationDataSource.h"
+#include "FrameLatencyHistory.h"
 #include "PresentedFrameHistory.h"
 
 #include <juce_gui_extra/juce_gui_extra.h>
@@ -30,6 +31,12 @@ struct MetalRenderTelemetry {
     std::uint64_t presentationLatenessSamples = 0;
     std::uint64_t presentationLatenessUnclassifiableSamples = 0;
     std::uint64_t presentationHistoryDiscardedTimestamps = 0;
+    std::uint64_t frameLatencySamples = 0;
+    std::uint64_t frameLatencyTotalTimingSamples = 0;
+    std::uint64_t frameLatencyTotalTimingUnavailableSamples = 0;
+    std::uint64_t frameLatencyComponentTimingSamples = 0;
+    std::uint64_t frameLatencyComponentTimingUnavailableSamples = 0;
+    std::uint64_t frameLatencyHistoryDiscardedSamples = 0;
     std::uint64_t presentationsAfterTarget = 0;
     std::uint64_t skippedPresentations = 0;
     std::uint64_t gpuBackpressureDrops = 0;
@@ -74,6 +81,12 @@ struct MetalRenderTelemetry {
     std::array<PresentedFrameIntervalSample, presentedFrameIntervalHistoryCapacity>
         presentedFrameIntervalHistory { };
     std::size_t presentedFrameIntervalHistoryCount = 0;
+
+    // One sample per correlated submission/presentation callback pair, ordered
+    // by actual presentation time. CPU encode ends immediately before command
+    // submission; submit + queue covers command submission and driver/GPU wait.
+    std::array<FrameLatencySample, frameLatencyHistoryCapacity> frameLatencyHistory { };
+    std::size_t frameLatencyHistoryCount = 0;
 
     std::uint32_t drawableWidthPixels = 0;
     std::uint32_t drawableHeightPixels = 0;

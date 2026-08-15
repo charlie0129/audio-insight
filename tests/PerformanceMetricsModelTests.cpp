@@ -43,13 +43,14 @@ consteval std::size_t aggregateFieldCount()
 // telemetry aggregate gains or loses a member. Nested aggregates are guarded
 // separately because the view model expands them into individual rows.
 static_assert(aggregateFieldCount<PresentedFrameIntervalSample>() == 2);
-static_assert(aggregateFieldCount<MetalRenderTelemetry>() == 57);
+static_assert(aggregateFieldCount<FrameLatencySample>() == 9);
+static_assert(aggregateFieldCount<MetalRenderTelemetry>() == 65);
 static_assert(aggregateFieldCount<StereoSampleCapture::Telemetry>() == 9);
 static_assert(aggregateFieldCount<StereoMeterAccumulator::Telemetry>() == 7);
 static_assert(aggregateFieldCount<SharedAnalysisScheduler::Counters>() == 3);
 static_assert(aggregateFieldCount<AnalysisTelemetry>() == 21);
 
-constexpr std::array<std::string_view, 94> expectedRawFieldNames {
+constexpr std::array<std::string_view, 102> expectedRawFieldNames {
     "metal.epoch",
     "metal.displayLinkCallbacks",
     "metal.submittedFrames",
@@ -62,6 +63,12 @@ constexpr std::array<std::string_view, 94> expectedRawFieldNames {
     "metal.presentationLatenessSamples",
     "metal.presentationLatenessUnclassifiableSamples",
     "metal.presentationHistoryDiscardedTimestamps",
+    "metal.frameLatencySamples",
+    "metal.frameLatencyTotalTimingSamples",
+    "metal.frameLatencyTotalTimingUnavailableSamples",
+    "metal.frameLatencyComponentTimingSamples",
+    "metal.frameLatencyComponentTimingUnavailableSamples",
+    "metal.frameLatencyHistoryDiscardedSamples",
     "metal.presentationsAfterTarget",
     "metal.skippedPresentations",
     "metal.gpuBackpressureDrops",
@@ -99,6 +106,8 @@ constexpr std::array<std::string_view, 94> expectedRawFieldNames {
     "metal.maximumProvidedDrawableAccessNanoseconds",
     "metal.presentedFrameIntervalHistory",
     "metal.presentedFrameIntervalHistoryCount",
+    "metal.frameLatencyHistory",
+    "metal.frameLatencyHistoryCount",
     "metal.drawableWidthPixels",
     "metal.drawableHeightPixels",
     "metal.configuredMaximumFramesPerSecond",
@@ -210,6 +219,79 @@ public:
             expect(view.report.find(
                        "statistics.metal.presentedFrameIntervals.standardDeviationMilliseconds = ")
                 != std::string::npos);
+        });
+
+        testCase("Per-frame latency history preserves exact component values", [this] {
+            PerformanceMetricsModel model;
+            PerformanceMetricsSnapshot snapshot;
+            snapshot.metal.epoch = 3;
+            snapshot.metal.frameLatencyHistoryCount = 2;
+            snapshot.metal.frameLatencyHistory[0]
+                = { 17, 1'234'567'890, 101, 202, 303, 404, 1'010, true, true };
+            snapshot.metal.frameLatencyHistory[1]
+                = { 19, 1'234'567'999, 111, 0, 0, 0, 999, true, false };
+
+            const auto view = model.update(snapshot, 1.0, false);
+            expect(view.report.empty());
+
+            auto foundDeferredHistory = false;
+            for (const auto& section : view.sections) {
+                for (const auto& row : section.rows) {
+                    if (row.fieldName != "metal.frameLatencyHistory")
+                        continue;
+
+                    foundDeferredHistory = true;
+                    expect(row.rawValue.empty());
+                    expectEquals(row.rawUnit,
+                        std::string("sequence:presented_host_timestamp_nanoseconds:"
+                                    "cpu_encode_nanoseconds:submit_queue_wait_nanoseconds:"
+                                    "gpu_execution_nanoseconds:compositor_wait_nanoseconds:"
+                                    "total_nanoseconds:total_valid:components_valid"));
+                }
+            }
+            expect(foundDeferredHistory);
+
+            const auto report = PerformanceMetricsModel::buildCopyReport(view, snapshot);
+            expect(report.find("metal.frameLatencyHistory = "
+                               "[17:1234567890:101:202:303:404:1010:true:true, "
+                               "19:1234567999:111:0:0:0:999:true:false] "
+                               "sequence:presented_host_timestamp_nanoseconds:"
+                               "cpu_encode_nanoseconds:submit_queue_wait_nanoseconds:"
+                               "gpu_execution_nanoseconds:compositor_wait_nanoseconds:"
+                               "total_nanoseconds:total_valid:components_valid")
+                != std::string::npos);
+        });
+
+        testCase("Every frame-latency counter exposes a derived rate", [this] {
+            PerformanceMetricsModel model;
+            PerformanceMetricsSnapshot snapshot;
+            snapshot.metal.epoch = 5;
+            static_cast<void>(model.update(snapshot, 10.0));
+
+            snapshot.metal.frameLatencySamples = 20;
+            snapshot.metal.frameLatencyTotalTimingSamples = 20;
+            snapshot.metal.frameLatencyTotalTimingUnavailableSamples = 20;
+            snapshot.metal.frameLatencyComponentTimingSamples = 20;
+            snapshot.metal.frameLatencyComponentTimingUnavailableSamples = 20;
+            snapshot.metal.frameLatencyHistoryDiscardedSamples = 20;
+            const auto view = model.update(snapshot, 12.0);
+
+            constexpr std::array<std::string_view, 6> rateFieldNames {
+                "metal.frameLatencySamples",
+                "metal.frameLatencyTotalTimingSamples",
+                "metal.frameLatencyTotalTimingUnavailableSamples",
+                "metal.frameLatencyComponentTimingSamples",
+                "metal.frameLatencyComponentTimingUnavailableSamples",
+                "metal.frameLatencyHistoryDiscardedSamples",
+            };
+
+            for (const auto fieldName : rateFieldNames) {
+                const auto* rate = findRate(view, fieldName);
+                expect(rate != nullptr && rate->available,
+                    "Missing derived rate for a frame-latency counter");
+                if (rate != nullptr)
+                    expectWithinAbsoluteError(rate->value, 10.0, 1.0e-12);
+            }
         });
 
         testCase("Counter rates rebase across epochs and reject rollbacks", [this] {
@@ -363,26 +445,33 @@ public:
             snapshot.metal.submittedFrames = 12;
             snapshot.metal.presentedFrameIntervalHistoryCount = 1;
             snapshot.metal.presentedFrameIntervalHistory[0] = { 17, 8'333'333 };
+            snapshot.metal.frameLatencyHistoryCount = 1;
+            snapshot.metal.frameLatencyHistory[0]
+                = { 17, 20'000'000, 100, 200, 300, 400, 1'000, true, true };
 
             const auto view = model.update(snapshot, 2.0, false);
             expect(view.report.empty());
 
-            auto foundDeferredHistory = false;
+            std::set<std::string> deferredHistories;
             for (const auto& section : view.sections) {
                 for (const auto& row : section.rows) {
-                    if (row.fieldName == "metal.presentedFrameIntervalHistory") {
-                        foundDeferredHistory = true;
+                    if (row.fieldName == "metal.presentedFrameIntervalHistory"
+                        || row.fieldName == "metal.frameLatencyHistory") {
+                        deferredHistories.emplace(row.fieldName);
                         expect(row.rawValue.empty());
                     }
                 }
             }
-            expect(foundDeferredHistory);
+            expectEquals(deferredHistories.size(), std::size_t { 2 });
 
             const auto report = PerformanceMetricsModel::buildCopyReport(view, snapshot);
             expect(
                 report.find("Audio Insight per-instance performance metrics") != std::string::npos);
             expect(report.find("metal.submittedFrames = 12") != std::string::npos);
             expect(report.find("metal.presentedFrameIntervalHistory = [17:8333333] ")
+                != std::string::npos);
+            expect(report.find("metal.frameLatencyHistory = "
+                               "[17:20000000:100:200:300:400:1000:true:true] ")
                 != std::string::npos);
         });
     }

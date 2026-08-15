@@ -56,6 +56,13 @@ public:
         expectEquals(afterReset.presentedFrames, std::uint64_t { 0 });
         expectEquals(afterReset.gpuTimingSamples, std::uint64_t { 0 });
         expectEquals(afterReset.presentationLatenessSamples, std::uint64_t { 0 });
+        expectEquals(afterReset.frameLatencySamples, std::uint64_t { 0 });
+        expectEquals(afterReset.frameLatencyTotalTimingSamples, std::uint64_t { 0 });
+        expectEquals(afterReset.frameLatencyTotalTimingUnavailableSamples, std::uint64_t { 0 });
+        expectEquals(afterReset.frameLatencyComponentTimingSamples, std::uint64_t { 0 });
+        expectEquals(afterReset.frameLatencyComponentTimingUnavailableSamples, std::uint64_t { 0 });
+        expectEquals(afterReset.frameLatencyHistoryDiscardedSamples, std::uint64_t { 0 });
+        expectEquals(afterReset.frameLatencyHistoryCount, std::size_t { 0 });
         expect(afterReset.metalAvailable == beforeReset.metalAvailable);
         expect(afterReset.renderingRequested == beforeReset.renderingRequested);
         expect(afterReset.effectivelyRendering == beforeReset.effectivelyRendering);

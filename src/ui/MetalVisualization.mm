@@ -80,6 +80,12 @@ struct AtomicRenderTelemetry {
     std::atomic<std::uint64_t> presentationLatenessSamples { 0 };
     std::atomic<std::uint64_t> presentationLatenessUnclassifiableSamples { 0 };
     std::atomic<std::uint64_t> presentationHistoryDiscardedTimestamps { 0 };
+    std::atomic<std::uint64_t> frameLatencySamples { 0 };
+    std::atomic<std::uint64_t> frameLatencyTotalTimingSamples { 0 };
+    std::atomic<std::uint64_t> frameLatencyTotalTimingUnavailableSamples { 0 };
+    std::atomic<std::uint64_t> frameLatencyComponentTimingSamples { 0 };
+    std::atomic<std::uint64_t> frameLatencyComponentTimingUnavailableSamples { 0 };
+    std::atomic<std::uint64_t> frameLatencyHistoryDiscardedSamples { 0 };
     std::atomic<std::uint64_t> presentationsAfterTarget { 0 };
     std::atomic<std::uint64_t> skippedPresentations { 0 };
     std::atomic<std::uint64_t> gpuBackpressureDrops { 0 };
@@ -122,6 +128,7 @@ struct AtomicRenderTelemetry {
     // the fixed history exact without imposing any work on the audio thread.
     mutable os_unfair_lock presentedFrameHistoryLock = OS_UNFAIR_LOCK_INIT;
     PresentedFrameHistory presentedFrameHistory;
+    FrameLatencyHistory frameLatencyHistory;
     std::uint64_t lastPresentationLatenessNanoseconds = 0;
     std::uint64_t lastPresentationLatenessTimestampNanoseconds = 0;
     std::uint64_t maximumPresentationLatenessNanoseconds = 0;
@@ -202,7 +209,6 @@ struct RenderBufferSlot {
     // Even values are free. The following odd value identifies a particular
     // in-flight admission, allowing late callbacks to release only their own.
     std::atomic<std::uint64_t> admissionState { 0 };
-    std::atomic<std::uint64_t> classifiedAdmission { 0 };
     id<MTLBuffer> vertexBuffer = nil;
 
     ~RenderBufferSlot()
@@ -285,23 +291,41 @@ void releaseRenderBuffer(
         expected, admission.busyState + 1, std::memory_order_release, std::memory_order_relaxed);
 }
 
-bool classifyPresentation(
-    const std::shared_ptr<SharedRenderState>& state, RenderBufferAdmission admission) noexcept
-{
-    if (admission.index >= state->slots.size())
-        return false;
-
-    auto expected = admission.busyState >= 2 ? admission.busyState - 2 : 0;
-    return state->slots[admission.index].classifiedAdmission.compare_exchange_strong(
-        expected, admission.busyState, std::memory_order_acq_rel, std::memory_order_relaxed);
-}
-
-void recordSkippedPresentation(const std::shared_ptr<SharedRenderState>& state,
-    RenderBufferAdmission admission,
+void recordSkippedPresentation(const std::shared_ptr<FrameLatencySubmission>& submission,
     const std::shared_ptr<AtomicRenderTelemetry>& telemetry) noexcept
 {
-    if (classifyPresentation(state, admission))
+    os_unfair_lock_lock(&telemetry->presentedFrameHistoryLock);
+
+    if (submission->classifySkipped() == PresentationOutcomeTransition::newlySkipped)
         telemetry->skippedPresentations.fetch_add(1, std::memory_order_relaxed);
+
+    os_unfair_lock_unlock(&telemetry->presentedFrameHistoryLock);
+}
+
+void recordFrameLatencySample(const std::shared_ptr<AtomicRenderTelemetry>& telemetry,
+    const FrameLatencySample& sample) noexcept
+{
+    os_unfair_lock_lock(&telemetry->presentedFrameHistoryLock);
+    telemetry->frameLatencySamples.fetch_add(1, std::memory_order_relaxed);
+
+    if (sample.totalValid) {
+        telemetry->frameLatencyTotalTimingSamples.fetch_add(1, std::memory_order_relaxed);
+    } else {
+        telemetry->frameLatencyTotalTimingUnavailableSamples.fetch_add(
+            1, std::memory_order_relaxed);
+    }
+
+    if (sample.componentsValid) {
+        telemetry->frameLatencyComponentTimingSamples.fetch_add(1, std::memory_order_relaxed);
+    } else {
+        telemetry->frameLatencyComponentTimingUnavailableSamples.fetch_add(
+            1, std::memory_order_relaxed);
+    }
+
+    if (!telemetry->frameLatencyHistory.record(sample))
+        telemetry->frameLatencyHistoryDiscardedSamples.fetch_add(1, std::memory_order_relaxed);
+
+    os_unfair_lock_unlock(&telemetry->presentedFrameHistoryLock);
 }
 
 void copyGpuTelemetry(
@@ -347,35 +371,58 @@ void copyPresentedFrameTelemetry(
         = source.presentationLatenessUnclassifiableSamples.load(std::memory_order_relaxed);
     destination.presentationHistoryDiscardedTimestamps
         = source.presentationHistoryDiscardedTimestamps.load(std::memory_order_relaxed);
+    destination.frameLatencySamples = source.frameLatencySamples.load(std::memory_order_relaxed);
+    destination.frameLatencyTotalTimingSamples
+        = source.frameLatencyTotalTimingSamples.load(std::memory_order_relaxed);
+    destination.frameLatencyTotalTimingUnavailableSamples
+        = source.frameLatencyTotalTimingUnavailableSamples.load(std::memory_order_relaxed);
+    destination.frameLatencyComponentTimingSamples
+        = source.frameLatencyComponentTimingSamples.load(std::memory_order_relaxed);
+    destination.frameLatencyComponentTimingUnavailableSamples
+        = source.frameLatencyComponentTimingUnavailableSamples.load(std::memory_order_relaxed);
+    destination.frameLatencyHistoryDiscardedSamples
+        = source.frameLatencyHistoryDiscardedSamples.load(std::memory_order_relaxed);
+    destination.frameLatencyHistoryCount
+        = source.frameLatencyHistory.snapshot(destination.frameLatencyHistory);
     destination.presentationsAfterTarget
         = source.presentationsAfterTarget.load(std::memory_order_relaxed);
     os_unfair_lock_unlock(&source.presentedFrameHistoryLock);
 }
 
-void recordPresentedDrawable(const std::shared_ptr<SharedRenderState>& state,
-    RenderBufferAdmission admission, const std::shared_ptr<AtomicRenderTelemetry>& telemetry,
-    id<MTLDrawable> drawable, CFTimeInterval targetPresentationTimestamp,
-    const std::uint64_t presentationSequence) noexcept
+void recordPresentedDrawable(const std::shared_ptr<FrameLatencySubmission>& submission,
+    const std::shared_ptr<AtomicRenderTelemetry>& telemetry, id<MTLDrawable> drawable,
+    CFTimeInterval targetPresentationTimestamp, const std::uint64_t presentationSequence) noexcept
 {
     telemetry->presentationCallbacks.fetch_add(1, std::memory_order_relaxed);
 
     const auto presentedTime = drawable.presentedTime;
+    const auto presentedNanoseconds = hostTimeNanoseconds(presentedTime);
+    FrameLatencySample latencySample;
+
+    if (submission->recordPresentation(presentedNanoseconds, latencySample))
+        recordFrameLatencySample(telemetry, latencySample);
 
     if (!std::isfinite(presentedTime) || presentedTime <= 0.0) {
-        recordSkippedPresentation(state, admission, telemetry);
+        recordSkippedPresentation(submission, telemetry);
         return;
     }
 
-    if (!classifyPresentation(state, admission))
-        return;
-
-    const auto presentedNanoseconds = hostTimeNanoseconds(presentedTime);
     const auto hasTargetPresentationTimestamp
         = std::isfinite(targetPresentationTimestamp) && targetPresentationTimestamp > 0.0;
     const auto presentationLateness = hasTargetPresentationTimestamp
         ? positiveHostTimeDifference(presentedTime, targetPresentationTimestamp)
         : 0;
     os_unfair_lock_lock(&telemetry->presentedFrameHistoryLock);
+    const auto outcomeTransition = submission->classifyPresented();
+
+    if (outcomeTransition == PresentationOutcomeTransition::none) {
+        os_unfair_lock_unlock(&telemetry->presentedFrameHistoryLock);
+        return;
+    }
+
+    if (outcomeTransition == PresentationOutcomeTransition::upgradedSkippedToPresented)
+        telemetry->skippedPresentations.fetch_sub(1, std::memory_order_relaxed);
+
     const auto historyAccepted = telemetry->presentedFrameHistory.recordPresentation(
         presentationSequence, presentedNanoseconds);
 
@@ -692,6 +739,20 @@ public:
             return;
         }
 
+        std::shared_ptr<FrameLatencySubmission> submission;
+
+        try {
+            // Presentation may trail GPU completion by several display periods,
+            // so this small state must outlive reusable vertex-buffer admission.
+            submission = std::make_shared<FrameLatencySubmission>(
+                presentationSequence, hostTimeNanoseconds(callbackHostTime));
+        } catch (...) {
+            releaseRenderBuffer(sharedState, admission);
+            telemetry->gpuBackpressureDrops.fetch_add(1, std::memory_order_relaxed);
+            telemetry->skippedPresentations.fetch_add(1, std::memory_order_relaxed);
+            return;
+        }
+
         auto& slot = sharedState->slots[admission.index];
         const auto drawableAccessStart = Clock::now();
         id<CAMetalDrawable> drawable = update.drawable;
@@ -703,7 +764,7 @@ public:
             telemetry->maximumProvidedDrawableAccessNanoseconds, drawableAccessNanoseconds);
 
         if (drawable == nil || drawable.texture == nil) {
-            recordSkippedPresentation(sharedState, admission, telemetry);
+            recordSkippedPresentation(submission, telemetry);
             releaseRenderBuffer(sharedState, admission);
             telemetry->drawableUnavailableDrops.fetch_add(1, std::memory_order_relaxed);
             return;
@@ -745,7 +806,7 @@ public:
         id<MTLCommandBuffer> commandBuffer = [commandQueue commandBuffer];
 
         if (commandBuffer == nil) {
-            recordSkippedPresentation(sharedState, admission, telemetry);
+            recordSkippedPresentation(submission, telemetry);
             releaseRenderBuffer(sharedState, admission);
             telemetry->gpuBackpressureDrops.fetch_add(1, std::memory_order_relaxed);
             return;
@@ -755,7 +816,7 @@ public:
             [commandBuffer renderCommandEncoderWithDescriptor:descriptor];
 
         if (encoder == nil) {
-            recordSkippedPresentation(sharedState, admission, telemetry);
+            recordSkippedPresentation(submission, telemetry);
             releaseRenderBuffer(sharedState, admission);
             telemetry->drawableUnavailableDrops.fetch_add(1, std::memory_order_relaxed);
             return;
@@ -782,28 +843,38 @@ public:
 
         [encoder endEncoding];
 
-        auto presentationState = sharedState;
         auto presentationTelemetry = telemetry;
         [drawable addPresentedHandler:^(id<MTLDrawable> presentedDrawable) {
-            recordPresentedDrawable(presentationState, admission, presentationTelemetry,
-                presentedDrawable, targetPresentationTimestamp, presentationSequence);
-            releaseRenderBuffer(presentationState, admission);
+            recordPresentedDrawable(submission, presentationTelemetry, presentedDrawable,
+                targetPresentationTimestamp, presentationSequence);
         }];
 
         auto completionState = sharedState;
         auto completionTelemetry = telemetry;
         [commandBuffer addCompletedHandler:^(id<MTLCommandBuffer> completedBuffer) {
-            if (completedBuffer.status == MTLCommandBufferStatusError) {
-                completionTelemetry->commandBufferFailures.fetch_add(1, std::memory_order_relaxed);
-                recordSkippedPresentation(completionState, admission, completionTelemetry);
-                releaseRenderBuffer(completionState, admission);
-                return;
-            }
+            // The GPU has finished reading this submission's shared vertex
+            // buffer. Presentation may be delayed by several refresh periods,
+            // so it must not retain renderer admission.
+            releaseRenderBuffer(completionState, admission);
 
             const auto gpuStart = completedBuffer.GPUStartTime;
             const auto gpuEnd = completedBuffer.GPUEndTime;
-            const auto hasGpuTiming = std::isfinite(gpuStart) && std::isfinite(gpuEnd)
-                && gpuEnd >= gpuStart && gpuStart > 0.0;
+            const auto commandSucceeded = completedBuffer.status != MTLCommandBufferStatusError;
+            const auto hasGpuTiming = commandSucceeded && std::isfinite(gpuStart)
+                && std::isfinite(gpuEnd) && gpuEnd >= gpuStart && gpuStart > 0.0;
+            FrameLatencySample latencySample;
+
+            if (submission->recordGpuCompletion(hasGpuTiming ? hostTimeNanoseconds(gpuStart) : 0,
+                    hasGpuTiming ? hostTimeNanoseconds(gpuEnd) : 0, latencySample)) {
+                recordFrameLatencySample(completionTelemetry, latencySample);
+            }
+
+            if (!commandSucceeded) {
+                completionTelemetry->commandBufferFailures.fetch_add(1, std::memory_order_relaxed);
+                recordSkippedPresentation(submission, completionTelemetry);
+                return;
+            }
+
             const auto hasTargetPresentationTimestamp
                 = std::isfinite(targetPresentationTimestamp) && targetPresentationTimestamp > 0.0;
 
@@ -841,6 +912,7 @@ public:
             os_unfair_lock_unlock(&completionTelemetry->gpuTelemetryLock);
         }];
 
+        submission->setCpuReadyTimestamp(hostTimeNanoseconds(CACurrentMediaTime()));
         [commandBuffer commit];
 
         // CAMetalDisplayLink owns the drawable's presentation timing. Timed presentation APIs
