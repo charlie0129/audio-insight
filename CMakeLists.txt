@@ -190,8 +190,8 @@ target_sources(AudioInsight
     PRIVATE
         src/analysis/AnalysisCoordinator.cpp
         src/analysis/AnalysisCoordinator.h
-        src/analysis/HannSpectrumAnalyzer.cpp
-        src/analysis/HannSpectrumAnalyzer.h
+        src/analysis/SpectrumAnalyzer.cpp
+        src/analysis/SpectrumAnalyzer.h
         src/analysis/PeakRmsBallistics.cpp
         src/analysis/PeakRmsBallistics.h
         src/analysis/SharedAnalysisScheduler.cpp
@@ -201,6 +201,7 @@ target_sources(AudioInsight
         src/analysis/StereoSampleCapture.cpp
         src/analysis/StereoSampleCapture.h
         src/core/VisualizationDataSource.h
+        src/core/SpectrumAnalysisConfiguration.h
         src/core/VisualizationFrame.h
         src/plugin/PluginEditor.cpp
         src/plugin/PluginEditor.h
@@ -259,8 +260,8 @@ target_link_libraries(AudioInsight
 source_group(TREE "${CMAKE_CURRENT_SOURCE_DIR}" FILES
     src/analysis/AnalysisCoordinator.cpp
     src/analysis/AnalysisCoordinator.h
-    src/analysis/HannSpectrumAnalyzer.cpp
-    src/analysis/HannSpectrumAnalyzer.h
+    src/analysis/SpectrumAnalyzer.cpp
+    src/analysis/SpectrumAnalyzer.h
     src/analysis/PeakRmsBallistics.cpp
     src/analysis/PeakRmsBallistics.h
     src/analysis/SharedAnalysisScheduler.cpp
@@ -270,6 +271,7 @@ source_group(TREE "${CMAKE_CURRENT_SOURCE_DIR}" FILES
     src/analysis/StereoSampleCapture.cpp
     src/analysis/StereoSampleCapture.h
     src/core/VisualizationDataSource.h
+    src/core/SpectrumAnalysisConfiguration.h
     src/core/VisualizationFrame.h
     src/plugin/PluginEditor.cpp
     src/plugin/PluginEditor.h
@@ -311,8 +313,8 @@ if(BUILD_TESTING)
         PRIVATE
             src/analysis/AnalysisCoordinator.cpp
             src/analysis/AnalysisCoordinator.h
-            src/analysis/HannSpectrumAnalyzer.cpp
-            src/analysis/HannSpectrumAnalyzer.h
+            src/analysis/SpectrumAnalyzer.cpp
+            src/analysis/SpectrumAnalyzer.h
             src/analysis/PeakRmsBallistics.cpp
             src/analysis/PeakRmsBallistics.h
             src/analysis/SharedAnalysisScheduler.cpp
@@ -322,6 +324,7 @@ if(BUILD_TESTING)
             src/analysis/StereoSampleCapture.cpp
             src/analysis/StereoSampleCapture.h
             src/core/VisualizationDataSource.h
+            src/core/SpectrumAnalysisConfiguration.h
             src/core/VisualizationFrame.h
             src/plugin/PluginEditor.cpp
             src/plugin/PluginEditor.h
@@ -409,8 +412,8 @@ if(BUILD_TESTING)
     source_group(TREE "${CMAKE_CURRENT_SOURCE_DIR}" FILES
         src/analysis/AnalysisCoordinator.cpp
         src/analysis/AnalysisCoordinator.h
-        src/analysis/HannSpectrumAnalyzer.cpp
-        src/analysis/HannSpectrumAnalyzer.h
+        src/analysis/SpectrumAnalyzer.cpp
+        src/analysis/SpectrumAnalyzer.h
         src/analysis/PeakRmsBallistics.cpp
         src/analysis/PeakRmsBallistics.h
         src/analysis/SharedAnalysisScheduler.cpp
@@ -420,6 +423,7 @@ if(BUILD_TESTING)
         src/analysis/StereoSampleCapture.cpp
         src/analysis/StereoSampleCapture.h
         src/core/VisualizationDataSource.h
+        src/core/SpectrumAnalysisConfiguration.h
         src/core/VisualizationFrame.h
         src/plugin/PluginEditor.cpp
         src/plugin/PluginEditor.h

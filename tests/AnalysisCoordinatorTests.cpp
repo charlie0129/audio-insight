@@ -36,6 +36,21 @@ bool waitForFrame(AnalysisCoordinator& coordinator, VisualizationFrame& frame,
     return false;
 }
 
+template <typename Predicate>
+bool waitForFrameWithoutRequest(AnalysisCoordinator& coordinator, VisualizationFrame& frame,
+    Predicate&& predicate, const std::chrono::milliseconds timeout = 500ms)
+{
+    const auto deadline = std::chrono::steady_clock::now() + timeout;
+    while (std::chrono::steady_clock::now() < deadline) {
+        if (coordinator.copyLatestVisualizationFrame(frame) && predicate(frame))
+            return true;
+
+        std::this_thread::sleep_for(1ms);
+    }
+
+    return false;
+}
+
 [[nodiscard]] bool isDisplayFloor(const float value) noexcept
 {
     return std::abs(value - minimumDisplayDecibels) < 0.0001F;
@@ -183,6 +198,277 @@ public:
                 == beforeClosedCapture.meters.attemptedBlocks);
             expect(
                 afterClosedCapture.scheduler.submitted == beforeClosedCapture.scheduler.submitted);
+        }
+
+        beginTest("FFT-only reconfiguration preserves capture and Peak/RMS state");
+        {
+            AnalysisCoordinator coordinator;
+            coordinator.setVisualizationActive(true);
+
+            std::array<float, fftSize> overSignal { };
+            overSignal.fill(1.1F);
+            coordinator.captureAudioBlock(
+                overSignal.data(), overSignal.data(), overSignal.size(), 48'000.0);
+
+            VisualizationFrame beforeChange;
+            expect(waitForFrame(coordinator, beforeChange, [](const auto& candidate) {
+                return candidate.spectrumValid && candidate.meterValid && candidate.over[0];
+            }));
+
+            const auto telemetryBefore = coordinator.telemetry();
+            constexpr std::array replacements {
+                SpectrumAnalysisConfiguration { 1024, FftWindow::periodicHann, 60 },
+                SpectrumAnalysisConfiguration { 1024, FftWindow::fourTermBlackmanHarris, 60 },
+                SpectrumAnalysisConfiguration { 1024, FftWindow::fourTermBlackmanHarris, 120 },
+            };
+            auto precedingFrame = beforeChange;
+            VisualizationFrame invalidated;
+            for (const auto& replacement : replacements) {
+                coordinator.setSpectrumAnalysisConfiguration(replacement);
+
+                expect(coordinator.copyLatestVisualizationFrame(invalidated),
+                    "FFT reconfiguration did not immediately publish its invalid snapshot");
+                expect(invalidated.generation == beforeChange.generation);
+                expect(invalidated.fftGeneration > precedingFrame.fftGeneration);
+                expect(!invalidated.spectrumValid);
+                expect(invalidated.spectrumSequence > precedingFrame.spectrumSequence);
+                expect(invalidated.spectrumFftSize == replacement.fftSize);
+                expect(invalidated.spectrumBinCount == (replacement.fftSize / 2) + 1);
+                expect(invalidated.meterValid);
+                expect(invalidated.meterSequence == beforeChange.meterSequence);
+                expect(invalidated.capturedFrameEnd == beforeChange.capturedFrameEnd);
+                for (std::size_t channel = 0; channel < 2; ++channel) {
+                    expectWithinAbsoluteError(invalidated.peakDecibels[channel],
+                        beforeChange.peakDecibels[channel], 0.0001F);
+                    expectWithinAbsoluteError(invalidated.rmsDecibels[channel],
+                        beforeChange.rmsDecibels[channel], 0.0001F);
+                    expectWithinAbsoluteError(invalidated.heldPeakDecibels[channel],
+                        beforeChange.heldPeakDecibels[channel], 0.0001F);
+                    expect(invalidated.over[channel] == beforeChange.over[channel]);
+                }
+                precedingFrame = invalidated;
+            }
+
+            const auto telemetryAfterChange = coordinator.telemetry();
+            expect(telemetryAfterChange.fftConfigurationChanges
+                == telemetryBefore.fftConfigurationChanges + replacements.size());
+            expect(telemetryAfterChange.fftGeneration == invalidated.fftGeneration);
+            expect(telemetryAfterChange.configuredFftSize == replacements.back().fftSize);
+            expect(telemetryAfterChange.configuredFftWindow
+                == static_cast<std::uint32_t>(replacements.back().window));
+            expect(telemetryAfterChange.requestedFftSliceRateHz
+                == replacements.back().requestedSliceRateHz);
+
+            std::array<float, StereoSampleCapture::framesPerSlot> quieterSignal { };
+            quieterSignal.fill(0.25F);
+            coordinator.captureAudioBlock(
+                quieterSignal.data(), quieterSignal.data(), quieterSignal.size(), 48'000.0);
+
+            VisualizationFrame warmedUp;
+            expect(waitForFrame(coordinator, warmedUp,
+                [captureGeneration = beforeChange.generation,
+                    fftGeneration = invalidated.fftGeneration](const auto& candidate) {
+                    return candidate.generation == captureGeneration
+                        && candidate.fftGeneration == fftGeneration && candidate.spectrumValid
+                        && candidate.spectrumFftSize == 1024 && candidate.spectrumBinCount == 513;
+                }));
+            expect(warmedUp.meterSequence > invalidated.meterSequence);
+            expectWithinAbsoluteError(
+                warmedUp.heldPeakDecibels[0], beforeChange.heldPeakDecibels[0], 0.0001F);
+            expect(warmedUp.over[0] && warmedUp.over[1]);
+        }
+
+        beginTest("One normal capture slot is not backlog for a 1024-point FFT");
+        {
+            AnalysisCoordinator coordinator;
+            coordinator.setSpectrumAnalysisConfiguration({ 1024, FftWindow::periodicHann, 15 });
+            coordinator.setVisualizationActive(true);
+
+            std::array<float, StereoSampleCapture::framesPerSlot> samples { };
+            samples.fill(0.25F);
+            coordinator.captureAudioBlock(samples.data(), samples.data(), samples.size(), 48'000.0);
+
+            VisualizationFrame frame;
+            expect(waitForFrame(
+                coordinator, frame, [](const auto& candidate) { return candidate.spectrumValid; }));
+            expect(frame.spectrumFftSize == 1024);
+            expect(frame.spectrumBinCount == 513);
+
+            const auto telemetry = coordinator.telemetry();
+            expect(telemetry.capture.reclaimedReadyChunks == 0);
+            expect(telemetry.capture.droppedIncomingChunks == 0);
+            expect(telemetry.backlogDiscardedFrames == 0,
+                "A single ordinary 2048-frame capture slot was truncated as backlog");
+            expect(telemetry.spectrumTransforms == 1);
+            expect(telemetry.spectrumCapturedFrameEnd == 1024);
+            expect(telemetry.meterCapturedFrameEnd == StereoSampleCapture::framesPerSlot);
+        }
+
+        beginTest("A capture gap publishes a sequenced invalid Spectrum before warm-up");
+        {
+            AnalysisCoordinator coordinator;
+            coordinator.setSpectrumAnalysisConfiguration({ 16384, FftWindow::periodicHann, 60 });
+            coordinator.setVisualizationActive(true);
+
+            std::array<float, maximumFftSize> initialSignal { };
+            initialSignal.fill(0.25F);
+            coordinator.captureAudioBlock(
+                initialSignal.data(), initialSignal.data(), initialSignal.size(), 48'000.0);
+
+            VisualizationFrame valid;
+            expect(waitForFrame(
+                coordinator, valid, [](const auto& candidate) { return candidate.spectrumValid; }));
+
+            constexpr std::array<float, 64> shortChunk { };
+            for (std::size_t chunk = 0; chunk < StereoSampleCapture::slotCount + 1; ++chunk) {
+                coordinator.captureAudioBlock(
+                    shortChunk.data(), shortChunk.data(), shortChunk.size(), 48'000.0);
+            }
+
+            VisualizationFrame invalidated;
+            expect(waitForFrame(coordinator, invalidated,
+                [capturedFrameEnd = valid.capturedFrameEnd](const auto& candidate) {
+                    return candidate.capturedFrameEnd > capturedFrameEnd
+                        && !candidate.spectrumValid;
+                }));
+            expect(invalidated.generation == valid.generation);
+            expect(invalidated.fftGeneration == valid.fftGeneration);
+            expect(invalidated.spectrumSequence > valid.spectrumSequence,
+                "Capture-gap invalidation reused the preceding valid Spectrum sequence");
+            expect(coordinator.telemetry().capture.reclaimedReadyChunks > 0);
+        }
+
+        beginTest("A 15 Hz FFT request rate still services meters at 60 Hz");
+        {
+            auto establishedTimingWindow = false;
+            auto servicedSecondCapture = false;
+
+            for (auto attempt = 0; attempt < 4 && !establishedTimingWindow; ++attempt) {
+                AnalysisCoordinator coordinator;
+                coordinator.setSpectrumAnalysisConfiguration({ 1024, FftWindow::periodicHann, 15 });
+                coordinator.setVisualizationActive(true);
+
+                std::array<float, 64> samples { };
+                samples.fill(0.25F);
+                coordinator.captureAudioBlock(
+                    samples.data(), samples.data(), samples.size(), 48'000.0);
+
+                const auto firstRequest = std::chrono::steady_clock::now();
+                coordinator.requestAnalysis();
+                while (coordinator.telemetry().jobsCompleted == 0
+                    && std::chrono::steady_clock::now() - firstRequest < 55ms) {
+                    std::this_thread::yield();
+                }
+
+                if (coordinator.telemetry().jobsCompleted == 0)
+                    continue;
+
+                while (std::chrono::steady_clock::now() - firstRequest < 25ms)
+                    std::this_thread::yield();
+
+                if (std::chrono::steady_clock::now() - firstRequest >= 60ms)
+                    continue;
+
+                establishedTimingWindow = true;
+                const auto submittedBeforeSecond = coordinator.telemetry().scheduler.submitted;
+                coordinator.captureAudioBlock(
+                    samples.data(), samples.data(), samples.size(), 48'000.0);
+                coordinator.requestAnalysis();
+                const auto secondRequestAccepted
+                    = coordinator.telemetry().scheduler.submitted == submittedBeforeSecond + 1;
+
+                VisualizationFrame second;
+                servicedSecondCapture = secondRequestAccepted
+                    && waitForFrameWithoutRequest(coordinator, second,
+                        [expectedFrameEnd = samples.size() * 2](const auto& candidate) {
+                            return candidate.meterValid
+                                && candidate.capturedFrameEnd == expectedFrameEnd;
+                        });
+            }
+
+            expect(establishedTimingWindow,
+                "The test machine could not establish the 60-vs-15 Hz timing window");
+            expect(servicedSecondCapture,
+                "The 15 Hz FFT cadence incorrectly throttled a meter-only update");
+        }
+
+        beginTest("A 120 Hz FFT request rate is not capped by a 60 Hz service gate");
+        {
+            auto establishedTimingWindow = false;
+            auto servicedSecondCapture = false;
+
+            for (auto attempt = 0; attempt < 4 && !establishedTimingWindow; ++attempt) {
+                AnalysisCoordinator coordinator;
+                coordinator.setSpectrumAnalysisConfiguration(
+                    { 1024, FftWindow::periodicHann, 120 });
+                coordinator.setVisualizationActive(true);
+
+                std::array<float, 32> samples { };
+                samples.fill(0.25F);
+                coordinator.captureAudioBlock(
+                    samples.data(), samples.data(), samples.size(), 48'000.0);
+
+                const auto firstRequest = std::chrono::steady_clock::now();
+                coordinator.requestAnalysis();
+                while (coordinator.telemetry().jobsCompleted == 0
+                    && std::chrono::steady_clock::now() - firstRequest < 14ms) {
+                    std::this_thread::yield();
+                }
+
+                if (coordinator.telemetry().jobsCompleted == 0)
+                    continue;
+
+                while (std::chrono::steady_clock::now() - firstRequest < 10ms)
+                    std::this_thread::yield();
+
+                if (std::chrono::steady_clock::now() - firstRequest >= 14ms)
+                    continue;
+
+                establishedTimingWindow = true;
+                const auto submittedBeforeSecond = coordinator.telemetry().scheduler.submitted;
+                coordinator.captureAudioBlock(
+                    samples.data(), samples.data(), samples.size(), 48'000.0);
+                coordinator.requestAnalysis();
+                const auto secondRequestAccepted
+                    = coordinator.telemetry().scheduler.submitted == submittedBeforeSecond + 1;
+
+                VisualizationFrame second;
+                servicedSecondCapture = secondRequestAccepted
+                    && waitForFrameWithoutRequest(coordinator, second,
+                        [expectedFrameEnd = samples.size() * 2](const auto& candidate) {
+                            return candidate.meterValid
+                                && candidate.capturedFrameEnd == expectedFrameEnd;
+                        });
+                servicedSecondCapture = servicedSecondCapture
+                    && coordinator.telemetry().meterCapturedFrameEnd == samples.size() * 2;
+            }
+
+            expect(establishedTimingWindow,
+                "The test machine could not establish the 120-vs-60 Hz timing window");
+            expect(servicedSecondCapture,
+                "A second capture inside one 60 Hz period was not serviced at 120 Hz");
+        }
+
+        beginTest("Presentation-only changes do not reconfigure an unchanged FFT");
+        {
+            AnalysisCoordinator coordinator;
+            coordinator.setVisualizationActive(true);
+
+            VisualizationFrame initial;
+            expect(coordinator.copyLatestVisualizationFrame(initial));
+            const auto telemetryBefore = coordinator.telemetry();
+
+            // Frequency spacing is intentionally absent from the worker-side
+            // configuration. Its caller therefore republishes this same FFT
+            // subset when only the presentation mapping changes.
+            coordinator.setSpectrumAnalysisConfiguration({ });
+
+            const auto telemetryAfter = coordinator.telemetry();
+            expect(telemetryAfter.fftGeneration == telemetryBefore.fftGeneration);
+            expect(
+                telemetryAfter.fftConfigurationChanges == telemetryBefore.fftConfigurationChanges);
+            expect(telemetryAfter.scheduler.submitted == telemetryBefore.scheduler.submitted);
+            expect(!coordinator.copyLatestVisualizationFrame(initial));
         }
 
         beginTest("A saturated capture queue fast-forwards to one newest FFT window");

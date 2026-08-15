@@ -5,6 +5,7 @@
 #include "SharedAnalysisScheduler.h"
 #include "StereoMeterAccumulator.h"
 #include "StereoSampleCapture.h"
+#include "core/SpectrumAnalysisConfiguration.h"
 #include "core/VisualizationDataSource.h"
 
 #include <atomic>
@@ -39,6 +40,11 @@ struct AnalysisTelemetry {
     std::uint64_t emptyAnalysisRequestsAvoided = 0;
     std::uint64_t staleFramesPublished = 0;
     std::uint64_t peakRmsUserResets = 0;
+    std::uint64_t fftConfigurationChanges = 0;
+    std::uint64_t fftGeneration = 0;
+    std::uint32_t configuredFftSize = 0;
+    std::uint32_t configuredFftWindow = 0;
+    std::uint32_t requestedFftSliceRateHz = 0;
 };
 
 /**
@@ -71,6 +77,12 @@ public:
     */
     void setCaptureFormat(double sampleRate, std::uint32_t channelCount) noexcept;
 
+    /**
+        Applies worker-side FFT settings without changing the capture generation
+        or resetting Peak/RMS. This is strictly a non-audio-thread operation.
+    */
+    void setSpectrumAnalysisConfiguration(SpectrumAnalysisConfiguration configuration) noexcept;
+
     void requestAnalysis() noexcept override;
     void setVisualizationActive(bool shouldBeActive) noexcept override;
     void resetPeakRms() noexcept override;
@@ -93,6 +105,7 @@ private:
     struct State;
 
     [[nodiscard]] bool restartActiveGenerationLocked(bool discardPendingCapture);
+    [[nodiscard]] static std::uint64_t nextNonzeroGeneration(std::uint64_t& counter) noexcept;
 
     static_assert(std::atomic<std::uint64_t>::is_always_lock_free);
     static_assert(std::atomic<std::int64_t>::is_always_lock_free);
@@ -114,6 +127,10 @@ private:
     std::uint32_t configuredChannelCount_ = 0;
     bool hasConfiguredFormat_ = false;
     bool staleClearRequested_ = false;
+    SpectrumAnalysisConfiguration spectrumConfiguration_;
+    std::int64_t analysisRequestPeriodNanoseconds_ = 16'666'667;
+    std::uint64_t captureGenerationCounter_ = 0;
+    std::uint64_t fftGenerationCounter_ = 1;
 
     // Serialises renderer requests against non-real-time lifecycle changes so
     // no request can slip in after deactivation has drained the client.

@@ -2,6 +2,8 @@
 
 #pragma once
 
+#include "core/SpectrumAnalysisConfiguration.h"
+
 #include <juce_data_structures/juce_data_structures.h>
 
 #include <cstdint>
@@ -28,13 +30,6 @@ struct SrgbColor final {
     }
 
     constexpr bool operator==(const SrgbColor&) const noexcept = default;
-};
-
-enum class FftWindow {
-    rectangular,
-    periodicHann,
-    fourTermBlackmanHarris,
-    fiveTermFlatTop,
 };
 
 enum class SpectrumSlope {

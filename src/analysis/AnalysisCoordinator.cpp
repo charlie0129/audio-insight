@@ -2,7 +2,7 @@
 
 #include "AnalysisCoordinator.h"
 
-#include "HannSpectrumAnalyzer.h"
+#include "SpectrumAnalyzer.h"
 #include <algorithm>
 #include <array>
 #include <atomic>
@@ -18,7 +18,6 @@ namespace audio_insight {
 namespace {
 using Clock = std::chrono::steady_clock;
 
-constexpr auto analysisRequestPeriod = std::chrono::nanoseconds { 16'666'667 };
 constexpr auto requestDeadlineTolerance = std::chrono::milliseconds { 1 };
 constexpr auto requestDeadlineToleranceNanoseconds
     = std::chrono::duration_cast<std::chrono::nanoseconds>(requestDeadlineTolerance).count();
@@ -189,14 +188,16 @@ struct AnalysisCoordinator::State final : SharedAnalysisScheduler::JobClient {
         captureRevision.fetch_add(1, std::memory_order_release);
     }
 
-    void beginGeneration(const std::uint64_t generation) noexcept
+    void beginGeneration(
+        const std::uint64_t captureGeneration, const std::uint64_t jobGeneration) noexcept
     {
         workingFrame = { };
-        workingFrame.spectrumDecibels.fill(minimumDisplayDecibels);
-        workingFrame.generation = generation;
+        workingFrame.spectrumDecibels.fill(minimumSpectrumDecibels);
+        workingFrame.generation = captureGeneration;
         newestCapturedFrameEnd = 0;
         nextCoalescedInputSequence = 1;
         spectrum.reset(&workingFrame);
+        workingFrame.spectrumSequence = nextSpectrumSequence++;
         spectrumCapturedFrameEnd.store(0, std::memory_order_relaxed);
         meterCapturedFrameEnd.store(0, std::memory_order_relaxed);
         hasPublishedAudioFrame.store(false, std::memory_order_relaxed);
@@ -209,10 +210,35 @@ struct AnalysisCoordinator::State final : SharedAnalysisScheduler::JobClient {
 
         static_cast<void>(snapshots.publish(workingFrame));
 
-        // Publish the generation only after all worker-owned state and the
-        // initial snapshot are complete. A defensive generation check in
-        // execute() can therefore never expose a partially initialised state.
-        currentGeneration.store(generation, std::memory_order_release);
+        // Publish generations only after all worker-owned state and the initial
+        // snapshot are complete. Defensive checks in execute() can therefore
+        // never expose partially initialised state.
+        currentCaptureGeneration.store(captureGeneration, std::memory_order_release);
+        currentJobGeneration.store(jobGeneration, std::memory_order_release);
+    }
+
+    [[nodiscard]] bool reconfigureSpectrum(const SpectrumAnalysisConfiguration& configuration,
+        const std::uint64_t fftGeneration, const std::uint64_t jobGeneration) noexcept
+    {
+        if (!spectrum.reconfigure(configuration, fftGeneration, &workingFrame))
+            return false;
+
+        workingFrame.generation = currentCaptureGeneration.load(std::memory_order_acquire);
+        workingFrame.spectrumSequence = nextSpectrumSequence++;
+        spectrumCapturedFrameEnd.store(0, std::memory_order_relaxed);
+        configuredFftSize.store(
+            static_cast<std::uint32_t>(configuration.fftSize), std::memory_order_relaxed);
+        configuredFftWindow.store(
+            static_cast<std::uint32_t>(configuration.window), std::memory_order_relaxed);
+        requestedFftSliceRateHz.store(
+            static_cast<std::uint32_t>(configuration.requestedSliceRateHz),
+            std::memory_order_relaxed);
+        currentFftGeneration.store(fftGeneration, std::memory_order_relaxed);
+        fftConfigurationChanges.fetch_add(1, std::memory_order_relaxed);
+        static_cast<void>(snapshots.publish(workingFrame));
+
+        currentJobGeneration.store(jobGeneration, std::memory_order_release);
+        return true;
     }
 
     void discardPendingCapture() noexcept
@@ -265,6 +291,7 @@ struct AnalysisCoordinator::State final : SharedAnalysisScheduler::JobClient {
             && (workingFrame.channelCount != reading.channelCount
                 || sampleRatesDiffer(workingFrame.sampleRate, reading.sampleRate))) {
             spectrum.reset(&workingFrame);
+            workingFrame.spectrumSequence = nextSpectrumSequence++;
         }
 
         workingFrame.peakDecibels = reading.peakDecibels;
@@ -313,9 +340,10 @@ struct AnalysisCoordinator::State final : SharedAnalysisScheduler::JobClient {
                 jobsCompleted.fetch_add(1, std::memory_order_relaxed);
         };
 
-        const auto generation = context.generation();
-        if (context.stopRequested()
-            || generation != currentGeneration.load(std::memory_order_acquire)) {
+        const auto jobGeneration = context.generation();
+        const auto captureGeneration = currentCaptureGeneration.load(std::memory_order_acquire);
+        if (context.stopRequested() || captureGeneration == 0
+            || jobGeneration != currentJobGeneration.load(std::memory_order_acquire)) {
             finish(true);
             return;
         }
@@ -332,6 +360,9 @@ struct AnalysisCoordinator::State final : SharedAnalysisScheduler::JobClient {
         bool hasPreviousChunk = false;
         bool inputFollowsDiscontinuity = false;
         std::uint64_t discardedFrames = 0;
+        const auto activeFftSize = spectrum.configuredFftSize();
+        auto retentionCapacity = std::max(activeFftSize, StereoSampleCapture::framesPerSlot);
+        auto retainedChunkCount = std::size_t { 0 };
 
         for (std::size_t consumed = 0; consumed < StereoSampleCapture::slotCount; ++consumed) {
             if (context.stopRequested()) {
@@ -343,9 +374,30 @@ struct AnalysisCoordinator::State final : SharedAnalysisScheduler::JobClient {
                 break;
 
             const auto& chunk = handle.view();
-            if (chunk.generation != generation) {
+            if (chunk.generation != captureGeneration) {
                 ignoredGenerationChunks.fetch_add(1, std::memory_order_relaxed);
                 continue;
+            }
+
+            ++retainedChunkCount;
+            if (retainedChunkCount == 2) {
+                // One ordinary capture slot must remain intact even for a 1024-
+                // point FFT so hop cadence is not mistaken for backlog. Once a
+                // second slot is pending, latest-wins analysis keeps only the
+                // newest complete FFT window.
+                retentionCapacity = activeFftSize;
+                if (retainedFrames > retentionCapacity) {
+                    const auto overflow = retainedFrames - retentionCapacity;
+                    std::memmove(spectrumLeftScratch.data(),
+                        spectrumLeftScratch.data() + static_cast<std::ptrdiff_t>(overflow),
+                        retentionCapacity * sizeof(float));
+                    std::memmove(spectrumRightScratch.data(),
+                        spectrumRightScratch.data() + static_cast<std::ptrdiff_t>(overflow),
+                        retentionCapacity * sizeof(float));
+                    retainedFrames = retentionCapacity;
+                    discardedFrames += overflow;
+                    inputFollowsDiscontinuity = true;
+                }
             }
 
             const auto hasValidRange = chunk.capturedFrameEnd >= chunk.frameCount;
@@ -367,14 +419,14 @@ struct AnalysisCoordinator::State final : SharedAnalysisScheduler::JobClient {
 
             auto chunkOffset = std::size_t { 0 };
             auto chunkFrames = chunk.frameCount;
-            if (chunkFrames >= fftSize) {
-                discardedFrames += retainedFrames + (chunkFrames - fftSize);
-                chunkOffset = chunkFrames - fftSize;
-                chunkFrames = fftSize;
+            if (chunkFrames > retentionCapacity) {
+                discardedFrames += retainedFrames + (chunkFrames - retentionCapacity);
+                chunkOffset = chunkFrames - retentionCapacity;
+                chunkFrames = retentionCapacity;
                 retainedFrames = 0;
                 inputFollowsDiscontinuity = true;
-            } else if (retainedFrames + chunkFrames > fftSize) {
-                const auto overflow = retainedFrames + chunkFrames - fftSize;
+            } else if (retainedFrames + chunkFrames > retentionCapacity) {
+                const auto overflow = retainedFrames + chunkFrames - retentionCapacity;
                 const auto remaining = retainedFrames - overflow;
                 std::memmove(spectrumLeftScratch.data(),
                     spectrumLeftScratch.data() + static_cast<std::ptrdiff_t>(overflow),
@@ -420,7 +472,7 @@ struct AnalysisCoordinator::State final : SharedAnalysisScheduler::JobClient {
                 spectrumLeftScratch.data(),
                 spectrumRightScratch.data(),
                 retainedFrames,
-                generation,
+                captureGeneration,
                 nextCoalescedInputSequence++,
                 retainedFrameEnd,
                 retainedSampleRate,
@@ -430,17 +482,20 @@ struct AnalysisCoordinator::State final : SharedAnalysisScheduler::JobClient {
             const auto spectrumWasValid = workingFrame.spectrumValid;
             const auto producedSpectrum = spectrum.process(coalescedInput, workingFrame);
             if (producedSpectrum) {
+                workingFrame.spectrumSequence = nextSpectrumSequence++;
                 newestCapturedFrameEnd
                     = std::max(newestCapturedFrameEnd, workingFrame.capturedFrameEnd);
                 spectrumCapturedFrameEnd.store(
                     workingFrame.capturedFrameEnd, std::memory_order_relaxed);
+            } else if (spectrumWasValid && !workingFrame.spectrumValid) {
+                workingFrame.spectrumSequence = nextSpectrumSequence++;
             }
             frameChanged = frameChanged || producedSpectrum
                 || spectrumWasValid != workingFrame.spectrumValid;
         }
 
         StereoMeterReading meterReading;
-        if (meters.consumeLatest(meterReading) && meterReading.generation == generation) {
+        if (meters.consumeLatest(meterReading) && meterReading.generation == captureGeneration) {
             applyPeakRmsReading(meterReading);
             newestCapturedFrameEnd
                 = std::max(newestCapturedFrameEnd, meterReading.capturedFrameEnd);
@@ -466,7 +521,8 @@ struct AnalysisCoordinator::State final : SharedAnalysisScheduler::JobClient {
         }
 
         if (context.stopRequested()
-            || generation != currentGeneration.load(std::memory_order_acquire)) {
+            || jobGeneration != currentJobGeneration.load(std::memory_order_acquire)
+            || captureGeneration != currentCaptureGeneration.load(std::memory_order_acquire)) {
             finish(true);
             return;
         }
@@ -482,10 +538,7 @@ struct AnalysisCoordinator::State final : SharedAnalysisScheduler::JobClient {
             workingFrame.peakDecibels.fill(minimumDisplayDecibels);
             workingFrame.rmsDecibels.fill(minimumDisplayDecibels);
             workingFrame.meterSequence = nextMeterSequence++;
-            workingFrame.spectrumSequence
-                = workingFrame.spectrumSequence == std::numeric_limits<std::uint64_t>::max()
-                ? 1
-                : workingFrame.spectrumSequence + 1;
+            workingFrame.spectrumSequence = nextSpectrumSequence++;
             hasPublishedAudioFrame.store(false, std::memory_order_release);
             staleFramesPublished.fetch_add(1, std::memory_order_relaxed);
             frameChanged = true;
@@ -494,7 +547,7 @@ struct AnalysisCoordinator::State final : SharedAnalysisScheduler::JobClient {
         }
 
         if (frameChanged) {
-            workingFrame.generation = generation;
+            workingFrame.generation = captureGeneration;
             workingFrame.capturedFrameEnd = newestCapturedFrameEnd;
             workingFrame.droppedChunks = samples.telemetry().lostChunks();
             static_cast<void>(snapshots.publish(workingFrame));
@@ -534,22 +587,29 @@ struct AnalysisCoordinator::State final : SharedAnalysisScheduler::JobClient {
             = emptyAnalysisRequestsAvoided.load(std::memory_order_relaxed);
         result.staleFramesPublished = staleFramesPublished.load(std::memory_order_relaxed);
         result.peakRmsUserResets = peakRmsUserResets.load(std::memory_order_relaxed);
+        result.fftConfigurationChanges = fftConfigurationChanges.load(std::memory_order_relaxed);
+        result.fftGeneration = currentFftGeneration.load(std::memory_order_relaxed);
+        result.configuredFftSize = configuredFftSize.load(std::memory_order_relaxed);
+        result.configuredFftWindow = configuredFftWindow.load(std::memory_order_relaxed);
+        result.requestedFftSliceRateHz = requestedFftSliceRateHz.load(std::memory_order_relaxed);
         return result;
     }
 
     StereoSampleCapture samples;
     StereoMeterAccumulator meters;
-    HannSpectrumAnalyzer spectrum;
+    SpectrumAnalyzer spectrum;
     VisualizationSnapshotExchange snapshots;
-    std::array<float, fftSize> spectrumLeftScratch { };
-    std::array<float, fftSize> spectrumRightScratch { };
+    std::array<float, maximumFftSize> spectrumLeftScratch { };
+    std::array<float, maximumFftSize> spectrumRightScratch { };
     VisualizationFrame workingFrame;
     std::uint64_t newestCapturedFrameEnd = 0;
     std::uint64_t nextCoalescedInputSequence = 1;
+    std::uint64_t nextSpectrumSequence = 1;
     std::uint64_t nextMeterSequence = 1;
     std::uint64_t requiredUserResetEpoch = 0;
     std::uint64_t requiredLiveClearEpoch = 0;
-    std::atomic<std::uint64_t> currentGeneration { 0 };
+    std::atomic<std::uint64_t> currentJobGeneration { 0 };
+    std::atomic<std::uint64_t> currentCaptureGeneration { 0 };
     std::atomic<std::uint64_t> captureRevision { 0 };
     std::atomic<std::uint64_t> lastAnalyzedCaptureRevision { 0 };
     std::atomic<bool> hasPublishedAudioFrame { false };
@@ -571,6 +631,12 @@ struct AnalysisCoordinator::State final : SharedAnalysisScheduler::JobClient {
     std::atomic<std::uint64_t> emptyAnalysisRequestsAvoided { 0 };
     std::atomic<std::uint64_t> staleFramesPublished { 0 };
     std::atomic<std::uint64_t> peakRmsUserResets { 0 };
+    std::atomic<std::uint64_t> fftConfigurationChanges { 0 };
+    std::atomic<std::uint64_t> currentFftGeneration { 1 };
+    std::atomic<std::uint32_t> configuredFftSize { static_cast<std::uint32_t>(fftSize) };
+    std::atomic<std::uint32_t> configuredFftWindow { static_cast<std::uint32_t>(
+        FftWindow::periodicHann) };
+    std::atomic<std::uint32_t> requestedFftSliceRateHz { 60 };
 };
 
 AnalysisCoordinator::AnalysisCoordinator()
@@ -632,6 +698,45 @@ void AnalysisCoordinator::setCaptureFormat(
     }
 }
 
+void AnalysisCoordinator::setSpectrumAnalysisConfiguration(
+    SpectrumAnalysisConfiguration configuration) noexcept
+{
+    try {
+        const std::lock_guard lifecycleLock(lifecycleMutex_);
+        if (client_ == nullptr || !SpectrumAnalyzer::isSupportedConfiguration(configuration)
+            || configuration == spectrumConfiguration_) {
+            return;
+        }
+
+        auto jobGeneration = client_->generation();
+        const auto isActive = captureGeneration_.load(std::memory_order_acquire) != 0;
+        if (isActive) {
+            jobGeneration = client_->cancelAndAdvanceGeneration();
+            if (!client_->waitUntilIdle())
+                return;
+        }
+
+        const auto fftGeneration = nextNonzeroGeneration(fftGenerationCounter_);
+        if (!state_->reconfigureSpectrum(configuration, fftGeneration, jobGeneration))
+            return;
+
+        spectrumConfiguration_ = configuration;
+        const auto serviceRate = std::max(60, configuration.requestedSliceRateHz);
+        analysisRequestPeriodNanoseconds_
+            = std::max<std::int64_t>(1, std::llround(1'000'000'000.0 / serviceRate));
+        nextAnalysisRequestNanoseconds_.store(0, std::memory_order_relaxed);
+
+        // Peak/RMS is producer-owned and keeps advancing throughout this
+        // worker-only FFT boundary. One immediate job catches up its coalesced
+        // endpoint and begins the new FFT overlap without waiting for a later
+        // display callback.
+        if (isActive)
+            static_cast<void>(client_->request());
+    } catch (...) {
+        // A presentation-analysis setting must never affect transparent audio.
+    }
+}
+
 void AnalysisCoordinator::requestAnalysis() noexcept
 {
     auto staleArmed = false;
@@ -673,7 +778,7 @@ void AnalysisCoordinator::requestAnalysis() noexcept
         if (due != 0 && now + requestDeadlineToleranceNanoseconds < due)
             return;
 
-        const auto period = analysisRequestPeriod.count();
+        const auto period = analysisRequestPeriodNanoseconds_;
         const auto nextDue = due == 0 || now - due > period ? now + period : due + period;
         if (!nextAnalysisRequestNanoseconds_.compare_exchange_strong(
                 due, nextDue, std::memory_order_relaxed, std::memory_order_relaxed)) {
@@ -741,14 +846,15 @@ bool AnalysisCoordinator::restartActiveGenerationLocked(const bool discardPendin
     staleClearRequested_ = false;
     state_->cancelStaleClear();
 
-    const auto generation = client_->cancelAndAdvanceGeneration();
+    const auto jobGeneration = client_->cancelAndAdvanceGeneration();
     if (!client_->waitUntilIdle())
         return false;
 
     if (discardPendingCapture)
         state_->discardPendingCapture();
 
-    state_->beginGeneration(generation);
+    const auto captureGeneration = nextNonzeroGeneration(captureGenerationCounter_);
+    state_->beginGeneration(captureGeneration, jobGeneration);
     const auto now
         = std::chrono::duration_cast<std::chrono::nanoseconds>(Clock::now().time_since_epoch())
               .count();
@@ -758,8 +864,16 @@ bool AnalysisCoordinator::restartActiveGenerationLocked(const bool discardPendin
     lastObservedCaptureNanoseconds_ = now;
     staleClearRequested_ = false;
     nextAnalysisRequestNanoseconds_.store(0, std::memory_order_relaxed);
-    captureGeneration_.store(generation, std::memory_order_release);
+    captureGeneration_.store(captureGeneration, std::memory_order_release);
     return true;
+}
+
+std::uint64_t AnalysisCoordinator::nextNonzeroGeneration(std::uint64_t& counter) noexcept
+{
+    ++counter;
+    if (counter == 0)
+        ++counter;
+    return counter;
 }
 
 void AnalysisCoordinator::resetPeakRms() noexcept

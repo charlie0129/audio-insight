@@ -48,9 +48,9 @@ static_assert(aggregateFieldCount<MetalRenderTelemetry>() == 65);
 static_assert(aggregateFieldCount<StereoSampleCapture::Telemetry>() == 9);
 static_assert(aggregateFieldCount<StereoMeterAccumulator::Telemetry>() == 7);
 static_assert(aggregateFieldCount<SharedAnalysisScheduler::Counters>() == 3);
-static_assert(aggregateFieldCount<AnalysisTelemetry>() == 22);
+static_assert(aggregateFieldCount<AnalysisTelemetry>() == 27);
 
-constexpr std::array<std::string_view, 103> expectedRawFieldNames {
+constexpr std::array<std::string_view, 108> expectedRawFieldNames {
     "metal.epoch",
     "metal.displayLinkCallbacks",
     "metal.submittedFrames",
@@ -135,6 +135,11 @@ constexpr std::array<std::string_view, 103> expectedRawFieldNames {
     "analysis.scheduler.submitted",
     "analysis.scheduler.executed",
     "analysis.scheduler.cancelled",
+    "analysis.fftConfigurationChanges",
+    "analysis.fftGeneration",
+    "analysis.configuredFftSize",
+    "analysis.configuredFftWindow",
+    "analysis.requestedFftSliceRateHz",
     "analysis.jobsStarted",
     "analysis.jobsCompleted",
     "analysis.jobsStopped",

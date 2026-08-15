@@ -380,6 +380,19 @@ void appendRawSections(
         "Coalesced or cancelled requests", analysis.scheduler.cancelled));
     sections.emplace_back(std::move(scheduler));
 
+    PerformanceMetricGroup fftConfiguration { "FFT analysis configuration", { } };
+    fftConfiguration.rows.emplace_back(rawUnsigned("analysis.fftConfigurationChanges",
+        "FFT configuration changes", analysis.fftConfigurationChanges, "changes"));
+    fftConfiguration.rows.emplace_back(
+        rawUnsigned("analysis.fftGeneration", "FFT generation", analysis.fftGeneration));
+    fftConfiguration.rows.emplace_back(rawUnsigned("analysis.configuredFftSize",
+        "Configured FFT size", analysis.configuredFftSize, "samples"));
+    fftConfiguration.rows.emplace_back(rawUnsigned("analysis.configuredFftWindow",
+        "Configured FFT window enum", analysis.configuredFftWindow));
+    fftConfiguration.rows.emplace_back(rawUnsigned("analysis.requestedFftSliceRateHz",
+        "Requested FFT slice rate", analysis.requestedFftSliceRateHz, "Hz"));
+    sections.emplace_back(std::move(fftConfiguration));
+
     PerformanceMetricGroup jobs { "Analysis jobs and publication", { } };
     jobs.rows.emplace_back(
         rawUnsigned("analysis.jobsStarted", "Jobs started", analysis.jobsStarted));
@@ -646,6 +659,9 @@ void buildRates(const PerformanceMetricsSnapshot& current,
     appendRate(rates, "analysis.peakRmsUserResets", "Peak/RMS user resets", "resets/s",
         current.analysis.peakRmsUserResets, previous.analysis.peakRmsUserResets, elapsedSeconds,
         baselineIsValid);
+    appendRate(rates, "analysis.fftConfigurationChanges", "FFT configuration changes", "changes/s",
+        current.analysis.fftConfigurationChanges, previous.analysis.fftConfigurationChanges,
+        elapsedSeconds, baselineIsValid);
 }
 
 void appendIntervalSample(

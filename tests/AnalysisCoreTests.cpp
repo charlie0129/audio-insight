@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 
-#include "analysis/HannSpectrumAnalyzer.h"
+#include "analysis/SpectrumAnalyzer.h"
 #include "analysis/StereoMeterAccumulator.h"
 #include "analysis/StereoSampleCapture.h"
 
@@ -11,6 +11,7 @@
 #include <cmath>
 #include <cstddef>
 #include <numbers>
+#include <vector>
 
 namespace audio_insight {
 namespace {
@@ -335,9 +336,9 @@ public:
     }
 };
 
-class HannSpectrumAnalyzerTests final : public juce::UnitTest {
+class SpectrumAnalyzerTests final : public juce::UnitTest {
 public:
-    HannSpectrumAnalyzerTests() : UnitTest("Hann spectrum analyzer", "audio-insight")
+    SpectrumAnalyzerTests() : UnitTest("Spectrum analyzer", "audio-insight")
     {
     }
 
@@ -355,19 +356,162 @@ public:
                         * static_cast<double>(frame) / static_cast<double>(fftSize)));
             }
 
-            HannSpectrumAnalyzer analyzer;
+            SpectrumAnalyzer analyzer;
             VisualizationFrame frame;
             const CapturedStereoChunkView chunk { left.data(), right.data(), left.size(), 2, 1,
                 fftSize, 48000.0, false };
             expect(analyzer.process(chunk, frame));
             expect(frame.spectrumValid);
             expect(frame.generation == 2);
+            expect(frame.fftGeneration == 1);
             expect(frame.capturedFrameEnd == fftSize);
+            expect(frame.spectrumFftSize == fftSize);
+            expect(frame.spectrumBinCount == spectrumBinCount);
             expectWithinAbsoluteError(frame.spectrumDecibels[sineBin], 0.0F, 0.1F);
 
-            const auto maximum = std::max_element(
-                frame.spectrumDecibels.begin() + 1, frame.spectrumDecibels.end());
+            const auto maximum = std::max_element(frame.spectrumDecibels.begin() + 1,
+                frame.spectrumDecibels.begin()
+                    + static_cast<std::ptrdiff_t>(frame.spectrumBinCount));
             expect(static_cast<std::size_t>(maximum - frame.spectrumDecibels.begin()) == sineBin);
+        }
+
+        beginTest("Every supported size and window calibrates a full-scale bin to zero dB");
+        {
+            constexpr std::array supportedFftSizes {
+                std::size_t { 1024 },
+                std::size_t { 2048 },
+                std::size_t { 4096 },
+                std::size_t { 8192 },
+                std::size_t { 16384 },
+            };
+            constexpr std::array supportedWindows { FftWindow::rectangular, FftWindow::periodicHann,
+                FftWindow::fourTermBlackmanHarris, FftWindow::fiveTermFlatTop };
+            constexpr std::size_t sineBin = 37;
+
+            SpectrumAnalyzer analyzer;
+            std::array<float, maximumFftSize> signal { };
+            auto fftGeneration = std::uint64_t { 2 };
+
+            for (const auto configuredSize : supportedFftSizes) {
+                for (const auto window : supportedWindows) {
+                    const SpectrumAnalysisConfiguration configuration { configuredSize, window,
+                        60 };
+                    VisualizationFrame frame;
+                    expect(analyzer.reconfigure(configuration, fftGeneration, &frame));
+                    expect(!frame.spectrumValid);
+                    expect(frame.fftGeneration == fftGeneration);
+                    expect(frame.spectrumFftSize == configuredSize);
+                    expect(frame.spectrumBinCount == (configuredSize / 2) + 1);
+
+                    for (std::size_t sample = 0; sample < configuredSize; ++sample) {
+                        signal[sample] = std::sin(static_cast<float>(2.0 * std::numbers::pi
+                            * static_cast<double>(sineBin) * static_cast<double>(sample)
+                            / static_cast<double>(configuredSize)));
+                    }
+
+                    expect(analyzer.process({ signal.data(), nullptr, configuredSize, 7, 1,
+                                                configuredSize, 48'000.0, false, 1 },
+                        frame));
+                    expect(frame.spectrumValid);
+                    expectWithinAbsoluteError(frame.spectrumDecibels[sineBin], 0.0F, 0.015F);
+                    ++fftGeneration;
+                }
+            }
+        }
+
+        beginTest("DC and Nyquist bins use edge rather than doubled one-sided normalization");
+        {
+            constexpr std::array supportedFftSizes {
+                std::size_t { 1024 },
+                std::size_t { 2048 },
+                std::size_t { 4096 },
+                std::size_t { 8192 },
+                std::size_t { 16384 },
+            };
+            constexpr std::array supportedWindows { FftWindow::rectangular, FftWindow::periodicHann,
+                FftWindow::fourTermBlackmanHarris, FftWindow::fiveTermFlatTop };
+
+            SpectrumAnalyzer analyzer;
+            std::array<float, maximumFftSize> signal { };
+            auto fftGeneration = std::uint64_t { 32 };
+
+            for (const auto configuredSize : supportedFftSizes) {
+                for (const auto window : supportedWindows) {
+                    const SpectrumAnalysisConfiguration configuration { configuredSize, window,
+                        60 };
+                    VisualizationFrame frame;
+                    expect(analyzer.reconfigure(configuration, fftGeneration, &frame));
+
+                    std::fill_n(signal.begin(), configuredSize, 1.0F);
+                    expect(analyzer.process({ signal.data(), nullptr, configuredSize, 8, 1,
+                                                configuredSize, 48'000.0, false, 1 },
+                        frame));
+                    expectWithinAbsoluteError(frame.spectrumDecibels[0], 0.0F, 0.015F);
+
+                    analyzer.reset(&frame);
+                    for (std::size_t sample = 0; sample < configuredSize; ++sample)
+                        signal[sample] = sample % 2 == 0 ? 1.0F : -1.0F;
+
+                    expect(analyzer.process({ signal.data(), nullptr, configuredSize, 8, 2,
+                                                configuredSize * 2, 48'000.0, false, 1 },
+                        frame));
+                    expectWithinAbsoluteError(
+                        frame.spectrumDecibels[configuredSize / 2], 0.0F, 0.015F);
+                    ++fftGeneration;
+                }
+            }
+        }
+
+        beginTest("Slice rates set independent sample-domain transform hops");
+        {
+            constexpr std::array supportedRates { 15, 30, 60, 120 };
+            constexpr auto configuredSize = std::size_t { 1024 };
+            constexpr auto sampleRate = 48'000.0;
+            std::array<float, configuredSize> warmup { };
+            std::vector<float> oneSecond(static_cast<std::size_t>(sampleRate));
+
+            for (const auto rate : supportedRates) {
+                SpectrumAnalyzer analyzer;
+                const SpectrumAnalysisConfiguration configuration { configuredSize,
+                    FftWindow::periodicHann, rate };
+                VisualizationFrame frame;
+                expect(analyzer.reconfigure(configuration, 2, &frame));
+                expect(analyzer.process({ warmup.data(), nullptr, warmup.size(), 1, 1,
+                                            warmup.size(), sampleRate, false, 1 },
+                    frame));
+
+                const auto transformsBefore = analyzer.statistics().transforms;
+                expect(
+                    analyzer.process({ oneSecond.data(), nullptr, oneSecond.size(), 1, 2,
+                                         warmup.size() + oneSecond.size(), sampleRate, false, 1 },
+                        frame));
+                expect(analyzer.hopSize()
+                    == static_cast<std::size_t>(std::llround(sampleRate / rate)));
+                expect(analyzer.statistics().transforms - transformsBefore
+                    == static_cast<std::uint64_t>(rate));
+            }
+        }
+
+        beginTest("Stereo keeps the greater magnitude independently in every bin");
+        {
+            constexpr auto leftBin = std::size_t { 41 };
+            constexpr auto rightBin = std::size_t { 113 };
+            std::array<float, fftSize> left { };
+            std::array<float, fftSize> right { };
+            for (std::size_t sample = 0; sample < fftSize; ++sample) {
+                const auto phase = 2.0 * std::numbers::pi * static_cast<double>(sample)
+                    / static_cast<double>(fftSize);
+                left[sample] = 0.25F * std::sin(static_cast<float>(leftBin * phase));
+                right[sample] = 0.5F * std::sin(static_cast<float>(rightBin * phase));
+            }
+
+            SpectrumAnalyzer analyzer;
+            VisualizationFrame frame;
+            expect(analyzer.process(
+                { left.data(), right.data(), left.size(), 3, 1, fftSize, 48'000.0, false, 2 },
+                frame));
+            expectWithinAbsoluteError(frame.spectrumDecibels[leftBin], -12.0412F, 0.02F);
+            expectWithinAbsoluteError(frame.spectrumDecibels[rightBin], -6.0206F, 0.02F);
         }
 
         beginTest("A chunk sequence gap clears overlap before another transform");
@@ -377,7 +521,7 @@ public:
                 initial[frame] = std::sin(static_cast<float>(2.0 * std::numbers::pi * 64.0
                     * static_cast<double>(frame) / static_cast<double>(fftSize)));
 
-            HannSpectrumAnalyzer analyzer;
+            SpectrumAnalyzer analyzer;
             VisualizationFrame frame;
             expect(analyzer.process(
                 { initial.data(), initial.data(), initial.size(), 1, 1, fftSize, 48000.0, false },
@@ -403,7 +547,7 @@ public:
         beginTest("An invalid first captured-frame range cannot underflow timing");
         {
             std::array<float, 16> samples { };
-            HannSpectrumAnalyzer analyzer;
+            SpectrumAnalyzer analyzer;
             VisualizationFrame frame;
             frame.spectrumValid = true;
 
@@ -425,7 +569,7 @@ public:
                             * static_cast<double>(frame) / static_cast<double>(fftSize)));
             }
 
-            HannSpectrumAnalyzer analyzer;
+            SpectrumAnalyzer analyzer;
             VisualizationFrame frame;
             expect(analyzer.process(
                 { mono.data(), nullptr, mono.size(), 4, 1, fftSize, 48'000.0, false, 1 }, frame));
@@ -437,6 +581,6 @@ public:
 
 StereoSampleCaptureTests stereoSampleCaptureTests;
 StereoMeterAccumulatorTests stereoMeterAccumulatorTests;
-HannSpectrumAnalyzerTests hannSpectrumAnalyzerTests;
+SpectrumAnalyzerTests spectrumAnalyzerTests;
 } // namespace
 } // namespace audio_insight
