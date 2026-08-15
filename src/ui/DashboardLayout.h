@@ -5,6 +5,8 @@
 #include <array>
 #include <cstddef>
 #include <cstdint>
+#include <optional>
+#include <string_view>
 
 namespace audio_insight {
 enum class DashboardPanel : std::uint8_t {
@@ -22,6 +24,22 @@ enum class DashboardSplitter : std::uint8_t {
     upper,
     lowerLeft,
     lowerRight,
+};
+
+inline constexpr std::size_t dashboardSplitterCount = 4;
+
+// This order is also the accepted Tab, Shift-Tab, and overlapping hit-test
+// priority order for edit-mode handles.
+inline constexpr std::array dashboardSplitterTabOrder {
+    DashboardSplitter::horizontal,
+    DashboardSplitter::upper,
+    DashboardSplitter::lowerLeft,
+    DashboardSplitter::lowerRight,
+};
+
+enum class DashboardSplitterAxis : std::uint8_t {
+    horizontal,
+    vertical,
 };
 
 struct DashboardLayoutSplits {
@@ -66,6 +84,47 @@ struct DashboardLogicalBounds {
     }
 };
 
+struct DashboardLogicalPoint {
+    double x = 0.0;
+    double y = 0.0;
+};
+
+struct DashboardSplitterGeometry {
+    DashboardSplitter splitter = DashboardSplitter::horizontal;
+    DashboardSplitterAxis axis = DashboardSplitterAxis::horizontal;
+    DashboardLogicalBounds visualBounds { };
+    DashboardLogicalBounds pointerHitBounds { };
+};
+
+struct DashboardSplitterLayout {
+    std::array<DashboardSplitterGeometry, dashboardSplitterCount> splitters { };
+
+    [[nodiscard]] constexpr const DashboardSplitterGeometry& operator[](
+        const std::size_t index) const noexcept
+    {
+        return splitters[index];
+    }
+};
+
+/**
+    Allocation-free source data for an accessible adjustable separator.
+
+    Percentages describe each adjacent region against the complete normalized
+    row or column span. They intentionally do not necessarily sum to 100 for a
+    lower-row separator because the third lower-row panel is unaffected.
+*/
+struct DashboardSplitterAccessibilityValue {
+    DashboardSplitter splitter = DashboardSplitter::horizontal;
+    std::string_view name { };
+    std::string_view firstRegionName { };
+    std::string_view secondRegionName { };
+    int firstRegionTracks = 0;
+    int secondRegionTracks = 0;
+    int totalTracks = 0;
+    double firstRegionPercentage = 0.0;
+    double secondRegionPercentage = 0.0;
+};
+
 struct DashboardTileLayout {
     std::array<DashboardLogicalBounds, dashboardPanelCount> tiles { };
 
@@ -90,6 +149,8 @@ public:
     static constexpr int rowCount = 40;
     static constexpr double outerInset = 8.0;
     static constexpr double gutter = 8.0;
+    static constexpr double splitterVisualThickness = 2.0;
+    static constexpr double minimumSplitterPointerHitThickness = 24.0;
 
     inline static constexpr DashboardLayoutSplits defaultSplits { 22, 36, 28, 40 };
 
@@ -119,5 +180,33 @@ public:
     // bounds saturate tile extents at zero rather than producing negative sizes.
     [[nodiscard]] static DashboardTileLayout calculateTileLayout(
         DashboardLogicalBounds dashboardBounds, const DashboardLayoutSplits& splits) noexcept;
+
+    // Returns exactly four handle geometries in dashboardSplitterTabOrder. A
+    // handle occupies the relevant row or column boundary, with a pointer hit
+    // band that remains at least 24 logical points thick on its active axis.
+    [[nodiscard]] static DashboardSplitterLayout calculateSplitterLayout(
+        DashboardLogicalBounds dashboardBounds, const DashboardLayoutSplits& splits) noexcept;
+
+    // Bounds are tested in dashboardSplitterTabOrder so the horizontal handle
+    // wins at the three unavoidable handle intersections.
+    [[nodiscard]] static std::optional<DashboardSplitter> hitTestSplitter(
+        const DashboardSplitterLayout& layout, DashboardLogicalPoint pointer) noexcept;
+
+    // Converts a top-origin logical pointer position to the nearest normalized
+    // grid boundary. The horizontal splitter uses y and all other splitters use
+    // x. Unusable/non-finite geometry returns no index; finite positions beyond
+    // the dashboard saturate at its outer grid boundary.
+    [[nodiscard]] static std::optional<int> nearestGridIndexForPointer(
+        DashboardLogicalBounds dashboardBounds, DashboardSplitter splitter,
+        DashboardLogicalPoint pointer) noexcept;
+
+    // Convenience for a drag: map, snap, then clamp through moveSplitter(). If
+    // mapping is impossible, return the validated current layout unchanged.
+    [[nodiscard]] static DashboardLayoutSplits moveSplitterToPointer(
+        const DashboardLayoutSplits& splits, DashboardSplitter splitter,
+        DashboardLogicalBounds dashboardBounds, DashboardLogicalPoint pointer) noexcept;
+
+    [[nodiscard]] static DashboardSplitterAccessibilityValue accessibilityValue(
+        const DashboardLayoutSplits& splits, DashboardSplitter splitter) noexcept;
 };
 } // namespace audio_insight

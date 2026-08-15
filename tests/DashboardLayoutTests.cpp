@@ -51,6 +51,22 @@ constexpr std::array dashboardSplitters {
         && approximatelyEqual(first.height, second.height);
 }
 
+[[nodiscard]] bool isFinite(const DashboardLogicalBounds& bounds) noexcept
+{
+    return std::isfinite(bounds.x) && std::isfinite(bounds.y) && std::isfinite(bounds.width)
+        && std::isfinite(bounds.height);
+}
+
+[[nodiscard]] double centreX(const DashboardLogicalBounds& bounds) noexcept
+{
+    return bounds.x + (bounds.width * 0.5);
+}
+
+[[nodiscard]] double centreY(const DashboardLogicalBounds& bounds) noexcept
+{
+    return bounds.y + (bounds.height * 0.5);
+}
+
 [[nodiscard]] bool hasAcceptedConstraints(const DashboardLayoutSplits& splits) noexcept
 {
     return splits.horizontal >= 14 && splits.horizontal <= 26 && splits.upper >= 24
@@ -427,6 +443,390 @@ public:
                     }
                 }
             }
+        }
+
+        beginTest("Default splitter geometry follows the normalized grid and Tab order");
+        {
+            constexpr DashboardLogicalBounds dashboard { 100.0, 50.0, 976.0, 816.0 };
+            constexpr auto innerLeft = 108.0;
+            constexpr auto innerTop = 58.0;
+            constexpr auto innerWidth = 960.0;
+            constexpr auto innerHeight = 800.0;
+            constexpr auto rowSplit = innerTop + (22.0 * 20.0);
+            const auto layout = DashboardLayout::calculateSplitterLayout(
+                dashboard, DashboardLayout::defaultSplits);
+
+            expectEquals(layout.splitters.size(), dashboardSplitterCount);
+            for (std::size_t index = 0; index < dashboardSplitterCount; ++index)
+                expect(layout[index].splitter == dashboardSplitterTabOrder[index]);
+
+            const auto& horizontal = layout[0];
+            expect(horizontal.axis == DashboardSplitterAxis::horizontal);
+            expect(approximatelyEqual(horizontal.visualBounds,
+                DashboardLogicalBounds { innerLeft, rowSplit - 1.0, innerWidth, 2.0 }));
+            expect(approximatelyEqual(horizontal.pointerHitBounds,
+                DashboardLogicalBounds { innerLeft, rowSplit - 12.0, innerWidth, 24.0 }));
+
+            const auto& upper = layout[1];
+            expect(upper.axis == DashboardSplitterAxis::vertical);
+            expect(approximatelyEqual(upper.visualBounds,
+                DashboardLogicalBounds {
+                    innerLeft + (36.0 * 20.0) - 1.0, innerTop, 2.0, rowSplit - innerTop }));
+            expect(approximatelyEqual(upper.pointerHitBounds,
+                DashboardLogicalBounds {
+                    innerLeft + (36.0 * 20.0) - 12.0, innerTop, 24.0, rowSplit - innerTop }));
+
+            const auto& lowerLeft = layout[2];
+            expect(lowerLeft.axis == DashboardSplitterAxis::vertical);
+            expect(approximatelyEqual(lowerLeft.visualBounds,
+                DashboardLogicalBounds { innerLeft + (28.0 * 20.0) - 1.0, rowSplit, 2.0,
+                    innerTop + innerHeight - rowSplit }));
+            expect(approximatelyEqual(lowerLeft.pointerHitBounds,
+                DashboardLogicalBounds { innerLeft + (28.0 * 20.0) - 12.0, rowSplit, 24.0,
+                    innerTop + innerHeight - rowSplit }));
+
+            const auto& lowerRight = layout[3];
+            expect(lowerRight.axis == DashboardSplitterAxis::vertical);
+            expect(approximatelyEqual(lowerRight.visualBounds,
+                DashboardLogicalBounds { innerLeft + (40.0 * 20.0) - 1.0, rowSplit, 2.0,
+                    innerTop + innerHeight - rowSplit }));
+            expect(approximatelyEqual(lowerRight.pointerHitBounds,
+                DashboardLogicalBounds { innerLeft + (40.0 * 20.0) - 12.0, rowSplit, 24.0,
+                    innerTop + innerHeight - rowSplit }));
+        }
+
+        beginTest("Every legal layout produces bounded splitter centres and hit bands");
+        {
+            constexpr DashboardLogicalBounds dashboard { 100.0, 50.0, 1200.0, 800.0 };
+            constexpr auto innerLeft = dashboard.x + DashboardLayout::outerInset;
+            constexpr auto innerTop = dashboard.y + DashboardLayout::outerInset;
+            constexpr auto innerWidth = dashboard.width - (2.0 * DashboardLayout::outerInset);
+            constexpr auto innerHeight = dashboard.height - (2.0 * DashboardLayout::outerInset);
+            std::uint64_t geometryMismatches = 0;
+            const auto verify = [&geometryMismatches](const bool condition) {
+                geometryMismatches += condition ? 0U : 1U;
+            };
+
+            for (auto horizontal = 14; horizontal <= 26; ++horizontal) {
+                for (auto upper = 24; upper <= 40; ++upper) {
+                    for (auto lowerRight = 36; lowerRight <= 42; ++lowerRight) {
+                        for (auto lowerLeft = 16; lowerLeft <= lowerRight - 8; ++lowerLeft) {
+                            const DashboardLayoutSplits splits { horizontal, upper, lowerLeft,
+                                lowerRight };
+                            const auto layout
+                                = DashboardLayout::calculateSplitterLayout(dashboard, splits);
+                            const auto expectedRow = innerTop
+                                + innerHeight * static_cast<double>(horizontal)
+                                    / DashboardLayout::rowCount;
+                            const std::array expectedColumns { upper, lowerLeft, lowerRight };
+
+                            for (std::size_t index = 0; index < dashboardSplitterCount; ++index) {
+                                verify(layout[index].splitter == dashboardSplitterTabOrder[index]);
+                                verify(isFinite(layout[index].visualBounds));
+                                verify(isFinite(layout[index].pointerHitBounds));
+                            }
+
+                            verify(
+                                approximatelyEqual(centreY(layout[0].visualBounds), expectedRow));
+                            verify(approximatelyEqual(layout[0].visualBounds.height,
+                                DashboardLayout::splitterVisualThickness));
+                            verify(approximatelyEqual(layout[0].pointerHitBounds.height,
+                                DashboardLayout::minimumSplitterPointerHitThickness));
+                            verify(layout[0].pointerHitBounds.height >= 24.0);
+                            verify(approximatelyEqual(layout[0].visualBounds.x, innerLeft));
+                            verify(approximatelyEqual(layout[0].visualBounds.width, innerWidth));
+
+                            for (std::size_t verticalIndex = 0; verticalIndex < 3;
+                                ++verticalIndex) {
+                                const auto geometryIndex = verticalIndex + 1;
+                                const auto expectedColumn = innerLeft
+                                    + innerWidth
+                                        * static_cast<double>(expectedColumns[verticalIndex])
+                                        / DashboardLayout::columnCount;
+                                verify(approximatelyEqual(
+                                    centreX(layout[geometryIndex].visualBounds), expectedColumn));
+                                verify(approximatelyEqual(layout[geometryIndex].visualBounds.width,
+                                    DashboardLayout::splitterVisualThickness));
+                                verify(
+                                    approximatelyEqual(layout[geometryIndex].pointerHitBounds.width,
+                                        DashboardLayout::minimumSplitterPointerHitThickness));
+                                verify(layout[geometryIndex].pointerHitBounds.width >= 24.0);
+                            }
+
+                            verify(approximatelyEqual(layout[1].visualBounds.y, innerTop));
+                            verify(
+                                approximatelyEqual(layout[1].visualBounds.bottom(), expectedRow));
+                            verify(approximatelyEqual(layout[2].visualBounds.y, expectedRow));
+                            verify(approximatelyEqual(
+                                layout[2].visualBounds.bottom(), innerTop + innerHeight));
+                            verify(approximatelyEqual(layout[3].visualBounds.y, expectedRow));
+                            verify(approximatelyEqual(
+                                layout[3].visualBounds.bottom(), innerTop + innerHeight));
+                        }
+                    }
+                }
+            }
+
+            expect(geometryMismatches == 0,
+                juce::String("Splitter geometry mismatches: ") + juce::String(geometryMismatches));
+        }
+
+        beginTest("Splitter hit testing uses the accepted overlap priority");
+        {
+            constexpr DashboardLogicalBounds dashboard { 100.0, 50.0, 976.0, 816.0 };
+            constexpr auto innerLeft = 108.0;
+            constexpr auto innerTop = 58.0;
+            constexpr auto rowSplit = innerTop + (22.0 * 20.0);
+            constexpr auto upperSplit = innerLeft + (36.0 * 20.0);
+            constexpr auto lowerLeftSplit = innerLeft + (28.0 * 20.0);
+            constexpr auto lowerRightSplit = innerLeft + (40.0 * 20.0);
+            const auto layout = DashboardLayout::calculateSplitterLayout(
+                dashboard, DashboardLayout::defaultSplits);
+
+            const auto expectHit = [this, &layout](const DashboardLogicalPoint point,
+                                       const DashboardSplitter expected) {
+                const auto hit = DashboardLayout::hitTestSplitter(layout, point);
+                expect(hit.has_value());
+                if (hit.has_value())
+                    expect(*hit == expected);
+            };
+
+            expectHit({ innerLeft + 40.0, rowSplit }, DashboardSplitter::horizontal);
+            expectHit({ upperSplit, innerTop + 40.0 }, DashboardSplitter::upper);
+            expectHit({ lowerLeftSplit, rowSplit + 40.0 }, DashboardSplitter::lowerLeft);
+            expectHit({ lowerRightSplit, rowSplit + 40.0 }, DashboardSplitter::lowerRight);
+            expectHit({ upperSplit, rowSplit }, DashboardSplitter::horizontal);
+            expectHit({ lowerLeftSplit, rowSplit }, DashboardSplitter::horizontal);
+            expectHit({ lowerRightSplit, rowSplit }, DashboardSplitter::horizontal);
+            expect(!DashboardLayout::hitTestSplitter(layout, { 0.0, 0.0 }).has_value());
+        }
+
+        beginTest("Pointer positions snap to the nearest top-origin grid boundary");
+        {
+            constexpr DashboardLogicalBounds dashboard { 100.0, 50.0, 976.0, 816.0 };
+            constexpr auto innerLeft = 108.0;
+            constexpr auto innerTop = 58.0;
+            constexpr auto trackSize = 20.0;
+
+            for (auto column = 0; column <= DashboardLayout::columnCount; ++column) {
+                const auto mapped = DashboardLayout::nearestGridIndexForPointer(dashboard,
+                    DashboardSplitter::upper,
+                    { innerLeft + (static_cast<double>(column) * trackSize), innerTop });
+                expect(mapped.has_value());
+                if (mapped.has_value())
+                    expectEquals(*mapped, column);
+            }
+
+            for (auto row = 0; row <= DashboardLayout::rowCount; ++row) {
+                const auto mapped = DashboardLayout::nearestGridIndexForPointer(dashboard,
+                    DashboardSplitter::horizontal,
+                    { innerLeft, innerTop + (static_cast<double>(row) * trackSize) });
+                expect(mapped.has_value());
+                if (mapped.has_value())
+                    expectEquals(*mapped, row);
+            }
+
+            const auto beforeHalfColumn = DashboardLayout::nearestGridIndexForPointer(
+                dashboard, DashboardSplitter::upper, { innerLeft + 9.999, innerTop });
+            const auto atHalfColumn = DashboardLayout::nearestGridIndexForPointer(
+                dashboard, DashboardSplitter::upper, { innerLeft + 10.0, innerTop });
+            const auto beforeHalfRow = DashboardLayout::nearestGridIndexForPointer(
+                dashboard, DashboardSplitter::horizontal, { innerLeft, innerTop + 9.999 });
+            const auto atHalfRow = DashboardLayout::nearestGridIndexForPointer(
+                dashboard, DashboardSplitter::horizontal, { innerLeft, innerTop + 10.0 });
+            expect(beforeHalfColumn == std::optional<int> { 0 });
+            expect(atHalfColumn == std::optional<int> { 1 });
+            expect(beforeHalfRow == std::optional<int> { 0 });
+            expect(atHalfRow == std::optional<int> { 1 });
+        }
+
+        beginTest("Pointer movement saturates, snaps, and applies legal splitter clamps");
+        {
+            constexpr DashboardLogicalBounds dashboard { 100.0, 50.0, 976.0, 816.0 };
+            constexpr auto lowest = std::numeric_limits<double>::lowest();
+            constexpr auto highest = std::numeric_limits<double>::max();
+            constexpr auto initial = DashboardLayout::defaultSplits;
+
+            expect(DashboardLayout::moveSplitterToPointer(
+                       initial, DashboardSplitter::horizontal, dashboard, { 100.0, lowest })
+                == DashboardLayoutSplits { 14, 36, 28, 40 });
+            expect(DashboardLayout::moveSplitterToPointer(
+                       initial, DashboardSplitter::horizontal, dashboard, { 100.0, highest })
+                == DashboardLayoutSplits { 26, 36, 28, 40 });
+            expect(DashboardLayout::moveSplitterToPointer(
+                       initial, DashboardSplitter::upper, dashboard, { lowest, 100.0 })
+                == DashboardLayoutSplits { 22, 24, 28, 40 });
+            expect(DashboardLayout::moveSplitterToPointer(
+                       initial, DashboardSplitter::upper, dashboard, { highest, 100.0 })
+                == DashboardLayoutSplits { 22, 40, 28, 40 });
+            expect(DashboardLayout::moveSplitterToPointer(
+                       initial, DashboardSplitter::lowerLeft, dashboard, { highest, 100.0 })
+                == DashboardLayoutSplits { 22, 36, 32, 40 });
+            expect(DashboardLayout::moveSplitterToPointer(
+                       initial, DashboardSplitter::lowerRight, dashboard, { lowest, 100.0 })
+                == DashboardLayoutSplits { 22, 36, 28, 36 });
+            expect(DashboardLayout::moveSplitterToPointer(
+                       initial, DashboardSplitter::lowerRight, dashboard, { highest, 100.0 })
+                == DashboardLayoutSplits { 22, 36, 28, 42 });
+
+            constexpr DashboardLayoutSplits orderedLowerRow { 22, 36, 32, 42 };
+            expect(DashboardLayout::moveSplitterToPointer(
+                       orderedLowerRow, DashboardSplitter::lowerRight, dashboard, { lowest, 100.0 })
+                == DashboardLayoutSplits { 22, 36, 32, 40 });
+        }
+
+        beginTest("Degenerate geometry and non-finite pointers fail inertly");
+        {
+            const auto nan = std::numeric_limits<double>::quiet_NaN();
+            const auto infinity = std::numeric_limits<double>::infinity();
+            constexpr std::array degenerateDashboards {
+                DashboardLogicalBounds { 5.0, 7.0, -10.0, -20.0 },
+                DashboardLogicalBounds { 5.0, 7.0, 0.0, 0.0 },
+                DashboardLogicalBounds { 5.0, 7.0, 1.0, 1.0 },
+                DashboardLogicalBounds { 5.0, 7.0, 16.0, 16.0 },
+                DashboardLogicalBounds { 5.0, 7.0, 100.0, 16.0 },
+                DashboardLogicalBounds { 5.0, 7.0, 16.0, 100.0 },
+            };
+
+            for (const auto dashboard : degenerateDashboards) {
+                const auto layout = DashboardLayout::calculateSplitterLayout(
+                    dashboard, DashboardLayout::defaultSplits);
+                for (const auto& geometry : layout.splitters) {
+                    expect(isFinite(geometry.visualBounds));
+                    expect(isFinite(geometry.pointerHitBounds));
+                    expect(geometry.visualBounds.width >= 0.0);
+                    expect(geometry.visualBounds.height >= 0.0);
+                    expect(geometry.pointerHitBounds.width >= 0.0);
+                    expect(geometry.pointerHitBounds.height >= 0.0);
+                }
+
+                expect(!DashboardLayout::hitTestSplitter(layout, { 5.0, 7.0 }).has_value());
+                for (const auto splitter : dashboardSplitters) {
+                    expect(!DashboardLayout::nearestGridIndexForPointer(
+                        dashboard, splitter, { 5.0, 7.0 })
+                            .has_value());
+                    expect(DashboardLayout::moveSplitterToPointer(
+                               DashboardLayout::defaultSplits, splitter, dashboard, { 5.0, 7.0 })
+                        == DashboardLayout::defaultSplits);
+                }
+            }
+
+            const std::array invalidDashboards {
+                DashboardLogicalBounds { nan, 7.0, 100.0, 100.0 },
+                DashboardLogicalBounds { 5.0, nan, 100.0, 100.0 },
+                DashboardLogicalBounds { 5.0, 7.0, infinity, 100.0 },
+                DashboardLogicalBounds { 5.0, 7.0, 100.0, -infinity },
+            };
+            for (const auto dashboard : invalidDashboards) {
+                const auto layout = DashboardLayout::calculateSplitterLayout(
+                    dashboard, DashboardLayout::defaultSplits);
+                for (const auto& geometry : layout.splitters) {
+                    expect(isFinite(geometry.visualBounds));
+                    expect(isFinite(geometry.pointerHitBounds));
+                }
+                expect(!DashboardLayout::hitTestSplitter(layout, { 0.0, 0.0 }).has_value());
+                expect(!DashboardLayout::nearestGridIndexForPointer(
+                    dashboard, DashboardSplitter::upper, { 0.0, 0.0 })
+                        .has_value());
+            }
+
+            constexpr DashboardLogicalBounds validDashboard { 100.0, 50.0, 976.0, 816.0 };
+            const auto layout = DashboardLayout::calculateSplitterLayout(
+                validDashboard, DashboardLayout::defaultSplits);
+            for (const auto invalidCoordinate : { nan, infinity, -infinity }) {
+                expect(!DashboardLayout::hitTestSplitter(layout, { invalidCoordinate, 100.0 })
+                        .has_value());
+                expect(!DashboardLayout::hitTestSplitter(layout, { 100.0, invalidCoordinate })
+                        .has_value());
+                for (const auto splitter : dashboardSplitters) {
+                    expect(!DashboardLayout::nearestGridIndexForPointer(
+                        validDashboard, splitter, { invalidCoordinate, 100.0 })
+                            .has_value());
+                    expect(!DashboardLayout::nearestGridIndexForPointer(
+                        validDashboard, splitter, { 100.0, invalidCoordinate })
+                            .has_value());
+                }
+            }
+
+            constexpr DashboardLayoutSplits invalidSplits { 0, 0, 0, 0 };
+            expect(DashboardLayout::moveSplitterToPointer(
+                       invalidSplits, DashboardSplitter::upper, validDashboard, { nan, 100.0 })
+                == DashboardLayout::defaultSplits);
+        }
+
+        beginTest("Accessibility values name both affected regions and exact percentages");
+        {
+            const auto horizontal = DashboardLayout::accessibilityValue(
+                DashboardLayout::defaultSplits, DashboardSplitter::horizontal);
+            expect(horizontal.name == "Upper and lower dashboard height");
+            expect(horizontal.firstRegionName == "Upper band");
+            expect(horizontal.secondRegionName == "Lower band");
+            expectEquals(horizontal.firstRegionTracks, 22);
+            expectEquals(horizontal.secondRegionTracks, 18);
+            expectEquals(horizontal.totalTracks, 40);
+            expect(approximatelyEqual(horizontal.firstRegionPercentage, 55.0));
+            expect(approximatelyEqual(horizontal.secondRegionPercentage, 45.0));
+
+            const auto upper = DashboardLayout::accessibilityValue(
+                DashboardLayout::defaultSplits, DashboardSplitter::upper);
+            expect(upper.name == "Spectrum and Peak/RMS width");
+            expect(upper.firstRegionName == "Spectrum");
+            expect(upper.secondRegionName == "Peak/RMS");
+            expectEquals(upper.firstRegionTracks, 36);
+            expectEquals(upper.secondRegionTracks, 12);
+            expect(approximatelyEqual(upper.firstRegionPercentage, 75.0));
+            expect(approximatelyEqual(upper.secondRegionPercentage, 25.0));
+
+            const auto lowerLeft = DashboardLayout::accessibilityValue(
+                DashboardLayout::defaultSplits, DashboardSplitter::lowerLeft);
+            expect(lowerLeft.name == "Spectrogram and Stereo width");
+            expect(lowerLeft.firstRegionName == "Spectrogram");
+            expect(lowerLeft.secondRegionName == "Stereo");
+            expectEquals(lowerLeft.firstRegionTracks, 28);
+            expectEquals(lowerLeft.secondRegionTracks, 12);
+            expect(approximatelyEqual(lowerLeft.firstRegionPercentage, 100.0 * 28.0 / 48.0));
+            expect(approximatelyEqual(lowerLeft.secondRegionPercentage, 25.0));
+
+            const auto lowerRight = DashboardLayout::accessibilityValue(
+                DashboardLayout::defaultSplits, DashboardSplitter::lowerRight);
+            expect(lowerRight.name == "Stereo and Loudness width");
+            expect(lowerRight.firstRegionName == "Stereo");
+            expect(lowerRight.secondRegionName == "Loudness");
+            expectEquals(lowerRight.firstRegionTracks, 12);
+            expectEquals(lowerRight.secondRegionTracks, 8);
+            expect(approximatelyEqual(lowerRight.firstRegionPercentage, 25.0));
+            expect(approximatelyEqual(lowerRight.secondRegionPercentage, 100.0 / 6.0));
+
+            std::uint64_t percentageMismatches = 0;
+            for (auto horizontalSplit = 14; horizontalSplit <= 26; ++horizontalSplit) {
+                for (auto upperSplit = 24; upperSplit <= 40; ++upperSplit) {
+                    for (auto lowerRightSplit = 36; lowerRightSplit <= 42; ++lowerRightSplit) {
+                        for (auto lowerLeftSplit = 16; lowerLeftSplit <= lowerRightSplit - 8;
+                            ++lowerLeftSplit) {
+                            const DashboardLayoutSplits splits { horizontalSplit, upperSplit,
+                                lowerLeftSplit, lowerRightSplit };
+                            for (const auto splitter : dashboardSplitters) {
+                                const auto value
+                                    = DashboardLayout::accessibilityValue(splits, splitter);
+                                percentageMismatches
+                                    += !approximatelyEqual(value.firstRegionPercentage,
+                                        100.0 * static_cast<double>(value.firstRegionTracks)
+                                            / static_cast<double>(value.totalTracks));
+                                percentageMismatches
+                                    += !approximatelyEqual(value.secondRegionPercentage,
+                                        100.0 * static_cast<double>(value.secondRegionTracks)
+                                            / static_cast<double>(value.totalTracks));
+                                percentageMismatches += value.name.empty();
+                                percentageMismatches += value.firstRegionName.empty();
+                                percentageMismatches += value.secondRegionName.empty();
+                            }
+                        }
+                    }
+                }
+            }
+            expect(percentageMismatches == 0,
+                juce::String("Accessibility value mismatches: ")
+                    + juce::String(percentageMismatches));
         }
     }
 };
