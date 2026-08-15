@@ -47,12 +47,14 @@ static_assert(aggregateFieldCount<FrameLatencySample>() == 9);
 static_assert(aggregateFieldCount<MetalRenderTelemetry>() == 96);
 static_assert(aggregateFieldCount<StereoSampleCapture::Telemetry>() == 9);
 static_assert(aggregateFieldCount<StereoMeterAccumulator::Telemetry>() == 7);
-static_assert(aggregateFieldCount<SharedAnalysisScheduler::Counters>() == 3);
-static_assert(aggregateFieldCount<LoudnessAnalyzer::Statistics>() == 20);
+static_assert(aggregateFieldCount<AudioCallbackBlockTelemetry>() == 5);
+static_assert(aggregateFieldCount<AudioCallbackTelemetry>() == 15);
+static_assert(aggregateFieldCount<SharedAnalysisScheduler::Counters>() == 12);
+static_assert(aggregateFieldCount<LoudnessAnalyzer::Statistics>() == 33);
 static_assert(aggregateFieldCount<LoudnessMeasurement>() == 19);
-static_assert(aggregateFieldCount<AnalysisTelemetry>() == 62);
+static_assert(aggregateFieldCount<AnalysisTelemetry>() == 70);
 
-constexpr std::array<std::string_view, 210> expectedRawFieldNames {
+constexpr auto expectedRawFieldNames = std::to_array<std::string_view>({
     "metal.epoch",
     "metal.displayLinkCallbacks",
     "metal.submittedFrames",
@@ -149,6 +151,45 @@ constexpr std::array<std::string_view, 210> expectedRawFieldNames {
     "metal.loudnessMomentaryValid",
     "metal.loudnessShortTermValid",
     "metal.loudnessIntegratedValid",
+    "analysis.audioCallback.callbackCount",
+    "analysis.audioCallback.processedFrames",
+    "analysis.audioCallback.timingSamples",
+    "analysis.audioCallback.timingUnavailable",
+    "analysis.audioCallback.budgetExceeded",
+    "analysis.audioCallback.untrackedBlockSizeCallbacks",
+    "analysis.audioCallback.concurrentCallbackViolations",
+    "analysis.audioCallback.clockAnomalyViolations",
+    "analysis.audioCallback.rtSafetyViolationCount",
+    "analysis.audioCallback.detectorCoverageFlags",
+    "analysis.audioCallback.detectorActive",
+    "analysis.audioCallback.clockAvailable",
+    "analysis.audioCallback.allocationDetectorActive",
+    "analysis.audioCallback.lockWaitDetectorActive",
+    "analysis.audioCallback.block64.callbackCount",
+    "analysis.audioCallback.block64.timingSamples",
+    "analysis.audioCallback.block64.budgetExceeded",
+    "analysis.audioCallback.block64.budgetNanoseconds",
+    "analysis.audioCallback.block64.durationHistogram",
+    "analysis.audioCallback.block128.callbackCount",
+    "analysis.audioCallback.block128.timingSamples",
+    "analysis.audioCallback.block128.budgetExceeded",
+    "analysis.audioCallback.block128.budgetNanoseconds",
+    "analysis.audioCallback.block128.durationHistogram",
+    "analysis.audioCallback.block256.callbackCount",
+    "analysis.audioCallback.block256.timingSamples",
+    "analysis.audioCallback.block256.budgetExceeded",
+    "analysis.audioCallback.block256.budgetNanoseconds",
+    "analysis.audioCallback.block256.durationHistogram",
+    "analysis.audioCallback.block512.callbackCount",
+    "analysis.audioCallback.block512.timingSamples",
+    "analysis.audioCallback.block512.budgetExceeded",
+    "analysis.audioCallback.block512.budgetNanoseconds",
+    "analysis.audioCallback.block512.durationHistogram",
+    "analysis.audioCallback.block1024.callbackCount",
+    "analysis.audioCallback.block1024.timingSamples",
+    "analysis.audioCallback.block1024.budgetExceeded",
+    "analysis.audioCallback.block1024.budgetNanoseconds",
+    "analysis.audioCallback.block1024.durationHistogram",
     "analysis.capture.attemptedChunks",
     "analysis.capture.publishedChunks",
     "analysis.capture.reclaimedReadyChunks",
@@ -181,6 +222,19 @@ constexpr std::array<std::string_view, 210> expectedRawFieldNames {
     "analysis.loudness.integrationBlocksSinceReset",
     "analysis.loudness.absoluteGatedBlocks",
     "analysis.loudness.relativeGatedBlocks",
+    "analysis.loudness.integrationIndexReservedBytes",
+    "analysis.loudness.integrationIndexLeafNodes",
+    "analysis.loudness.integrationIndexInternalNodes",
+    "analysis.loudness.integrationIndexLeafCapacity",
+    "analysis.loudness.integrationIndexInternalCapacity",
+    "analysis.loudness.integrationIndexTreeHeight",
+    "analysis.loudness.integrationIndexQueries",
+    "analysis.loudness.integrationIndexLastNodeVisits",
+    "analysis.loudness.integrationIndexMaximumNodeVisits",
+    "analysis.loudness.integrationIndexLastAggregateReads",
+    "analysis.loudness.integrationIndexMaximumAggregateReads",
+    "analysis.loudness.integrationIndexLastBoundaryValueReads",
+    "analysis.loudness.integrationIndexMaximumBoundaryValueReads",
     "analysis.loudness.stateSequence",
     "analysis.loudness.capturedFrameEnd",
     "analysis.loudness.integrationBlockCapacity",
@@ -223,6 +277,15 @@ constexpr std::array<std::string_view, 210> expectedRawFieldNames {
     "analysis.scheduler.submitted",
     "analysis.scheduler.executed",
     "analysis.scheduler.cancelled",
+    "analysis.scheduler.queueWaitSamples",
+    "analysis.scheduler.lastQueueWaitNanoseconds",
+    "analysis.scheduler.maximumQueueWaitNanoseconds",
+    "analysis.scheduler.queueWaitDeadlineMisses",
+    "analysis.scheduler.jobTurnaroundSamples",
+    "analysis.scheduler.lastJobTurnaroundNanoseconds",
+    "analysis.scheduler.maximumJobTurnaroundNanoseconds",
+    "analysis.scheduler.jobDeadlineMisses",
+    "analysis.scheduler.timingUnavailable",
     "analysis.fftConfigurationChanges",
     "analysis.spectrumTemporalConfigurationChanges",
     "analysis.spectrogramTransformsOffered",
@@ -257,13 +320,22 @@ constexpr std::array<std::string_view, 210> expectedRawFieldNames {
     "analysis.backlogDiscardedFrames",
     "analysis.spectrumCapturedFrameEnd",
     "analysis.meterCapturedFrameEnd",
+    "analysis.captureGeneration",
+    "analysis.captureSampleRate",
+    "analysis.spectrumFreshnessFrames",
+    "analysis.spectrumFreshnessNanoseconds",
+    "analysis.peakRmsFreshnessFrames",
+    "analysis.peakRmsFreshnessNanoseconds",
+    "analysis.spectrumFreshnessValid",
+    "analysis.peakRmsFreshnessValid",
     "analysis.latestCaptureRevision",
     "analysis.lastAnalyzedCaptureRevision",
     "analysis.emptyAnalysisRequestsAvoided",
     "analysis.staleFramesPublished",
     "analysis.peakRmsUserResets",
     "analysis.spectrumUserClears",
-};
+});
+static_assert(expectedRawFieldNames.size() == 279);
 
 const PerformanceMetricRate* findRate(
     const PerformanceMetricsViewModel& view, const std::string_view sourceFieldName)
@@ -294,6 +366,7 @@ void expectFiniteStatistics(juce::UnitTest& test, const FrameIntervalStatistics&
     test.expect(std::isfinite(statistics.minimumMilliseconds));
     test.expect(std::isfinite(statistics.meanMilliseconds));
     test.expect(std::isfinite(statistics.percentile95Milliseconds));
+    test.expect(std::isfinite(statistics.percentile99Milliseconds));
     test.expect(std::isfinite(statistics.maximumMilliseconds));
     test.expect(std::isfinite(statistics.standardDeviationMilliseconds));
     test.expect(std::isfinite(statistics.equivalentHertz));
@@ -331,6 +404,7 @@ public:
             expectWithinAbsoluteError(statistics.minimumMilliseconds, 8.333333, 1.0e-9);
             expectWithinAbsoluteError(statistics.meanMilliseconds, 8.3333335, 1.0e-9);
             expectWithinAbsoluteError(statistics.percentile95Milliseconds, 8.333334, 1.0e-9);
+            expectWithinAbsoluteError(statistics.percentile99Milliseconds, 8.333334, 1.0e-9);
             expectWithinAbsoluteError(statistics.maximumMilliseconds, 8.333334, 1.0e-9);
             expectWithinAbsoluteError(statistics.standardDeviationMilliseconds, 0.0000005, 1.0e-9);
             expectWithinAbsoluteError(statistics.equivalentHertz, 120.0, 1.0e-4);
@@ -386,6 +460,103 @@ public:
                                "total_nanoseconds:total_valid:components_valid")
                 != std::string::npos);
         });
+
+        testCase("Audio callback histograms expose bounded p99 and deferred raw data", [this] {
+            PerformanceMetricsModel model;
+            PerformanceMetricsSnapshot snapshot;
+            snapshot.metal.epoch = 12;
+            auto& block = snapshot.analysis.audioCallback.trackedBlocks[1];
+            block.budgetNanoseconds = 25'000;
+            block.timingSamples = 100;
+            block.durationHistogram[10] = 99;
+            block.durationHistogram[100] = 1;
+
+            auto view = model.update(snapshot, 1.0, false);
+            const auto& statistics = view.derived.audioCallbackBlocks[1];
+            expect(statistics.blockSizeFrames == 128);
+            expect(statistics.sampleCount == 100);
+            expect(statistics.percentile99Available);
+            expect(!statistics.percentile99Overflow);
+            expect(statistics.percentile99UpperBoundNanoseconds == 11'000);
+            expect(statistics.budgetResultAvailable);
+            expect(statistics.budgetPassed);
+
+            const auto* histogram
+                = findRawRow(view, "analysis.audioCallback.block128.durationHistogram");
+            expect(histogram != nullptr && histogram->rawValue.empty());
+            expect(histogram != nullptr
+                && histogram->rawUnit.find("bucket 1024 is >=1024 us") != std::string::npos);
+            const auto report = PerformanceMetricsModel::buildCopyReport(view, snapshot);
+            expect(report.find("analysis.audioCallback.block128.durationHistogram = [0:0")
+                != std::string::npos);
+            expect(report.find(", 10:99, 11:0") != std::string::npos);
+            expect(report.find(", 100:1, 101:0") != std::string::npos);
+
+            block.durationHistogram = { };
+            block.durationHistogram[10] = 98;
+            block.durationHistogram[audioCallbackDurationHistogramOverflowBucket] = 2;
+            view = model.update(snapshot, 2.0, false);
+            const auto& overflow = view.derived.audioCallbackBlocks[1];
+            expect(!overflow.percentile99Available);
+            expect(overflow.percentile99Overflow);
+            expect(overflow.overflowSamples == 2);
+            expect(overflow.budgetResultAvailable);
+            expect(!overflow.budgetPassed);
+        });
+
+        testCase(
+            "Scheduler and analyzer freshness histories admit zero and reset honestly", [this] {
+                PerformanceMetricsModel model(8);
+                PerformanceMetricsSnapshot snapshot;
+                snapshot.metal.epoch = 13;
+                snapshot.analysis.scheduler.queueWaitSamples = 1;
+                snapshot.analysis.scheduler.lastQueueWaitNanoseconds = 0;
+                snapshot.analysis.scheduler.jobTurnaroundSamples = 1;
+                snapshot.analysis.scheduler.lastJobTurnaroundNanoseconds = 4'000'000;
+                snapshot.analysis.captureGeneration = 7;
+                snapshot.analysis.captureSampleRate = 48'000.0;
+                snapshot.analysis.spectrumFreshnessValid = true;
+                snapshot.analysis.spectrumFreshnessNanoseconds = 0;
+                snapshot.analysis.peakRmsFreshnessValid = true;
+                snapshot.analysis.peakRmsFreshnessNanoseconds = 1'000'000;
+
+                auto view = model.update(snapshot, 10.0);
+                expect(view.derived.analysisDurations.schedulerQueueWait.available);
+                expect(view.derived.analysisDurations.schedulerQueueWait.sampleCount == 1);
+                expect(view.derived.analysisDurations.schedulerQueueWait.latestMilliseconds == 0.0);
+                expect(view.derived.analysisDurations.spectrumFreshness.available);
+                expect(view.derived.analysisDurations.spectrumFreshness.sampleCount == 1);
+                expect(view.derived.analysisDurations.spectrumFreshness.latestMilliseconds == 0.0);
+
+                snapshot.analysis.scheduler.queueWaitSamples = 2;
+                snapshot.analysis.scheduler.lastQueueWaitNanoseconds = 2'000'000;
+                snapshot.analysis.scheduler.jobTurnaroundSamples = 2;
+                snapshot.analysis.scheduler.lastJobTurnaroundNanoseconds = 6'000'000;
+                snapshot.analysis.spectrumFreshnessNanoseconds = 2'000'000;
+                snapshot.analysis.peakRmsFreshnessNanoseconds = 3'000'000;
+                view = model.update(snapshot, 11.0);
+
+                const auto& queue = view.derived.analysisDurations.schedulerQueueWait;
+                const auto& spectrum = view.derived.analysisDurations.spectrumFreshness;
+                expect(queue.sampleCount == 2);
+                expectWithinAbsoluteError(queue.percentile95Milliseconds, 2.0, 1.0e-12);
+                expectWithinAbsoluteError(queue.percentile99Milliseconds, 2.0, 1.0e-12);
+                expect(spectrum.sampleCount == 2);
+                expectWithinAbsoluteError(spectrum.minimumMilliseconds, 0.0, 1.0e-12);
+                expectWithinAbsoluteError(spectrum.percentile99Milliseconds, 2.0, 1.0e-12);
+                const auto* queueRate = findRate(view, "analysis.scheduler.queueWaitSamples");
+                expect(queueRate != nullptr && queueRate->available);
+
+                snapshot.analysis.captureGeneration = 8;
+                snapshot.analysis.spectrumFreshnessNanoseconds = 9'000'000;
+                snapshot.analysis.peakRmsFreshnessNanoseconds = 10'000'000;
+                view = model.update(snapshot, 12.0);
+                expect(view.derived.analysisDurations.spectrumFreshness.sampleCount == 1);
+                expectWithinAbsoluteError(
+                    view.derived.analysisDurations.spectrumFreshness.latestMilliseconds, 9.0,
+                    1.0e-12);
+                expect(view.derived.analysisDurations.peakRmsFreshness.sampleCount == 1);
+            });
 
         testCase("Every frame-latency counter exposes a derived rate", [this] {
             PerformanceMetricsModel model;
@@ -598,6 +769,12 @@ public:
             snapshot.analysis.loudness.integrationBlocksSinceReset = 2;
             snapshot.analysis.loudness.absoluteGatedBlocks = 2;
             snapshot.analysis.loudness.relativeGatedBlocks = 1;
+            snapshot.analysis.loudness.integrationIndexReservedBytes = 1'048'576;
+            snapshot.analysis.loudness.integrationIndexLeafNodes = 2;
+            snapshot.analysis.loudness.integrationIndexInternalNodes = 1;
+            snapshot.analysis.loudness.integrationIndexQueries = 4;
+            snapshot.analysis.loudness.integrationIndexLastNodeVisits = 3;
+            snapshot.analysis.loudness.integrationIndexMaximumNodeVisits = 5;
             snapshot.analysis.loudness.stateSequence = 4;
             snapshot.analysis.loudness.capturedFrameEnd = 9'600;
             snapshot.analysis.loudness.integrationBlockCapacity = 864'000;
@@ -635,9 +812,11 @@ public:
                     fields.emplace(row.fieldName);
             }
             expectEquals(groupCount, std::size_t { 1 });
-            expectEquals(fields.size(), std::size_t { 39 });
+            expectEquals(fields.size(), std::size_t { 52 });
             expect(fields.contains("analysis.loudness.inputFrames"));
             expect(fields.contains("analysis.loudness.integrationBlocksSinceReset"));
+            expect(fields.contains("analysis.loudness.integrationIndexReservedBytes"));
+            expect(fields.contains("analysis.loudness.integrationIndexMaximumNodeVisits"));
             expect(fields.contains("analysis.loudnessMeasurement.relativeGateLufs"));
             expect(fields.contains("analysis.loudnessMeasurement.integratedValid"));
             expect(fields.contains("analysis.loudnessMeasurement.integrationCapacityExceeded"));
@@ -652,9 +831,13 @@ public:
                 expectWithinAbsoluteError(completionRate->value, 1.0, 1.0e-12);
             const auto* overflowRate
                 = findRate(view, "analysis.loudness.integrationCapacityOverflows");
+            const auto* queryRate = findRate(view, "analysis.loudness.integrationIndexQueries");
             expect(overflowRate != nullptr && overflowRate->available);
+            expect(queryRate != nullptr && queryRate->available);
             if (overflowRate != nullptr)
                 expectWithinAbsoluteError(overflowRate->value, 0.5, 1.0e-12);
+            if (queryRate != nullptr)
+                expectWithinAbsoluteError(queryRate->value, 2.0, 1.0e-12);
             expect(findRate(view, "analysis.loudness.integrationBlocksSinceReset") == nullptr);
             expect(findRate(view, "analysis.loudness.absoluteGatedBlocks") == nullptr);
             expect(findRate(view, "analysis.loudnessMeasurement.integrationBlockCount") == nullptr);
@@ -831,6 +1014,10 @@ public:
             expectFiniteStatistics(*this, view.derived.frameIntervals.targetCallbacks);
             expectFiniteStatistics(*this, view.derived.frameIntervals.targetPresentations);
             expectFiniteStatistics(*this, view.derived.frameIntervals.presentedFrames);
+            expectFiniteStatistics(*this, view.derived.analysisDurations.schedulerQueueWait);
+            expectFiniteStatistics(*this, view.derived.analysisDurations.schedulerJobTurnaround);
+            expectFiniteStatistics(*this, view.derived.analysisDurations.spectrumFreshness);
+            expectFiniteStatistics(*this, view.derived.analysisDurations.peakRmsFreshness);
 
             auto report = view.report;
             std::transform(

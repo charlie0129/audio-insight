@@ -29,6 +29,16 @@ public:
             expect(fractional.durationNanoseconds(10, 13, duration));
             expectEquals(duration, std::uint64_t { 125 });
 
+            const MachContinuousTimebase quotientAndRemainder { 3, 2, true };
+            expect(quotientAndRemainder.durationNanoseconds(0, 5, duration));
+            expectEquals(duration, std::uint64_t { 7 });
+
+            const MachContinuousTimebase doubled { 2, 1, true };
+            const auto largestSafeTicks = std::numeric_limits<std::uint64_t>::max() / 2;
+            expect(doubled.durationNanoseconds(0, largestSafeTicks, duration));
+            expectEquals(duration, std::numeric_limits<std::uint64_t>::max() - 1);
+            expect(!doubled.durationNanoseconds(0, largestSafeTicks + 1, duration));
+
             expect(!identity.durationNanoseconds(101, 100, duration));
             expectEquals(duration, std::uint64_t { 0 });
             expect(!MachContinuousTimebase { 0, 0, false }.durationNanoseconds(1, 2, duration));

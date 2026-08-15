@@ -2,7 +2,6 @@
 
 #include "AudioCallbackMetrics.h"
 
-#include <algorithm>
 #include <cmath>
 #include <limits>
 
@@ -65,12 +64,17 @@ bool MachContinuousTimebase::durationNanoseconds(const std::uint64_t startTicks,
         return true;
     }
 
-    const auto scaled = static_cast<unsigned __int128>(elapsedTicks) * numerator;
-    const auto nanoseconds = scaled / denominator;
-    if (nanoseconds > std::numeric_limits<std::uint64_t>::max())
+    const auto wholeUnits = elapsedTicks / denominator;
+    const auto remainderTicks = elapsedTicks % denominator;
+    if (wholeUnits > std::numeric_limits<std::uint64_t>::max() / numerator)
         return false;
 
-    destination = static_cast<std::uint64_t>(nanoseconds);
+    const auto wholeNanoseconds = wholeUnits * numerator;
+    const auto remainderNanoseconds = (remainderTicks * numerator) / denominator;
+    if (remainderNanoseconds > std::numeric_limits<std::uint64_t>::max() - wholeNanoseconds)
+        return false;
+
+    destination = wholeNanoseconds + remainderNanoseconds;
     return true;
 }
 
@@ -178,9 +182,17 @@ AudioCallbackTelemetry AudioCallbackMetrics::telemetry() const noexcept
 
 std::size_t AudioCallbackMetrics::blockIndex(const std::uint32_t frameCount) noexcept
 {
-    const auto match = std::find(
-        trackedAudioCallbackBlockSizes.begin(), trackedAudioCallbackBlockSizes.end(), frameCount);
-    return static_cast<std::size_t>(match - trackedAudioCallbackBlockSizes.begin());
+    if (frameCount == 64)
+        return 0;
+    if (frameCount == 128)
+        return 1;
+    if (frameCount == 256)
+        return 2;
+    if (frameCount == 512)
+        return 3;
+    if (frameCount == 1'024)
+        return 4;
+    return trackedAudioCallbackBlockSizes.size();
 }
 
 std::size_t AudioCallbackMetrics::durationBucket(const std::uint64_t nanoseconds) noexcept

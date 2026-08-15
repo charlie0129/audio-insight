@@ -5,6 +5,7 @@
 #include "MetalVisualization.h"
 #include "analysis/AnalysisCoordinator.h"
 
+#include <array>
 #include <cstddef>
 #include <cstdint>
 #include <deque>
@@ -59,6 +60,7 @@ struct FrameIntervalStatistics {
     double minimumMilliseconds = 0.0;
     double meanMilliseconds = 0.0;
     double percentile95Milliseconds = 0.0;
+    double percentile99Milliseconds = 0.0;
     double maximumMilliseconds = 0.0;
     double standardDeviationMilliseconds = 0.0;
     double equivalentHertz = 0.0;
@@ -72,9 +74,32 @@ struct FrameIntervalStatisticsSet {
     FrameIntervalStatistics presentedFrames;
 };
 
+struct AnalysisDurationStatisticsSet {
+    FrameIntervalStatistics schedulerQueueWait;
+    FrameIntervalStatistics schedulerJobTurnaround;
+    FrameIntervalStatistics spectrumFreshness;
+    FrameIntervalStatistics peakRmsFreshness;
+};
+
+struct AudioCallbackBlockStatistics {
+    std::uint32_t blockSizeFrames = 0;
+    std::uint64_t sampleCount = 0;
+    std::uint64_t percentile99UpperBoundNanoseconds = 0;
+    std::uint64_t overflowSamples = 0;
+    std::uint64_t budgetNanoseconds = 0;
+    bool percentile99Available = false;
+    bool percentile99Overflow = false;
+    bool budgetAvailable = false;
+    bool budgetResultAvailable = false;
+    bool budgetPassed = false;
+};
+
 struct PerformanceMetricsDerived {
     std::vector<PerformanceMetricRate> rates;
     FrameIntervalStatisticsSet frameIntervals;
+    AnalysisDurationStatisticsSet analysisDurations;
+    std::array<AudioCallbackBlockStatistics, trackedAudioCallbackBlockSizes.size()>
+        audioCallbackBlocks { };
     bool ratesRebased = false;
 };
 
@@ -120,5 +145,10 @@ private:
     IntervalHistory displayCallbackIntervals_;
     IntervalHistory targetCallbackIntervals_;
     IntervalHistory targetPresentationIntervals_;
+    IntervalHistory schedulerQueueWaitDurations_;
+    IntervalHistory schedulerJobTurnaroundDurations_;
+    IntervalHistory spectrumFreshnessDurations_;
+    IntervalHistory peakRmsFreshnessDurations_;
+    std::optional<std::uint64_t> freshnessCaptureGeneration_;
 };
 } // namespace audio_insight

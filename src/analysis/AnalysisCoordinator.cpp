@@ -52,6 +52,31 @@ void updateMaximum(std::atomic<Integer>& destination, const Integer candidate) n
             previous, candidate, std::memory_order_relaxed, std::memory_order_relaxed)) { }
 }
 
+struct FreshnessMeasurement final {
+    std::uint64_t frames = 0;
+    std::uint64_t nanoseconds = 0;
+    bool valid = false;
+};
+
+[[nodiscard]] FreshnessMeasurement calculateFreshness(const std::uint64_t captureFrontier,
+    const std::uint64_t analyzedFrameEnd, const double sampleRate,
+    const bool snapshotBoundaryIsStable) noexcept
+{
+    if (!snapshotBoundaryIsStable || analyzedFrameEnd == 0 || captureFrontier < analyzedFrameEnd
+        || !std::isfinite(sampleRate) || sampleRate <= 0.0) {
+        return { };
+    }
+
+    const auto frames = captureFrontier - analyzedFrameEnd;
+    const auto nanoseconds = (static_cast<long double>(frames) * 1'000'000'000.0L) / sampleRate;
+    if (!std::isfinite(nanoseconds) || nanoseconds < 0.0L
+        || nanoseconds > static_cast<long double>(std::numeric_limits<std::uint64_t>::max())) {
+        return { };
+    }
+
+    return { frames, static_cast<std::uint64_t>(std::round(nanoseconds)), true };
+}
+
 class VisualizationSnapshotExchange final {
 public:
     [[nodiscard]] bool publish(const VisualizationFrame& frame) noexcept
@@ -188,6 +213,9 @@ struct AnalysisCoordinator::State final : SharedAnalysisScheduler::JobClient,
         const std::size_t frameCount, const double sampleRate, const std::uint64_t generation,
         const std::uint32_t channelCount) noexcept
     {
+        attemptedCaptureSampleRateBits.store(
+            std::bit_cast<std::uint64_t>(sampleRate), std::memory_order_relaxed);
+
         std::size_t offset = 0;
         while (offset < frameCount) {
             const auto chunkFrames
@@ -232,6 +260,7 @@ struct AnalysisCoordinator::State final : SharedAnalysisScheduler::JobClient,
         static_cast<void>(refreshLoudnessFrameState(true));
         spectrumCapturedFrameEnd.store(0, std::memory_order_relaxed);
         meterCapturedFrameEnd.store(0, std::memory_order_relaxed);
+        attemptedCaptureSampleRateBits.store(0, std::memory_order_relaxed);
         hasPublishedAudioFrame.store(false, std::memory_order_relaxed);
         staleClearPending.store(false, std::memory_order_relaxed);
         spectrumClearPending.store(false, std::memory_order_relaxed);
@@ -328,6 +357,7 @@ struct AnalysisCoordinator::State final : SharedAnalysisScheduler::JobClient,
     void endGeneration() noexcept
     {
         currentCaptureGeneration.store(0, std::memory_order_release);
+        attemptedCaptureSampleRateBits.store(0, std::memory_order_relaxed);
         spectrum.reset(nullptr);
         stereoField.reset(nullptr);
         stereoFieldValid.store(false, std::memory_order_relaxed);
@@ -943,6 +973,10 @@ struct AnalysisCoordinator::State final : SharedAnalysisScheduler::JobClient,
         const SharedAnalysisScheduler::Counters schedulerCounters) const noexcept
     {
         AnalysisTelemetry result;
+        const auto captureGenerationBefore
+            = currentCaptureGeneration.load(std::memory_order_acquire);
+        const auto sampleRateBitsBefore
+            = attemptedCaptureSampleRateBits.load(std::memory_order_relaxed);
         result.capture = samples.telemetry();
         result.meters = meters.telemetry();
         result.scheduler = schedulerCounters;
@@ -967,6 +1001,27 @@ struct AnalysisCoordinator::State final : SharedAnalysisScheduler::JobClient,
         result.backlogDiscardedFrames = backlogDiscardedFrames.load(std::memory_order_relaxed);
         result.spectrumCapturedFrameEnd = spectrumCapturedFrameEnd.load(std::memory_order_relaxed);
         result.meterCapturedFrameEnd = meterCapturedFrameEnd.load(std::memory_order_relaxed);
+        const auto sampleRateBitsAfter
+            = attemptedCaptureSampleRateBits.load(std::memory_order_relaxed);
+        const auto captureGenerationAfter
+            = currentCaptureGeneration.load(std::memory_order_acquire);
+        const auto freshnessBoundaryIsStable = captureGenerationBefore != 0
+            && captureGenerationBefore == captureGenerationAfter
+            && sampleRateBitsBefore == sampleRateBitsAfter;
+        result.captureGeneration = captureGenerationAfter;
+        if (freshnessBoundaryIsStable)
+            result.captureSampleRate = std::bit_cast<double>(sampleRateBitsAfter);
+
+        const auto spectrumFreshness = calculateFreshness(result.capture.capturedFrames,
+            result.spectrumCapturedFrameEnd, result.captureSampleRate, freshnessBoundaryIsStable);
+        result.spectrumFreshnessFrames = spectrumFreshness.frames;
+        result.spectrumFreshnessNanoseconds = spectrumFreshness.nanoseconds;
+        result.spectrumFreshnessValid = spectrumFreshness.valid;
+        const auto peakRmsFreshness = calculateFreshness(result.capture.capturedFrames,
+            result.meterCapturedFrameEnd, result.captureSampleRate, freshnessBoundaryIsStable);
+        result.peakRmsFreshnessFrames = peakRmsFreshness.frames;
+        result.peakRmsFreshnessNanoseconds = peakRmsFreshness.nanoseconds;
+        result.peakRmsFreshnessValid = peakRmsFreshness.valid;
         const auto stereoStatistics = stereoField.statistics();
         const auto correlationStatistics = meters.correlationTelemetry();
         result.stereoFieldProcessedChunks = stereoStatistics.processedChunks;
@@ -1054,6 +1109,7 @@ struct AnalysisCoordinator::State final : SharedAnalysisScheduler::JobClient,
     LoudnessMeasurement loudnessMeasurementTelemetry;
     std::atomic<std::uint64_t> currentJobGeneration { 0 };
     std::atomic<std::uint64_t> currentCaptureGeneration { 0 };
+    std::atomic<std::uint64_t> attemptedCaptureSampleRateBits { 0 };
     std::atomic<std::uint64_t> captureRevision { 0 };
     std::atomic<std::uint64_t> lastAnalyzedCaptureRevision { 0 };
     std::atomic<bool> hasPublishedAudioFrame { false };

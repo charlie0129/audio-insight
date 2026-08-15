@@ -166,6 +166,26 @@ target, with a bounded number of operations. Do not use unbounded
 compare-exchange loops. Derive high-water marks and other aggregate diagnostics
 on the consumer where practical.
 
+The implemented callback self-timer uses `mach_continuous_time()`. Its timebase
+is initialized off the audio thread, and callback conversion uses only checked
+64-bit quotient/remainder arithmetic. Five fixed cumulative histograms cover
+exact 64, 128, 256, 512, and 1024-frame host blocks with 1 microsecond regular
+buckets and one explicit `>= 1024 us` overflow bucket. The per-size budget is 2%
+of block duration, with the 128-frame budget additionally capped at 25
+microseconds. The p99 shown in Metrics is the conservative upper edge of its
+histogram bucket; an overflow p99 is reported as unbounded rather than invented.
+Histogram arrays are serialized only when Copy is requested.
+
+Self-timing starts immediately before plugin callback work and takes its end
+timestamp immediately after that work, so it necessarily excludes the final
+clock read and bounded atomic-recording tail. External tracing remains the
+authoritative `processBlock` entry-to-exit budget measurement. The in-process
+bounded detector covers concurrent entry into one processor instance and
+monotonic-clock regression only. Runtime allocation and lock/wait detectors are
+not installed inside an arbitrary host process; Metrics reports both as
+inactive. Their absence must never be presented as proof that no allocation or
+lock occurred.
+
 ### Analysis
 
 The analysis subsystem should be organized as a dependency graph or equivalent
@@ -196,6 +216,18 @@ At most one job per instance may be running or queued, plus a coalesced
 cannot monopolize the pool. Worker count is configurable for benchmarks but may
 change as a product default only from measurements. AUv2 and VST3 modules, or
 hosts that isolate plugins in separate processes, naturally have separate pools.
+
+Scheduler timing uses its steady monotonic clock and follows latest-wins
+semantics literally. Queue wait begins at the request timestamp of the newest
+retained request and ends when a worker begins that invocation. Job turnaround
+uses the same retained timestamp and ends after the invocation returns. A
+regular coordinator request carries its current analysis-period budget as a
+diagnostic relative deadline; reset and reconfiguration jobs may remain
+untagged. A miss is counted only when elapsed time is strictly greater than the
+budget, and deadlines never cancel or delay work. Metrics keeps bounded
+UI-sampled histories of the latest queue-wait and turnaround values when their
+sample counters advance. Their p95/p99 values are useful polling-edge samples,
+not exhaustive per-job percentiles.
 
 Instance destruction must cancel or drain its queued work safely before analysis
 state is released. No pool operation, lifetime wait, or cancellation path may
@@ -295,7 +327,8 @@ missing Metal timestamps distinct from a measured zero duration or lateness.
 Native effective-activity transitions stop and restart collection; retained
 values are explicitly marked paused and may be stale. The full report is
 assembled lazily when the user presses Copy, and neither exact 240-entry history
-is serialized during live polling. The panel sits beside the native Metal view
+nor the five callback-duration histograms is serialized during live polling.
+The panel sits beside the native Metal view
 because an overlapping JUCE component cannot reliably appear above an
 `NSViewComponent`. It defaults to off because formatting and painting
 diagnostics has measurable overhead; important results should also be confirmed
@@ -459,11 +492,17 @@ and record the reason in the decision log.
   including pass-through and capture, with OS preemption noted separately when
   the profiler can identify it. Measure externally where possible; any in-callback
   timestamps use a proven real-time-safe monotonic source and publish only a
-  bounded record, never a log entry.
+  bounded record, never a log entry. The built-in self-timer's omitted final
+  clock-read/recording tail is not part of this external entry-to-exit definition.
 - **Analysis execution time** measures job-body execution separately from queue
-  wait. **Snapshot age** is presentation time minus the end time of the newest
-  represented input block; meter freshness uses the same presented-frame
-  endpoint.
+  wait. **UI-edge pipeline freshness** uses the attempted-capture frame frontier
+  minus the latest Spectrum or Peak/RMS captured-frame endpoint. Frames are
+  converted to nanoseconds only while capture generation and sample rate form a
+  stable valid snapshot; zero age is a valid measurement. Bounded UI-side p95
+  and p99 histories reset when the capture generation changes. These values are
+  not presentation-time snapshot age, host/device latency, or proof of the final
+  presentation budget. Presentation-age p99 still requires capture-to-Metal
+  correlation or an external measurement.
 - **Render CPU time** includes drawable acquisition, buffer updates, command
   encoding, and command-buffer submission. **GPU time** uses command-buffer GPU
   start/end timestamps where available.
@@ -478,7 +517,9 @@ and record the reason in the decision log.
   externally unavailable drawable/compositor service, as host/compositor delay;
   record unclassifiable misses as unknown rather than silently excluding them.
 - Per-instance submitted, executed, cancelled, and published-job counters provide
-  closed-editor and fairness attribution in a shared pool.
+  closed-editor and fairness attribution in a shared pool. Queue-wait and
+  request-to-completion samples refer to the latest retained latest-wins request;
+  their deadline counters use the request's optional relative analysis budget.
 
 Validate AUv2 builds with Apple's `auval` and VST3 builds with Steinberg's
 validator. Integration tests and representative multi-instance stress tests
@@ -591,6 +632,17 @@ authorize fake values, background work, or speculative resource allocation.
   bundle identifiers, manufacturer code, and plugin subtype will be registered?
 
 ## Decision log
+
+### 2026-08-16
+
+- Added fixed-storage audio-callback self-timing for exact 64–1024-frame blocks,
+  conservative lifetime p99 bounds, explicit overflow, and honest detector
+  coverage. External profiling remains required for true callback entry-to-exit
+  validation.
+- Added latest-retained scheduler queue-wait and request-to-completion timing
+  with diagnostic analysis-period deadlines and strict miss accounting.
+- Defined Spectrum and Peak/RMS freshness at the UI telemetry sampling edge and
+  kept it distinct from presentation-time age and end-to-end audio latency.
 
 ### 2026-08-15
 

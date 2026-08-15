@@ -204,6 +204,63 @@ PerformanceMetricRow rawFrameLatencyHistory(const MetalRenderTelemetry& telemetr
         PerformanceMetricKind::raw };
 }
 
+std::string audioCallbackBlockPrefix(const std::uint32_t blockSizeFrames)
+{
+    return "analysis.audioCallback.block" + formatUnsigned(blockSizeFrames);
+}
+
+std::uint64_t audioCallbackHistogramSampleCount(
+    const AudioCallbackBlockTelemetry& telemetry) noexcept
+{
+    auto count = std::uint64_t { 0 };
+    for (const auto bucket : telemetry.durationHistogram) {
+        count = bucket > std::numeric_limits<std::uint64_t>::max() - count
+            ? std::numeric_limits<std::uint64_t>::max()
+            : count + bucket;
+    }
+    return count;
+}
+
+std::string audioCallbackHistogramRawValue(const AudioCallbackBlockTelemetry& telemetry)
+{
+    std::ostringstream stream;
+    stream.imbue(std::locale::classic());
+    stream << '[';
+    for (auto index = std::size_t { 0 }; index < telemetry.durationHistogram.size(); ++index) {
+        if (index != 0)
+            stream << ", ";
+        stream << index << ':' << telemetry.durationHistogram[index];
+    }
+    stream << ']';
+    return stream.str();
+}
+
+constexpr std::string_view audioCallbackHistogramRawUnit
+    = "bucket_index:count; regular buckets are 1 us [index,index+1); "
+      "bucket 1024 is >=1024 us";
+
+PerformanceMetricRow rawAudioCallbackHistogram(
+    const std::uint32_t blockSizeFrames, const AudioCallbackBlockTelemetry& telemetry)
+{
+    const auto sampleCount = audioCallbackHistogramSampleCount(telemetry);
+    const auto overflow = telemetry.durationHistogram[audioCallbackDurationHistogramOverflowBucket];
+    return { audioCallbackBlockPrefix(blockSizeFrames) + ".durationHistogram", "Duration histogram",
+        formatUnsigned(sampleCount) + " samples; " + formatUnsigned(overflow) + " overflow", { },
+        { }, std::string(audioCallbackHistogramRawUnit), PerformanceMetricKind::raw };
+}
+
+std::optional<std::size_t> audioCallbackHistogramIndex(const std::string_view fieldName)
+{
+    for (auto index = std::size_t { 0 }; index < trackedAudioCallbackBlockSizes.size(); ++index) {
+        if (fieldName
+            == audioCallbackBlockPrefix(trackedAudioCallbackBlockSizes[index])
+                + ".durationHistogram") {
+            return index;
+        }
+    }
+    return std::nullopt;
+}
+
 void appendRawSections(
     const PerformanceMetricsSnapshot& snapshot, std::vector<PerformanceMetricGroup>& sections)
 {
@@ -428,6 +485,59 @@ void appendRawSections(
         "Frame-latency history count", metal.frameLatencyHistoryCount, "samples"));
     sections.emplace_back(std::move(timing));
 
+    const auto& audioCallback = analysis.audioCallback;
+    PerformanceMetricGroup callbackStatus { "Audio callback status (self-timed)", { } };
+    callbackStatus.rows.emplace_back(rawUnsigned("analysis.audioCallback.callbackCount",
+        "Callbacks", audioCallback.callbackCount, "callbacks"));
+    callbackStatus.rows.emplace_back(rawUnsigned("analysis.audioCallback.processedFrames",
+        "Processed frames", audioCallback.processedFrames, "frames"));
+    callbackStatus.rows.emplace_back(rawUnsigned("analysis.audioCallback.timingSamples",
+        "Valid duration samples", audioCallback.timingSamples, "samples"));
+    callbackStatus.rows.emplace_back(rawUnsigned("analysis.audioCallback.timingUnavailable",
+        "Unavailable duration samples", audioCallback.timingUnavailable, "samples"));
+    callbackStatus.rows.emplace_back(rawUnsigned("analysis.audioCallback.budgetExceeded",
+        "Callbacks over configured budget", audioCallback.budgetExceeded, "callbacks"));
+    callbackStatus.rows.emplace_back(rawUnsigned(
+        "analysis.audioCallback.untrackedBlockSizeCallbacks", "Untracked block-size callbacks",
+        audioCallback.untrackedBlockSizeCallbacks, "callbacks"));
+    callbackStatus.rows.emplace_back(rawUnsigned(
+        "analysis.audioCallback.concurrentCallbackViolations", "Concurrent callback entries",
+        audioCallback.concurrentCallbackViolations, "violations"));
+    callbackStatus.rows.emplace_back(rawUnsigned("analysis.audioCallback.clockAnomalyViolations",
+        "Monotonic-clock anomalies", audioCallback.clockAnomalyViolations, "violations"));
+    callbackStatus.rows.emplace_back(rawUnsigned("analysis.audioCallback.rtSafetyViolationCount",
+        "Detected bounded RT violations", audioCallback.rtSafetyViolationCount, "violations"));
+    callbackStatus.rows.emplace_back(rawUnsigned("analysis.audioCallback.detectorCoverageFlags",
+        "Detector coverage flags", audioCallback.detectorCoverageFlags));
+    callbackStatus.rows.emplace_back(rawBoolean("analysis.audioCallback.detectorActive",
+        "Bounded detector active", audioCallback.detectorActive));
+    callbackStatus.rows.emplace_back(rawBoolean("analysis.audioCallback.clockAvailable",
+        "Monotonic clock available", audioCallback.clockAvailable));
+    callbackStatus.rows.emplace_back(rawBoolean("analysis.audioCallback.allocationDetectorActive",
+        "Allocation detector active", audioCallback.allocationDetectorActive));
+    callbackStatus.rows.emplace_back(rawBoolean("analysis.audioCallback.lockWaitDetectorActive",
+        "Lock/wait detector active", audioCallback.lockWaitDetectorActive));
+    sections.emplace_back(std::move(callbackStatus));
+
+    for (auto index = std::size_t { 0 }; index < trackedAudioCallbackBlockSizes.size(); ++index) {
+        const auto blockSize = trackedAudioCallbackBlockSizes[index];
+        const auto prefix = audioCallbackBlockPrefix(blockSize);
+        const auto& block = audioCallback.trackedBlocks[index];
+        PerformanceMetricGroup callbackBlock {
+            "Audio callback — " + formatUnsigned(blockSize) + " frames", { }
+        };
+        callbackBlock.rows.emplace_back(
+            rawUnsigned(prefix + ".callbackCount", "Callbacks", block.callbackCount, "callbacks"));
+        callbackBlock.rows.emplace_back(rawUnsigned(
+            prefix + ".timingSamples", "Valid duration samples", block.timingSamples, "samples"));
+        callbackBlock.rows.emplace_back(rawUnsigned(prefix + ".budgetExceeded",
+            "Callbacks over budget", block.budgetExceeded, "callbacks"));
+        callbackBlock.rows.emplace_back(
+            rawDuration(prefix + ".budgetNanoseconds", "Duration budget", block.budgetNanoseconds));
+        callbackBlock.rows.emplace_back(rawAudioCallbackHistogram(blockSize, block));
+        sections.emplace_back(std::move(callbackBlock));
+    }
+
     PerformanceMetricGroup capture { "Analysis sample capture", { } };
     capture.rows.emplace_back(rawUnsigned("analysis.capture.attemptedChunks", "Attempted chunks",
         analysis.capture.attemptedChunks, "chunks"));
@@ -502,6 +612,44 @@ void appendRawSections(
     loudnessAnalysis.rows.emplace_back(rawUnsigned("analysis.loudness.relativeGatedBlocks",
         "Current relative-gated blocks", loudness.relativeGatedBlocks, "blocks"));
     loudnessAnalysis.rows.emplace_back(
+        rawUnsigned("analysis.loudness.integrationIndexReservedBytes",
+            "Integration index reserved storage", loudness.integrationIndexReservedBytes, "bytes"));
+    loudnessAnalysis.rows.emplace_back(rawUnsigned("analysis.loudness.integrationIndexLeafNodes",
+        "Integration index leaf nodes", loudness.integrationIndexLeafNodes, "nodes"));
+    loudnessAnalysis.rows.emplace_back(
+        rawUnsigned("analysis.loudness.integrationIndexInternalNodes",
+            "Integration index internal nodes", loudness.integrationIndexInternalNodes, "nodes"));
+    loudnessAnalysis.rows.emplace_back(rawUnsigned("analysis.loudness.integrationIndexLeafCapacity",
+        "Integration index leaf capacity", loudness.integrationIndexLeafCapacity, "nodes"));
+    loudnessAnalysis.rows.emplace_back(
+        rawUnsigned("analysis.loudness.integrationIndexInternalCapacity",
+            "Integration index internal-node capacity", loudness.integrationIndexInternalCapacity,
+            "nodes"));
+    loudnessAnalysis.rows.emplace_back(rawUnsigned("analysis.loudness.integrationIndexTreeHeight",
+        "Integration index tree height", loudness.integrationIndexTreeHeight, "levels"));
+    loudnessAnalysis.rows.emplace_back(rawUnsigned("analysis.loudness.integrationIndexQueries",
+        "Integration index queries", loudness.integrationIndexQueries, "queries"));
+    loudnessAnalysis.rows.emplace_back(
+        rawUnsigned("analysis.loudness.integrationIndexLastNodeVisits", "Last query node visits",
+            loudness.integrationIndexLastNodeVisits, "visits"));
+    loudnessAnalysis.rows.emplace_back(
+        rawUnsigned("analysis.loudness.integrationIndexMaximumNodeVisits",
+            "Maximum query node visits", loudness.integrationIndexMaximumNodeVisits, "visits"));
+    loudnessAnalysis.rows.emplace_back(
+        rawUnsigned("analysis.loudness.integrationIndexLastAggregateReads",
+            "Last query aggregate reads", loudness.integrationIndexLastAggregateReads, "reads"));
+    loudnessAnalysis.rows.emplace_back(rawUnsigned(
+        "analysis.loudness.integrationIndexMaximumAggregateReads", "Maximum query aggregate reads",
+        loudness.integrationIndexMaximumAggregateReads, "reads"));
+    loudnessAnalysis.rows.emplace_back(
+        rawUnsigned("analysis.loudness.integrationIndexLastBoundaryValueReads",
+            "Last query boundary-value reads", loudness.integrationIndexLastBoundaryValueReads,
+            "reads"));
+    loudnessAnalysis.rows.emplace_back(
+        rawUnsigned("analysis.loudness.integrationIndexMaximumBoundaryValueReads",
+            "Maximum query boundary-value reads",
+            loudness.integrationIndexMaximumBoundaryValueReads, "reads"));
+    loudnessAnalysis.rows.emplace_back(
         rawUnsigned("analysis.loudness.stateSequence", "State sequence", loudness.stateSequence));
     loudnessAnalysis.rows.emplace_back(rawUnsigned("analysis.loudness.capturedFrameEnd",
         "Latest captured-frame endpoint", loudness.capturedFrameEnd, "frames"));
@@ -571,6 +719,24 @@ void appendRawSections(
         rawUnsigned("analysis.scheduler.executed", "Executed jobs", analysis.scheduler.executed));
     scheduler.rows.emplace_back(rawUnsigned("analysis.scheduler.cancelled",
         "Coalesced or cancelled requests", analysis.scheduler.cancelled));
+    scheduler.rows.emplace_back(rawUnsigned("analysis.scheduler.queueWaitSamples",
+        "Queue-wait samples", analysis.scheduler.queueWaitSamples, "samples"));
+    scheduler.rows.emplace_back(rawDuration("analysis.scheduler.lastQueueWaitNanoseconds",
+        "Last queue wait", analysis.scheduler.lastQueueWaitNanoseconds));
+    scheduler.rows.emplace_back(rawDuration("analysis.scheduler.maximumQueueWaitNanoseconds",
+        "Maximum queue wait", analysis.scheduler.maximumQueueWaitNanoseconds));
+    scheduler.rows.emplace_back(rawUnsigned("analysis.scheduler.queueWaitDeadlineMisses",
+        "Queue-wait deadline misses", analysis.scheduler.queueWaitDeadlineMisses, "misses"));
+    scheduler.rows.emplace_back(rawUnsigned("analysis.scheduler.jobTurnaroundSamples",
+        "Job-turnaround samples", analysis.scheduler.jobTurnaroundSamples, "samples"));
+    scheduler.rows.emplace_back(rawDuration("analysis.scheduler.lastJobTurnaroundNanoseconds",
+        "Last job turnaround", analysis.scheduler.lastJobTurnaroundNanoseconds));
+    scheduler.rows.emplace_back(rawDuration("analysis.scheduler.maximumJobTurnaroundNanoseconds",
+        "Maximum job turnaround", analysis.scheduler.maximumJobTurnaroundNanoseconds));
+    scheduler.rows.emplace_back(rawUnsigned("analysis.scheduler.jobDeadlineMisses",
+        "Job-turnaround deadline misses", analysis.scheduler.jobDeadlineMisses, "misses"));
+    scheduler.rows.emplace_back(rawUnsigned("analysis.scheduler.timingUnavailable",
+        "Unavailable scheduler timings", analysis.scheduler.timingUnavailable, "measurements"));
     sections.emplace_back(std::move(scheduler));
 
     PerformanceMetricGroup fftConfiguration { "FFT analysis configuration", { } };
@@ -690,6 +856,22 @@ void appendRawSections(
         "Spectrum captured-frame endpoint", analysis.spectrumCapturedFrameEnd, "frames"));
     freshness.rows.emplace_back(rawUnsigned("analysis.meterCapturedFrameEnd",
         "Meter captured-frame endpoint", analysis.meterCapturedFrameEnd, "frames"));
+    freshness.rows.emplace_back(rawUnsigned(
+        "analysis.captureGeneration", "Active capture generation", analysis.captureGeneration));
+    freshness.rows.emplace_back(rawDouble(
+        "analysis.captureSampleRate", "Capture sample rate", analysis.captureSampleRate, "Hz", 2));
+    freshness.rows.emplace_back(rawUnsigned("analysis.spectrumFreshnessFrames",
+        "Spectrum pipeline freshness", analysis.spectrumFreshnessFrames, "frames"));
+    freshness.rows.emplace_back(rawDuration("analysis.spectrumFreshnessNanoseconds",
+        "Spectrum pipeline freshness", analysis.spectrumFreshnessNanoseconds));
+    freshness.rows.emplace_back(rawUnsigned("analysis.peakRmsFreshnessFrames",
+        "Peak/RMS pipeline freshness", analysis.peakRmsFreshnessFrames, "frames"));
+    freshness.rows.emplace_back(rawDuration("analysis.peakRmsFreshnessNanoseconds",
+        "Peak/RMS pipeline freshness", analysis.peakRmsFreshnessNanoseconds));
+    freshness.rows.emplace_back(rawBoolean("analysis.spectrumFreshnessValid",
+        "Spectrum freshness valid", analysis.spectrumFreshnessValid));
+    freshness.rows.emplace_back(rawBoolean("analysis.peakRmsFreshnessValid",
+        "Peak/RMS freshness valid", analysis.peakRmsFreshnessValid));
     freshness.rows.emplace_back(rawUnsigned("analysis.latestCaptureRevision",
         "Latest capture revision", analysis.latestCaptureRevision));
     freshness.rows.emplace_back(rawUnsigned("analysis.lastAnalyzedCaptureRevision",
@@ -874,6 +1056,51 @@ void buildRates(const PerformanceMetricsSnapshot& current,
     addMetal("metal.stereoPointDrawCalls", "Stereo point draw calls", "calls/s",
         current.metal.stereoPointDrawCalls, previous.metal.stereoPointDrawCalls);
 
+    const auto& audioCallback = current.analysis.audioCallback;
+    const auto& previousAudioCallback = previous.analysis.audioCallback;
+    appendRate(rates, "analysis.audioCallback.callbackCount", "Audio callbacks", "callbacks/s",
+        audioCallback.callbackCount, previousAudioCallback.callbackCount, elapsedSeconds,
+        baselineIsValid);
+    appendRate(rates, "analysis.audioCallback.processedFrames", "Audio callback frames", "frames/s",
+        audioCallback.processedFrames, previousAudioCallback.processedFrames, elapsedSeconds,
+        baselineIsValid);
+    appendRate(rates, "analysis.audioCallback.timingSamples", "Audio callback timing samples",
+        "samples/s", audioCallback.timingSamples, previousAudioCallback.timingSamples,
+        elapsedSeconds, baselineIsValid);
+    appendRate(rates, "analysis.audioCallback.timingUnavailable",
+        "Unavailable audio callback timings", "samples/s", audioCallback.timingUnavailable,
+        previousAudioCallback.timingUnavailable, elapsedSeconds, baselineIsValid);
+    appendRate(rates, "analysis.audioCallback.budgetExceeded", "Audio callbacks over budget",
+        "callbacks/s", audioCallback.budgetExceeded, previousAudioCallback.budgetExceeded,
+        elapsedSeconds, baselineIsValid);
+    appendRate(rates, "analysis.audioCallback.untrackedBlockSizeCallbacks",
+        "Untracked block-size callbacks", "callbacks/s", audioCallback.untrackedBlockSizeCallbacks,
+        previousAudioCallback.untrackedBlockSizeCallbacks, elapsedSeconds, baselineIsValid);
+    appendRate(rates, "analysis.audioCallback.concurrentCallbackViolations",
+        "Concurrent callback entries", "violations/s", audioCallback.concurrentCallbackViolations,
+        previousAudioCallback.concurrentCallbackViolations, elapsedSeconds, baselineIsValid);
+    appendRate(rates, "analysis.audioCallback.clockAnomalyViolations",
+        "Audio callback clock anomalies", "violations/s", audioCallback.clockAnomalyViolations,
+        previousAudioCallback.clockAnomalyViolations, elapsedSeconds, baselineIsValid);
+
+    for (auto index = std::size_t { 0 }; index < trackedAudioCallbackBlockSizes.size(); ++index) {
+        const auto prefix = audioCallbackBlockPrefix(trackedAudioCallbackBlockSizes[index]);
+        const auto& block = audioCallback.trackedBlocks[index];
+        const auto& previousBlock = previousAudioCallback.trackedBlocks[index];
+        appendRate(rates, prefix + ".callbackCount",
+            formatUnsigned(trackedAudioCallbackBlockSizes[index]) + "-frame callbacks",
+            "callbacks/s", block.callbackCount, previousBlock.callbackCount, elapsedSeconds,
+            baselineIsValid);
+        appendRate(rates, prefix + ".timingSamples",
+            formatUnsigned(trackedAudioCallbackBlockSizes[index]) + "-frame timing samples",
+            "samples/s", block.timingSamples, previousBlock.timingSamples, elapsedSeconds,
+            baselineIsValid);
+        appendRate(rates, prefix + ".budgetExceeded",
+            formatUnsigned(trackedAudioCallbackBlockSizes[index]) + "-frame budget misses",
+            "callbacks/s", block.budgetExceeded, previousBlock.budgetExceeded, elapsedSeconds,
+            baselineIsValid);
+    }
+
     const auto& capture = current.analysis.capture;
     const auto& previousCapture = previous.analysis.capture;
     appendRate(rates, "analysis.capture.attemptedChunks", "Attempted sample chunks", "chunks/s",
@@ -947,6 +1174,9 @@ void buildRates(const PerformanceMetricsSnapshot& current,
         "Loudness integration-capacity overflows", "overflows/s",
         loudness.integrationCapacityOverflows, previousLoudness.integrationCapacityOverflows,
         elapsedSeconds, baselineIsValid);
+    appendRate(rates, "analysis.loudness.integrationIndexQueries",
+        "Integrated Loudness index queries", "queries/s", loudness.integrationIndexQueries,
+        previousLoudness.integrationIndexQueries, elapsedSeconds, baselineIsValid);
 
     appendRate(rates, "analysis.stereoFieldProcessedChunks", "Vectorscope chunks processed",
         "chunks/s", current.analysis.stereoFieldProcessedChunks,
@@ -990,6 +1220,21 @@ void buildRates(const PerformanceMetricsSnapshot& current,
     appendRate(rates, "analysis.scheduler.cancelled", "Coalesced or cancelled requests",
         "requests/s", scheduler.cancelled, previousScheduler.cancelled, elapsedSeconds,
         baselineIsValid);
+    appendRate(rates, "analysis.scheduler.queueWaitSamples", "Scheduler queue-wait samples",
+        "samples/s", scheduler.queueWaitSamples, previousScheduler.queueWaitSamples, elapsedSeconds,
+        baselineIsValid);
+    appendRate(rates, "analysis.scheduler.queueWaitDeadlineMisses",
+        "Scheduler queue-wait deadline misses", "misses/s", scheduler.queueWaitDeadlineMisses,
+        previousScheduler.queueWaitDeadlineMisses, elapsedSeconds, baselineIsValid);
+    appendRate(rates, "analysis.scheduler.jobTurnaroundSamples", "Scheduler job-turnaround samples",
+        "samples/s", scheduler.jobTurnaroundSamples, previousScheduler.jobTurnaroundSamples,
+        elapsedSeconds, baselineIsValid);
+    appendRate(rates, "analysis.scheduler.jobDeadlineMisses",
+        "Scheduler job-turnaround deadline misses", "misses/s", scheduler.jobDeadlineMisses,
+        previousScheduler.jobDeadlineMisses, elapsedSeconds, baselineIsValid);
+    appendRate(rates, "analysis.scheduler.timingUnavailable", "Unavailable scheduler timings",
+        "measurements/s", scheduler.timingUnavailable, previousScheduler.timingUnavailable,
+        elapsedSeconds, baselineIsValid);
 
     appendRate(rates, "analysis.jobsStarted", "Jobs started", "jobs/s",
         current.analysis.jobsStarted, previous.analysis.jobsStarted, elapsedSeconds,
@@ -1074,7 +1319,16 @@ void appendIntervalSample(
         history.pop_front();
 }
 
-FrameIntervalStatistics calculateStatistics(const std::vector<std::uint64_t>& samples)
+void appendDurationSample(
+    std::deque<std::uint64_t>& history, const std::uint64_t nanoseconds, const std::size_t capacity)
+{
+    history.emplace_back(nanoseconds);
+    while (history.size() > capacity)
+        history.pop_front();
+}
+
+FrameIntervalStatistics calculateStatistics(
+    const std::vector<std::uint64_t>& samples, const bool zeroIsValid = false)
 {
     FrameIntervalStatistics result;
     if (samples.empty())
@@ -1083,7 +1337,7 @@ FrameIntervalStatistics calculateStatistics(const std::vector<std::uint64_t>& sa
     std::vector<double> milliseconds;
     milliseconds.reserve(samples.size());
     for (const auto nanoseconds : samples) {
-        if (nanoseconds != 0)
+        if (zeroIsValid || nanoseconds != 0)
             milliseconds.emplace_back(static_cast<double>(nanoseconds) / nanosecondsPerMillisecond);
     }
 
@@ -1104,9 +1358,12 @@ FrameIntervalStatistics calculateStatistics(const std::vector<std::uint64_t>& sa
         sum += static_cast<long double>(value);
     result.meanMilliseconds = static_cast<double>(sum / milliseconds.size());
 
-    const auto percentileIndex = std::min(sorted.size() - 1,
+    const auto percentile95Index = std::min(sorted.size() - 1,
         static_cast<std::size_t>(std::ceil(0.95 * static_cast<double>(sorted.size()))) - 1);
-    result.percentile95Milliseconds = sorted[percentileIndex];
+    result.percentile95Milliseconds = sorted[percentile95Index];
+    const auto percentile99Index = std::min(sorted.size() - 1,
+        static_cast<std::size_t>(std::ceil(0.99 * static_cast<double>(sorted.size()))) - 1);
+    result.percentile99Milliseconds = sorted[percentile99Index];
 
     long double squaredDifferenceSum = 0.0L;
     for (const auto value : milliseconds) {
@@ -1122,6 +1379,7 @@ FrameIntervalStatistics calculateStatistics(const std::vector<std::uint64_t>& sa
     if (!std::isfinite(result.latestMilliseconds) || !std::isfinite(result.minimumMilliseconds)
         || !std::isfinite(result.meanMilliseconds)
         || !std::isfinite(result.percentile95Milliseconds)
+        || !std::isfinite(result.percentile99Milliseconds)
         || !std::isfinite(result.maximumMilliseconds)
         || !std::isfinite(result.standardDeviationMilliseconds)
         || !std::isfinite(result.equivalentHertz)) {
@@ -1131,9 +1389,11 @@ FrameIntervalStatistics calculateStatistics(const std::vector<std::uint64_t>& sa
     return result;
 }
 
-FrameIntervalStatistics calculateStatistics(const std::deque<std::uint64_t>& samples)
+FrameIntervalStatistics calculateStatistics(
+    const std::deque<std::uint64_t>& samples, const bool zeroIsValid = false)
 {
-    return calculateStatistics(std::vector<std::uint64_t>(samples.begin(), samples.end()));
+    return calculateStatistics(
+        std::vector<std::uint64_t>(samples.begin(), samples.end()), zeroIsValid);
 }
 
 FrameIntervalStatistics calculatePresentedStatistics(const MetalRenderTelemetry& telemetry)
@@ -1149,6 +1409,53 @@ FrameIntervalStatistics calculatePresentedStatistics(const MetalRenderTelemetry&
     }
 
     return calculateStatistics(samples);
+}
+
+AudioCallbackBlockStatistics calculateAudioCallbackBlockStatistics(
+    const std::uint32_t blockSizeFrames, const AudioCallbackBlockTelemetry& telemetry) noexcept
+{
+    AudioCallbackBlockStatistics result;
+    result.blockSizeFrames = blockSizeFrames;
+    result.sampleCount = audioCallbackHistogramSampleCount(telemetry);
+    result.overflowSamples
+        = telemetry.durationHistogram[audioCallbackDurationHistogramOverflowBucket];
+    result.budgetNanoseconds = telemetry.budgetNanoseconds;
+    result.budgetAvailable = telemetry.budgetNanoseconds != 0;
+    if (result.sampleCount == 0)
+        return result;
+
+    const auto percentileRank = result.sampleCount - (result.sampleCount / 100);
+    auto cumulative = std::uint64_t { 0 };
+    auto percentileBucket = telemetry.durationHistogram.size();
+    for (auto index = std::size_t { 0 }; index < telemetry.durationHistogram.size(); ++index) {
+        const auto count = telemetry.durationHistogram[index];
+        cumulative = count > std::numeric_limits<std::uint64_t>::max() - cumulative
+            ? std::numeric_limits<std::uint64_t>::max()
+            : cumulative + count;
+        if (cumulative >= percentileRank) {
+            percentileBucket = index;
+            break;
+        }
+    }
+
+    if (percentileBucket < audioCallbackDurationHistogramOverflowBucket) {
+        result.percentile99Available = true;
+        result.percentile99UpperBoundNanoseconds
+            = (percentileBucket + 1) * audioCallbackDurationHistogramBucketNanoseconds;
+        if (result.budgetAvailable) {
+            result.budgetResultAvailable = true;
+            result.budgetPassed
+                = result.percentile99UpperBoundNanoseconds <= result.budgetNanoseconds;
+        }
+    } else if (percentileBucket == audioCallbackDurationHistogramOverflowBucket) {
+        result.percentile99Overflow = true;
+        constexpr auto overflowLowerBound = audioCallbackDurationHistogramRegularBuckets
+            * audioCallbackDurationHistogramBucketNanoseconds;
+        if (result.budgetAvailable && result.budgetNanoseconds < overflowLowerBound)
+            result.budgetResultAvailable = true;
+    }
+
+    return result;
 }
 
 PerformanceMetricRow rateRow(const PerformanceMetricRate& rate)
@@ -1184,12 +1491,80 @@ void appendIntervalStatistics(std::vector<PerformanceMetricRow>& rows, const std
         statistics.meanMilliseconds, "ms", statistics.available, 3);
     appendStatistic(rows, prefix + ".percentile95Milliseconds", label + " p95",
         statistics.percentile95Milliseconds, "ms", statistics.available, 3);
+    appendStatistic(rows, prefix + ".percentile99Milliseconds", label + " p99",
+        statistics.percentile99Milliseconds, "ms", statistics.available, 3);
     appendStatistic(rows, prefix + ".maximumMilliseconds", label + " maximum",
         statistics.maximumMilliseconds, "ms", statistics.available, 3);
     appendStatistic(rows, prefix + ".standardDeviationMilliseconds", label + " standard deviation",
         statistics.standardDeviationMilliseconds, "ms", statistics.available, 3);
     appendStatistic(rows, prefix + ".equivalentHertz", label + " equivalent rate",
         statistics.equivalentHertz, "Hz", statistics.available, 2);
+}
+
+void appendDurationStatistics(std::vector<PerformanceMetricRow>& rows, const std::string& prefix,
+    const std::string& label, const FrameIntervalStatistics& statistics)
+{
+    rows.emplace_back(PerformanceMetricRow { prefix + ".sampleCount", label + " sample count",
+        statistics.available ? formatUnsigned(statistics.sampleCount) : std::string("unavailable"),
+        "samples", statistics.available ? formatUnsigned(statistics.sampleCount) : std::string { },
+        "samples", PerformanceMetricKind::derivedStatistic });
+    appendStatistic(rows, prefix + ".latestMilliseconds", label + " latest",
+        statistics.latestMilliseconds, "ms", statistics.available, 3);
+    appendStatistic(rows, prefix + ".minimumMilliseconds", label + " minimum",
+        statistics.minimumMilliseconds, "ms", statistics.available, 3);
+    appendStatistic(rows, prefix + ".meanMilliseconds", label + " mean",
+        statistics.meanMilliseconds, "ms", statistics.available, 3);
+    appendStatistic(rows, prefix + ".percentile95Milliseconds", label + " p95",
+        statistics.percentile95Milliseconds, "ms", statistics.available, 3);
+    appendStatistic(rows, prefix + ".percentile99Milliseconds", label + " p99",
+        statistics.percentile99Milliseconds, "ms", statistics.available, 3);
+    appendStatistic(rows, prefix + ".maximumMilliseconds", label + " maximum",
+        statistics.maximumMilliseconds, "ms", statistics.available, 3);
+    appendStatistic(rows, prefix + ".standardDeviationMilliseconds", label + " standard deviation",
+        statistics.standardDeviationMilliseconds, "ms", statistics.available, 3);
+}
+
+void appendAudioCallbackStatistics(
+    std::vector<PerformanceMetricRow>& rows, const AudioCallbackBlockStatistics& statistics)
+{
+    const auto prefix = "statistics." + audioCallbackBlockPrefix(statistics.blockSizeFrames);
+    rows.emplace_back(PerformanceMetricRow { prefix + ".sampleCount", "Histogram sample count",
+        formatUnsigned(statistics.sampleCount), "samples", formatUnsigned(statistics.sampleCount),
+        "samples", PerformanceMetricKind::derivedStatistic });
+
+    auto percentileDisplay = std::string("unavailable");
+    auto percentileRaw = std::string { };
+    if (statistics.percentile99Available) {
+        percentileDisplay
+            = formatFinite(static_cast<double>(statistics.percentile99UpperBoundNanoseconds)
+                    / nanosecondsPerMillisecond,
+                3);
+        percentileRaw = formatUnsigned(statistics.percentile99UpperBoundNanoseconds);
+    } else if (statistics.percentile99Overflow) {
+        percentileDisplay = ">= 1.024";
+        percentileRaw = ">=1024000";
+    }
+    rows.emplace_back(PerformanceMetricRow { prefix + ".percentile99UpperBoundNanoseconds",
+        "Self-timed lifetime p99 duration upper bound", std::move(percentileDisplay), "ms",
+        std::move(percentileRaw), "ns", PerformanceMetricKind::derivedStatistic });
+
+    rows.emplace_back(PerformanceMetricRow { prefix + ".overflowSamples",
+        "Histogram overflow samples", formatUnsigned(statistics.overflowSamples), "samples",
+        formatUnsigned(statistics.overflowSamples), "samples",
+        PerformanceMetricKind::derivedStatistic });
+    const auto histogramStatus = statistics.sampleCount == 0 ? std::string("no samples")
+        : statistics.percentile99Overflow                    ? std::string("p99 in overflow")
+        : statistics.overflowSamples == 0 ? std::string("fully bounded")
+                                          : std::string("tail overflow; p99 bounded");
+    rows.emplace_back(PerformanceMetricRow { prefix + ".histogramStatus", "Histogram status",
+        histogramStatus, { }, histogramStatus, { }, PerformanceMetricKind::derivedStatistic });
+
+    const auto budgetResult = statistics.budgetResultAvailable
+        ? statistics.budgetPassed ? std::string("pass") : std::string("fail")
+        : std::string("unavailable");
+    rows.emplace_back(
+        PerformanceMetricRow { prefix + ".budgetResult", "P99 upper-bound budget result",
+            budgetResult, { }, budgetResult, { }, PerformanceMetricKind::derivedStatistic });
 }
 
 void appendDerivedSections(PerformanceMetricsViewModel& view)
@@ -1210,6 +1585,25 @@ void appendDerivedSections(PerformanceMetricsViewModel& view)
     appendIntervalStatistics(intervals.rows, "statistics.metal.presentedFrameIntervals",
         "Presented frames (exact history)", view.derived.frameIntervals.presentedFrames);
     view.sections.emplace_back(std::move(intervals));
+
+    PerformanceMetricGroup callbackStatistics { "Audio callback duration statistics", { } };
+    for (const auto& block : view.derived.audioCallbackBlocks)
+        appendAudioCallbackStatistics(callbackStatistics.rows, block);
+    view.sections.emplace_back(std::move(callbackStatistics));
+
+    PerformanceMetricGroup analysisDurations { "Analysis latency statistics", { } };
+    appendDurationStatistics(analysisDurations.rows, "statistics.analysis.scheduler.queueWait",
+        "Scheduler queue wait (UI-sampled)", view.derived.analysisDurations.schedulerQueueWait);
+    appendDurationStatistics(analysisDurations.rows, "statistics.analysis.scheduler.jobTurnaround",
+        "Scheduler request-to-completion (UI-sampled)",
+        view.derived.analysisDurations.schedulerJobTurnaround);
+    appendDurationStatistics(analysisDurations.rows, "statistics.analysis.spectrumFreshness",
+        "Spectrum pipeline freshness (UI-sampling edge)",
+        view.derived.analysisDurations.spectrumFreshness);
+    appendDurationStatistics(analysisDurations.rows, "statistics.analysis.peakRmsFreshness",
+        "Peak/RMS pipeline freshness (UI-sampling edge)",
+        view.derived.analysisDurations.peakRmsFreshness);
+    view.sections.emplace_back(std::move(analysisDurations));
 }
 
 std::string makeReport(
@@ -1231,6 +1625,11 @@ std::string makeReport(
             } else if (row.fieldName == "metal.frameLatencyHistory") {
                 stream << frameLatencyHistoryRawValue(snapshot.metal) << ' '
                        << frameLatencyHistoryRawUnit;
+            } else if (const auto histogramIndex = audioCallbackHistogramIndex(row.fieldName);
+                histogramIndex.has_value()) {
+                stream << audioCallbackHistogramRawValue(
+                    snapshot.analysis.audioCallback.trackedBlocks[*histogramIndex])
+                       << ' ' << audioCallbackHistogramRawUnit;
             } else if (row.kind == PerformanceMetricKind::derivedRate) {
                 const auto sourceFieldName = row.fieldName.starts_with("rate.")
                     ? row.fieldName.substr(5)
@@ -1327,6 +1726,63 @@ PerformanceMetricsViewModel PerformanceMetricsModel::update(
         = calculateStatistics(targetPresentationIntervals_.samples);
     view.derived.frameIntervals.presentedFrames = calculatePresentedStatistics(snapshot.metal);
 
+    const auto schedulerHistoryIsContinuous = previousSnapshot_.has_value()
+        && snapshot.analysis.scheduler.queueWaitSamples
+            >= previous.analysis.scheduler.queueWaitSamples
+        && snapshot.analysis.scheduler.jobTurnaroundSamples
+            >= previous.analysis.scheduler.jobTurnaroundSamples;
+    if (!schedulerHistoryIsContinuous) {
+        schedulerQueueWaitDurations_.samples.clear();
+        schedulerJobTurnaroundDurations_.samples.clear();
+    }
+    const auto queueWaitAdvanced = snapshot.analysis.scheduler.queueWaitSamples > 0
+        && (!schedulerHistoryIsContinuous
+            || snapshot.analysis.scheduler.queueWaitSamples
+                > previous.analysis.scheduler.queueWaitSamples);
+    if (queueWaitAdvanced) {
+        appendDurationSample(schedulerQueueWaitDurations_.samples,
+            snapshot.analysis.scheduler.lastQueueWaitNanoseconds, historyCapacity_);
+    }
+    const auto jobTurnaroundAdvanced = snapshot.analysis.scheduler.jobTurnaroundSamples > 0
+        && (!schedulerHistoryIsContinuous
+            || snapshot.analysis.scheduler.jobTurnaroundSamples
+                > previous.analysis.scheduler.jobTurnaroundSamples);
+    if (jobTurnaroundAdvanced) {
+        appendDurationSample(schedulerJobTurnaroundDurations_.samples,
+            snapshot.analysis.scheduler.lastJobTurnaroundNanoseconds, historyCapacity_);
+    }
+
+    if (!freshnessCaptureGeneration_.has_value()
+        || *freshnessCaptureGeneration_ != snapshot.analysis.captureGeneration) {
+        spectrumFreshnessDurations_.samples.clear();
+        peakRmsFreshnessDurations_.samples.clear();
+        freshnessCaptureGeneration_ = snapshot.analysis.captureGeneration;
+    }
+    if (snapshot.analysis.captureGeneration != 0) {
+        if (snapshot.analysis.spectrumFreshnessValid) {
+            appendDurationSample(spectrumFreshnessDurations_.samples,
+                snapshot.analysis.spectrumFreshnessNanoseconds, historyCapacity_);
+        }
+        if (snapshot.analysis.peakRmsFreshnessValid) {
+            appendDurationSample(peakRmsFreshnessDurations_.samples,
+                snapshot.analysis.peakRmsFreshnessNanoseconds, historyCapacity_);
+        }
+    }
+
+    view.derived.analysisDurations.schedulerQueueWait
+        = calculateStatistics(schedulerQueueWaitDurations_.samples, true);
+    view.derived.analysisDurations.schedulerJobTurnaround
+        = calculateStatistics(schedulerJobTurnaroundDurations_.samples, true);
+    view.derived.analysisDurations.spectrumFreshness
+        = calculateStatistics(spectrumFreshnessDurations_.samples, true);
+    view.derived.analysisDurations.peakRmsFreshness
+        = calculateStatistics(peakRmsFreshnessDurations_.samples, true);
+    for (auto index = std::size_t { 0 }; index < trackedAudioCallbackBlockSizes.size(); ++index) {
+        view.derived.audioCallbackBlocks[index]
+            = calculateAudioCallbackBlockStatistics(trackedAudioCallbackBlockSizes[index],
+                snapshot.analysis.audioCallback.trackedBlocks[index]);
+    }
+
     appendRawSections(snapshot, view.sections);
     appendDerivedSections(view);
     if (includeCopyReport)
@@ -1354,5 +1810,10 @@ void PerformanceMetricsModel::reset() noexcept
     displayCallbackIntervals_.samples.clear();
     targetCallbackIntervals_.samples.clear();
     targetPresentationIntervals_.samples.clear();
+    schedulerQueueWaitDurations_.samples.clear();
+    schedulerJobTurnaroundDurations_.samples.clear();
+    spectrumFreshnessDurations_.samples.clear();
+    peakRmsFreshnessDurations_.samples.clear();
+    freshnessCaptureGeneration_.reset();
 }
 } // namespace audio_insight

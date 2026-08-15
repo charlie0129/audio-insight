@@ -41,7 +41,12 @@ struct AudioCallbackBlockTelemetry final {
 };
 
 /**
-    Cumulative, per-instance telemetry recorded around AudioProcessor::processBlock().
+    Cumulative, per-instance self-timing recorded around AudioProcessor::processBlock().
+
+    The measurement begins immediately before plugin work and ends after that
+    work, but necessarily excludes the final clock read and the bounded atomic
+    recording tail. External tracing remains the authoritative entry-to-exit
+    processBlock budget measurement.
 
     The bounded detector covers concurrent entry into one processor instance and
     invalid/regressing monotonic-clock samples. Allocation and lock/wait detection

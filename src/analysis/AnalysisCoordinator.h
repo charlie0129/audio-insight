@@ -41,6 +41,14 @@ struct AnalysisTelemetry {
     std::uint64_t backlogDiscardedFrames = 0;
     std::uint64_t spectrumCapturedFrameEnd = 0;
     std::uint64_t meterCapturedFrameEnd = 0;
+    std::uint64_t captureGeneration = 0;
+    double captureSampleRate = 0.0;
+    std::uint64_t spectrumFreshnessFrames = 0;
+    std::uint64_t spectrumFreshnessNanoseconds = 0;
+    std::uint64_t peakRmsFreshnessFrames = 0;
+    std::uint64_t peakRmsFreshnessNanoseconds = 0;
+    bool spectrumFreshnessValid = false;
+    bool peakRmsFreshnessValid = false;
     std::uint64_t stereoFieldProcessedChunks = 0;
     std::uint64_t stereoFieldProcessedFrames = 0;
     std::uint64_t stereoFieldSelectedPoints = 0;

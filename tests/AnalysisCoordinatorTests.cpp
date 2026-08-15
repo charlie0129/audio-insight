@@ -324,6 +324,14 @@ public:
             expect(activeTelemetry.jobsCompleted >= 1);
             expect(activeTelemetry.spectrumCapturedFrameEnd == fftSize);
             expect(activeTelemetry.meterCapturedFrameEnd == fftSize);
+            expect(activeTelemetry.captureGeneration == frame.generation);
+            expectWithinAbsoluteError(activeTelemetry.captureSampleRate, 48'000.0, 0.0);
+            expect(activeTelemetry.spectrumFreshnessValid);
+            expect(activeTelemetry.peakRmsFreshnessValid);
+            expect(activeTelemetry.spectrumFreshnessFrames == 0);
+            expect(activeTelemetry.peakRmsFreshnessFrames == 0);
+            expect(activeTelemetry.spectrumFreshnessNanoseconds == 0);
+            expect(activeTelemetry.peakRmsFreshnessNanoseconds == 0);
             expect(activeTelemetry.stereoCapturedFrameEnd == fftSize);
             expect(activeTelemetry.stereoFieldProcessedChunks == 2);
             expect(activeTelemetry.stereoFieldProcessedFrames == fftSize);
@@ -348,8 +356,23 @@ public:
             expect(afterEmptyRequests.emptyAnalysisRequestsAvoided
                 >= activeTelemetry.emptyAnalysisRequestsAvoided + 32);
 
+            constexpr std::array<float, 480> pendingSamples { };
+            coordinator.captureAudioBlock(
+                pendingSamples.data(), pendingSamples.data(), pendingSamples.size(), 48'000.0);
+            const auto laggingTelemetry = coordinator.telemetry();
+            expect(laggingTelemetry.spectrumFreshnessValid);
+            expect(laggingTelemetry.peakRmsFreshnessValid);
+            expect(laggingTelemetry.spectrumFreshnessFrames == pendingSamples.size());
+            expect(laggingTelemetry.peakRmsFreshnessFrames == pendingSamples.size());
+            expect(laggingTelemetry.spectrumFreshnessNanoseconds == 10'000'000);
+            expect(laggingTelemetry.peakRmsFreshnessNanoseconds == 10'000'000);
+
             coordinator.setVisualizationActive(false);
             const auto beforeClosedCapture = coordinator.telemetry();
+            expect(beforeClosedCapture.captureGeneration == 0);
+            expect(beforeClosedCapture.captureSampleRate == 0.0);
+            expect(!beforeClosedCapture.spectrumFreshnessValid);
+            expect(!beforeClosedCapture.peakRmsFreshnessValid);
             coordinator.captureAudioBlock(left.data(), right.data(), left.size(), 48'000.0);
             coordinator.requestAnalysis();
             const auto afterClosedCapture = coordinator.telemetry();
