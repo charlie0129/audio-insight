@@ -212,7 +212,6 @@ target_sources(AudioInsight
         src/state/AnalyzerConfiguration.h
         src/ui/AnalyzerSettingsPanel.cpp
         src/ui/AnalyzerSettingsPanel.h
-        src/ui/SpectrumSmoothingMapping.h
         src/ui/DashboardLayout.cpp
         src/ui/DashboardLayout.h
         src/ui/DashboardLayoutEdit.cpp
@@ -283,7 +282,6 @@ source_group(TREE "${CMAKE_CURRENT_SOURCE_DIR}" FILES
     src/state/AnalyzerConfiguration.h
     src/ui/AnalyzerSettingsPanel.cpp
     src/ui/AnalyzerSettingsPanel.h
-    src/ui/SpectrumSmoothingMapping.h
     src/ui/DashboardLayout.cpp
     src/ui/DashboardLayout.h
     src/ui/DashboardLayoutEdit.cpp
@@ -337,7 +335,6 @@ if(BUILD_TESTING)
             src/state/AnalyzerConfiguration.h
             src/ui/AnalyzerSettingsPanel.cpp
             src/ui/AnalyzerSettingsPanel.h
-            src/ui/SpectrumSmoothingMapping.h
             src/ui/DashboardLayout.cpp
             src/ui/DashboardLayout.h
             src/ui/DashboardLayoutEdit.cpp
@@ -437,7 +434,6 @@ if(BUILD_TESTING)
         src/state/AnalyzerConfiguration.h
         src/ui/AnalyzerSettingsPanel.cpp
         src/ui/AnalyzerSettingsPanel.h
-        src/ui/SpectrumSmoothingMapping.h
         src/ui/DashboardLayout.cpp
         src/ui/DashboardLayout.h
         src/ui/DashboardLayoutEdit.cpp

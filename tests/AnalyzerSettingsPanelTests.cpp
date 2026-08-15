@@ -32,7 +32,7 @@ public:
 
     void runTest() override
     {
-        beginTest("Fresh controls expose responsive normalized smoothing");
+        beginTest("Temporal averaging uses physical time with an Off sentinel and log spacing");
         {
             auto callbackCount = 0;
             AnalyzerConfiguration lastPublished;
@@ -48,7 +48,7 @@ public:
             auto* floor
                 = dynamic_cast<juce::Slider*>(findDescendantWithId(panel, "settingsSpectrumFloor"));
             auto* averaging = dynamic_cast<juce::Slider*>(
-                findDescendantWithId(panel, "settingsSpectrumSmooth"));
+                findDescendantWithId(panel, "settingsSpectrumTemporalAveraging"));
             auto* frequencySpacing = dynamic_cast<juce::Slider*>(
                 findDescendantWithId(panel, "settingsFrequencySpacing"));
             expect(floor != nullptr);
@@ -60,27 +60,54 @@ public:
             expect(!floor->isScrollWheelEnabled());
             expect(!averaging->isScrollWheelEnabled());
             expect(!frequencySpacing->isScrollWheelEnabled());
-            expectWithinAbsoluteError(
-                averaging->getValue(), 0.01 + (0.99 * std::sqrt((75.0 - 25.0) / 425.0)), 0.005);
+            expectWithinAbsoluteError(averaging->getValue(), 75.0, 1.0e-12);
+            expectEquals(averaging->getTextFromValue(75.0), juce::String("75 ms"));
+            expectEquals(averaging->getTextFromValue(0.0), juce::String("Off"));
+            auto averagingAccessibility = averaging->createAccessibilityHandler();
+            expect(averagingAccessibility != nullptr);
+            expect(averagingAccessibility != nullptr
+                && averagingAccessibility->getValueInterface() != nullptr);
+            if (averagingAccessibility != nullptr
+                && averagingAccessibility->getValueInterface() != nullptr) {
+                expectEquals(averagingAccessibility->getValueInterface()->getCurrentValueAsString(),
+                    juce::String("75 ms"));
+            }
+
+            const auto enabledStart = averaging->valueToProportionOfLength(
+                TemporalAveragingSettings::minimumMilliseconds);
+            const auto enabledMidpoint = (enabledStart + 1.0) * 0.5;
+            expectWithinAbsoluteError(averaging->proportionOfLengthToValue(enabledMidpoint),
+                std::sqrt(TemporalAveragingSettings::minimumMilliseconds
+                    * TemporalAveragingSettings::maximumMilliseconds),
+                1.0e-9);
             expectWithinAbsoluteError(frequencySpacing->getInterval(), 0.0, 1.0e-12);
+
             floor->setValue(-110.0, juce::sendNotificationSync);
             expectEquals(callbackCount, 1);
             expectWithinAbsoluteError(lastPublished.spectrum.floorDb, -110.0, 1.0e-12);
 
-            averaging->setValue(0.01, juce::sendNotificationSync);
+            averaging->setValue(0.0, juce::sendNotificationSync);
             expectEquals(callbackCount, 2);
-            expectWithinAbsoluteError(averaging->getValue(), 0.01, 1.0e-12);
+            expect(!lastPublished.spectrum.temporalAveraging.enabled);
+            if (averagingAccessibility != nullptr
+                && averagingAccessibility->getValueInterface() != nullptr) {
+                expectEquals(averagingAccessibility->getValueInterface()->getCurrentValueAsString(),
+                    juce::String("Off"));
+            }
+
+            averaging->setValue(25.0, juce::sendNotificationSync);
+            expectEquals(callbackCount, 3);
+            expect(lastPublished.spectrum.temporalAveraging.enabled);
             expectWithinAbsoluteError(lastPublished.spectrum.temporalAveraging.milliseconds,
                 TemporalAveragingSettings::minimumMilliseconds, 1.0e-12);
 
-            averaging->setValue(0.30, juce::sendNotificationSync);
-            expectEquals(callbackCount, 3);
-            constexpr auto normalizedTime = (0.30 - 0.01) / 0.99;
-            expectWithinAbsoluteError(lastPublished.spectrum.temporalAveraging.milliseconds,
-                25.0 + (425.0 * normalizedTime * normalizedTime), 1.0e-9);
+            averaging->setValue(625.0, juce::sendNotificationSync);
+            expectEquals(callbackCount, 4);
+            expectWithinAbsoluteError(
+                lastPublished.spectrum.temporalAveraging.milliseconds, 625.0, 1.0e-12);
 
             frequencySpacing->setValue(0.401234, juce::sendNotificationSync);
-            expectEquals(callbackCount, 4);
+            expectEquals(callbackCount, 5);
             expectWithinAbsoluteError(
                 lastPublished.sharedAnalysis.frequencySpacing, 0.401234, 1.0e-12);
         }
@@ -200,7 +227,7 @@ public:
             expectWithinAbsoluteError(lastPublished.sharedAnalysis.frequencySpacing, 1.0, 1.0e-12);
         }
 
-        beginTest("Unavailable analyzer sections are visible but cannot accept changes");
+        beginTest("Spectrum controls are live while unfinished analyzer sections stay disabled");
         {
             AnalyzerSettingsPanel panel(
                 AnalyzerConfigurationCodec::defaults(), [](const AnalyzerConfiguration&) { },
@@ -213,12 +240,25 @@ public:
                 expect(component != nullptr && !component->isEnabled());
             };
 
+            const auto expectAvailable = [this, &panel](const juce::String& componentId) {
+                const auto* component = findDescendantWithId(panel, componentId);
+                expect(component != nullptr);
+                expect(component != nullptr && component->isEnabled());
+            };
+
+            expectAvailable("settingsSpectrumTemporalAveraging");
+            expectAvailable("settingsSpectrumSlope");
+            expectAvailable("settingsSpectrumPeakHoldMode");
+            expectAvailable("settingsSpectrumTraceColor");
+            expectAvailable("settingsSpectrumFillOpacity");
+
+            const auto* peakHoldDuration
+                = findDescendantWithId(panel, "settingsSpectrumPeakHoldDuration");
+            expect(peakHoldDuration != nullptr);
+            expect(peakHoldDuration != nullptr && !peakHoldDuration->isEnabled());
+            expect(peakHoldDuration != nullptr && !peakHoldDuration->getWantsKeyboardFocus());
+
             expectUnavailable("settingsSpectrogramUnavailable");
-            expectUnavailable("settingsSpectrumSlope");
-            expectUnavailable("settingsSpectrumPeakHoldMode");
-            expectUnavailable("settingsSpectrumPeakHoldDuration");
-            expectUnavailable("settingsSpectrumTraceColor");
-            expectUnavailable("settingsSpectrumFillOpacity");
             expectUnavailable("settingsSpectrogramPalette");
             expectUnavailable("settingsSpectrogramColorResponse");
             expectUnavailable("settingsSpectrogramColorFloor");
@@ -231,7 +271,7 @@ public:
             expectUnavailable("settingsSpectrogramReset");
         }
 
-        beginTest("Disabled advanced controls reflect every saved presentation value");
+        beginTest("Spectrum controls reflect saved presentation values");
         {
             auto configuration = AnalyzerConfigurationCodec::defaults();
             configuration.spectrum.slope = SpectrumSlope::db4Point5PerOctave;
@@ -267,9 +307,16 @@ public:
             auto* historyMode = dynamic_cast<juce::ComboBox*>(
                 findDescendantWithId(panel, "settingsSpectrogramHistoryMode"));
 
-            const std::array<juce::Component*, 9> controls { slope, peakHoldMode, peakHoldDuration,
-                traceColor, fillOpacity, colorResponse, colorFloor, colorCeiling, historyMode };
-            for (const auto* control : controls) {
+            const std::array<juce::Component*, 4> enabledControls { slope, peakHoldMode, traceColor,
+                fillOpacity };
+            for (const auto* control : enabledControls) {
+                expect(control != nullptr);
+                expect(control != nullptr && control->isEnabled());
+            }
+
+            const std::array<juce::Component*, 5> disabledControls { peakHoldDuration,
+                colorResponse, colorFloor, colorCeiling, historyMode };
+            for (const auto* control : disabledControls) {
                 expect(control != nullptr);
                 expect(control != nullptr && !control->isEnabled());
             }
@@ -280,8 +327,10 @@ public:
                 expectEquals(peakHoldMode->getText(), juce::String("Infinite"));
             if (peakHoldDuration != nullptr)
                 expectWithinAbsoluteError(peakHoldDuration->getValue(), 5.25, 1.0e-12);
-            if (traceColor != nullptr)
+            if (traceColor != nullptr) {
                 expectEquals(traceColor->getText(), juce::String("#12AB34"));
+                expect(!traceColor->isReadOnly());
+            }
             if (fillOpacity != nullptr)
                 expectWithinAbsoluteError(fillOpacity->getValue(), 42.0, 1.0e-12);
             if (colorResponse != nullptr)
@@ -292,6 +341,85 @@ public:
                 expectWithinAbsoluteError(colorCeiling->getValue(), 6.0, 1.0e-12);
             if (historyMode != nullptr)
                 expectEquals(historyMode->getText(), juce::String("Overwrite"));
+        }
+
+        beginTest("Each Spectrum presentation edit publishes once and colour validates on commit");
+        {
+            auto callbackCount = 0;
+            AnalyzerConfiguration lastPublished;
+            AnalyzerSettingsPanel panel(
+                AnalyzerConfigurationCodec::defaults(),
+                [&](const AnalyzerConfiguration& published) {
+                    ++callbackCount;
+                    lastPublished = published;
+                },
+                [] { });
+            panel.setBounds(0, 0, 360, 720);
+
+            auto* slope = dynamic_cast<juce::ComboBox*>(
+                findDescendantWithId(panel, "settingsSpectrumSlope"));
+            auto* peakHoldMode = dynamic_cast<juce::ComboBox*>(
+                findDescendantWithId(panel, "settingsSpectrumPeakHoldMode"));
+            auto* peakHoldDuration = dynamic_cast<juce::Slider*>(
+                findDescendantWithId(panel, "settingsSpectrumPeakHoldDuration"));
+            auto* traceColor = dynamic_cast<juce::TextEditor*>(
+                findDescendantWithId(panel, "settingsSpectrumTraceColor"));
+            auto* fillOpacity = dynamic_cast<juce::Slider*>(
+                findDescendantWithId(panel, "settingsSpectrumFillOpacity"));
+
+            expect(slope != nullptr);
+            expect(peakHoldMode != nullptr);
+            expect(peakHoldDuration != nullptr);
+            expect(traceColor != nullptr);
+            expect(fillOpacity != nullptr);
+            if (slope == nullptr || peakHoldMode == nullptr || peakHoldDuration == nullptr
+                || traceColor == nullptr || fillOpacity == nullptr) {
+                return;
+            }
+
+            slope->setSelectedId(3, juce::sendNotificationSync);
+            expectEquals(callbackCount, 1);
+            expect(lastPublished.spectrum.slope == SpectrumSlope::db4Point5PerOctave);
+
+            peakHoldMode->setSelectedId(2, juce::sendNotificationSync);
+            expectEquals(callbackCount, 2);
+            expect(lastPublished.spectrum.peakHoldMode == SpectrumPeakHoldMode::finite);
+            expect(peakHoldDuration->isEnabled());
+            expect(peakHoldDuration->getWantsKeyboardFocus());
+            expectWithinAbsoluteError(peakHoldDuration->getValue(), 2.0, 1.0e-12);
+
+            peakHoldDuration->setValue(3.5, juce::sendNotificationSync);
+            expectEquals(callbackCount, 3);
+            expectWithinAbsoluteError(lastPublished.spectrum.finitePeakHoldSeconds, 3.5, 1.0e-12);
+
+            fillOpacity->setValue(41.2, juce::sendNotificationSync);
+            expectEquals(callbackCount, 4);
+            expectWithinAbsoluteError(lastPublished.spectrum.fillOpacity, 0.412, 1.0e-12);
+
+            traceColor->setText("#12ab34", false);
+            expect(static_cast<bool>(traceColor->onReturnKey));
+            if (traceColor->onReturnKey)
+                traceColor->onReturnKey();
+            expectEquals(callbackCount, 5);
+            expect(lastPublished.spectrum.traceColor == SrgbColor::fromPackedRgb(0x12ab34U));
+            expectEquals(traceColor->getText(), juce::String("#12AB34"));
+
+            expect(static_cast<bool>(traceColor->onFocusLost));
+            if (traceColor->onFocusLost)
+                traceColor->onFocusLost();
+            expectEquals(callbackCount, 5);
+
+            traceColor->setText("bad", false);
+            if (traceColor->onFocusLost)
+                traceColor->onFocusLost();
+            expectEquals(callbackCount, 5);
+            expectEquals(traceColor->getText(), juce::String("#12AB34"));
+
+            peakHoldMode->setSelectedId(3, juce::sendNotificationSync);
+            expectEquals(callbackCount, 6);
+            expect(lastPublished.spectrum.peakHoldMode == SpectrumPeakHoldMode::infinite);
+            expect(!peakHoldDuration->isEnabled());
+            expect(!peakHoldDuration->getWantsKeyboardFocus());
         }
 
         beginTest("External state refresh does not publish and Escape requests close");
@@ -309,6 +437,11 @@ public:
             replacement.sharedAnalysis.requestedFftSliceRateHz = 120;
             replacement.sharedAnalysis.frequencySpacing = 0.5;
             replacement.spectrum.temporalAveraging.milliseconds = 125.0;
+            replacement.spectrum.slope = SpectrumSlope::db3PerOctave;
+            replacement.spectrum.peakHoldMode = SpectrumPeakHoldMode::finite;
+            replacement.spectrum.finitePeakHoldSeconds = 4.25;
+            replacement.spectrum.traceColor = SrgbColor::fromPackedRgb(0xfedcbaU);
+            replacement.spectrum.fillOpacity = 0.27;
             replacement.spectrogram.palette = SpectrogramPalette::viridis;
             replacement.spectrogram.historyDurationSeconds = 30;
             replacement.loudness.referenceLufs = -14.5;
@@ -325,6 +458,18 @@ public:
                 findDescendantWithId(panel, "settingsFftSliceRate"));
             auto* spacing = dynamic_cast<juce::Slider*>(
                 findDescendantWithId(panel, "settingsFrequencySpacing"));
+            auto* averaging = dynamic_cast<juce::Slider*>(
+                findDescendantWithId(panel, "settingsSpectrumTemporalAveraging"));
+            auto* slope = dynamic_cast<juce::ComboBox*>(
+                findDescendantWithId(panel, "settingsSpectrumSlope"));
+            auto* peakHoldMode = dynamic_cast<juce::ComboBox*>(
+                findDescendantWithId(panel, "settingsSpectrumPeakHoldMode"));
+            auto* peakHoldDuration = dynamic_cast<juce::Slider*>(
+                findDescendantWithId(panel, "settingsSpectrumPeakHoldDuration"));
+            auto* traceColor = dynamic_cast<juce::TextEditor*>(
+                findDescendantWithId(panel, "settingsSpectrumTraceColor"));
+            auto* fillOpacity = dynamic_cast<juce::Slider*>(
+                findDescendantWithId(panel, "settingsSpectrumFillOpacity"));
             auto* palette = dynamic_cast<juce::ComboBox*>(
                 findDescendantWithId(panel, "settingsSpectrogramPalette"));
             auto* history = dynamic_cast<juce::Slider*>(
@@ -335,6 +480,18 @@ public:
             expect(window != nullptr && window->getText() == "Flat-top");
             expect(fftRate != nullptr && fftRate->getText() == "120 Hz");
             expect(spacing != nullptr && std::abs(spacing->getValue() - 0.5) < 1.0e-12);
+            expect(averaging != nullptr);
+            if (averaging != nullptr)
+                expectWithinAbsoluteError(averaging->getValue(), 125.0, 1.0e-12);
+            expect(slope != nullptr && slope->getText() == "+3 dB/oct");
+            expect(peakHoldMode != nullptr && peakHoldMode->getText() == "Finite");
+            expect(peakHoldDuration != nullptr && peakHoldDuration->isEnabled());
+            if (peakHoldDuration != nullptr)
+                expectWithinAbsoluteError(peakHoldDuration->getValue(), 4.25, 1.0e-12);
+            expect(traceColor != nullptr && traceColor->getText() == "#FEDCBA");
+            expect(fillOpacity != nullptr);
+            if (fillOpacity != nullptr)
+                expectWithinAbsoluteError(fillOpacity->getValue(), 27.0, 1.0e-12);
             expect(palette != nullptr && palette->getText() == "Viridis");
             expect(history != nullptr);
             if (history != nullptr)
@@ -343,8 +500,18 @@ public:
             if (reference != nullptr)
                 expectWithinAbsoluteError(reference->getValue(), -14.5, 1.0e-12);
 
+            if (traceColor != nullptr) {
+                traceColor->setText("#010203", false);
+                expect(static_cast<bool>(traceColor->onEscapeKey));
+                if (traceColor->onEscapeKey)
+                    traceColor->onEscapeKey();
+                expectEquals(callbackCount, 0);
+                expectEquals(closeCount, 1);
+                expectEquals(traceColor->getText(), juce::String("#FEDCBA"));
+            }
+
             expect(panel.keyPressed(juce::KeyPress { juce::KeyPress::escapeKey }));
-            expectEquals(closeCount, 1);
+            expectEquals(closeCount, traceColor != nullptr ? 2 : 1);
         }
 
         beginTest("Keyboard traversal and accessibility names include enabled settings");
@@ -374,7 +541,12 @@ public:
                 ExpectedControl { "settingsSpectrumReset", "Spectrum" },
                 ExpectedControl { "settingsSpectrumFloor", "Spectrum floor" },
                 ExpectedControl { "settingsSpectrumCeiling", "Spectrum ceiling" },
-                ExpectedControl { "settingsSpectrumSmooth", "Spectrum smooth" },
+                ExpectedControl {
+                    "settingsSpectrumTemporalAveraging", "Spectrum temporal averaging" },
+                ExpectedControl { "settingsSpectrumSlope", "Spectrum slope compensation" },
+                ExpectedControl { "settingsSpectrumPeakHoldMode", "Spectrum peak hold mode" },
+                ExpectedControl { "settingsSpectrumTraceColor", "Spectrum trace colour" },
+                ExpectedControl { "settingsSpectrumFillOpacity", "Spectrum fill opacity" },
             };
 
             const auto focusComponents = traverser->getAllComponents(&panel);
@@ -433,6 +605,36 @@ public:
                     expect(handler->getTitle().containsIgnoreCase(expectedControl.accessibleTitle),
                         juce::String("Unexpected accessibility title for ")
                             + expectedControl.componentId + ": " + handler->getTitle());
+                }
+            }
+
+            auto finiteConfiguration = AnalyzerConfigurationCodec::defaults();
+            finiteConfiguration.spectrum.peakHoldMode = SpectrumPeakHoldMode::finite;
+            panel.setConfiguration(finiteConfiguration);
+
+            auto* duration = findDescendantWithId(panel, "settingsSpectrumPeakHoldDuration");
+            expect(duration != nullptr);
+            expect(duration != nullptr && duration->isEnabled());
+            expect(duration != nullptr && duration->getWantsKeyboardFocus());
+            if (duration != nullptr) {
+                const auto finiteFocusComponents = traverser->getAllComponents(&panel);
+                const auto durationPosition = std::find(
+                    finiteFocusComponents.cbegin(), finiteFocusComponents.cend(), duration);
+                const auto modePosition
+                    = std::find(finiteFocusComponents.cbegin(), finiteFocusComponents.cend(),
+                        findDescendantWithId(panel, "settingsSpectrumPeakHoldMode"));
+                const auto colourPosition
+                    = std::find(finiteFocusComponents.cbegin(), finiteFocusComponents.cend(),
+                        findDescendantWithId(panel, "settingsSpectrumTraceColor"));
+                expect(durationPosition != finiteFocusComponents.cend());
+                expect(modePosition < durationPosition);
+                expect(durationPosition < colourPosition);
+
+                auto handler = duration->createAccessibilityHandler();
+                expect(handler != nullptr);
+                if (handler != nullptr) {
+                    expect(handler->getTitle().containsIgnoreCase(
+                        "Spectrum finite peak-hold duration"));
                 }
             }
         }

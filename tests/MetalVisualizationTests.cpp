@@ -236,6 +236,31 @@ public:
             detail::makeSpectrumDecibelTicks(-90.0F, -90.0F, 300.0F).count, std::size_t { 0 });
         expectEquals(detail::makeSpectrumDecibelTicks(-90.0F, 0.0F, 0.0F).count, std::size_t { 0 });
 
+        beginTest("Spectrum slope and sRGB conversion preserve their presentation references");
+
+        expectWithinAbsoluteError(
+            detail::spectrumSlopeCompensationDecibels(1'000.0F, 6.0F), 0.0F, 1.0e-6F);
+        expectWithinAbsoluteError(
+            detail::spectrumSlopeCompensationDecibels(2'000.0F, 6.0F), 6.0F, 1.0e-6F);
+        expectWithinAbsoluteError(
+            detail::spectrumSlopeCompensationDecibels(500.0F, 6.0F), -6.0F, 1.0e-6F);
+        const auto compensatedSilence
+            = detail::sanitiseSpectrumAnalysisDecibels(minimumSpectrumDecibels)
+            + detail::spectrumSlopeCompensationDecibels(20'000.0F, 6.0F);
+        expect(compensatedSilence < -150.0F);
+        expectWithinAbsoluteError(
+            detail::sanitiseSpectrumAnalysisDecibels(std::numeric_limits<float>::quiet_NaN()),
+            minimumSpectrumDecibels, 1.0e-6F);
+        expectWithinAbsoluteError(
+            detail::sanitiseSpectrumAnalysisDecibels(std::numeric_limits<float>::infinity()),
+            minimumSpectrumDecibels, 1.0e-6F);
+        expectWithinAbsoluteError(
+            detail::sanitiseSpectrumAnalysisDecibels(-140.0F), -140.0F, 1.0e-6F);
+        expectWithinAbsoluteError(detail::sanitiseSpectrumAnalysisDecibels(24.0F), 24.0F, 1.0e-6F);
+        expectWithinAbsoluteError(detail::srgbComponentToLinear(0.0F), 0.0F, 1.0e-7F);
+        expectWithinAbsoluteError(detail::srgbComponentToLinear(1.0F), 1.0F, 1.0e-7F);
+        expectWithinAbsoluteError(detail::srgbComponentToLinear(0.5F), 0.214041F, 1.0e-5F);
+
         beginTest("Peak/RMS ticks use the accepted fixed scale and bounded label selection");
 
         constexpr std::array expectedMeterTicks { -60, -48, -36, -24, -12, -6, 0, 3 };
@@ -385,12 +410,30 @@ public:
         expectEquals(hiddenClearLayout.clearHitBounds.width(), 0.0F);
         expect(!hiddenClearLayout.clearHitBounds.contains(0.0F, 0.0F));
 
+        beginTest("Spectrum CLEAR uses a visible control and a twenty-four-point hit target");
+
+        const auto spectrumClearLayout
+            = detail::calculateSpectrumClearLayout(320.0F, 180.0F, 22.0F);
+        expect(spectrumClearLayout.visualBounds.width() > 0.0F);
+        expect(spectrumClearLayout.hitBounds.height() >= 24.0F);
+        expect(spectrumClearLayout.hitBounds.contains(
+            (spectrumClearLayout.visualBounds.left + spectrumClearLayout.visualBounds.right) * 0.5F,
+            (spectrumClearLayout.visualBounds.bottom + spectrumClearLayout.visualBounds.top)
+                * 0.5F));
+        const auto unavailableSpectrumClear
+            = detail::calculateSpectrumClearLayout(80.0F, 180.0F, 22.0F);
+        expectEquals(unavailableSpectrumClear.visualBounds.width(), 0.0F);
+
         beginTest("Axis and meter geometry remain within the fixed Metal vertex buffer");
 
         expectEquals(detail::MetalVisualizationGeometryLimits::maximumGeneratedVertices,
-            std::size_t { 20'718 });
+            std::size_t { 53'550 });
         expect(detail::MetalVisualizationGeometryLimits::maximumGeneratedVertices
             <= detail::MetalVisualizationGeometryLimits::vertexCapacity);
+        expectEquals(
+            detail::MetalVisualizationGeometryLimits::vertexCapacity, std::size_t { 65'536 });
+        expectEquals(detail::MetalVisualizationGeometryLimits::maximumSpectrumVertices,
+            (6 * maximumSpectrumBinCount) + 30);
 
         beginTest("Spectrum frame metadata accepts only supported FFT storage bounds");
 
@@ -484,27 +527,34 @@ public:
         expect(visualization.getDashboardLayoutSplits() == editingSplits);
         visualization.setDashboardLayoutEditCancelCallback({ });
 
-        beginTest("Spectrum render settings publish the shared frequency spacing atomically");
+        beginTest("Spectrum render settings publish one coherent presentation snapshot");
 
-        visualization.setSpectrumSettings({ -180.0F, 12.0F, 0.25F, 0.65F });
+        visualization.setSpectrumSettings({ -180.0F, 12.0F, 4.5F, 0.65F, 0.50F, 0x123456U });
         const auto renderSettings = visualization.getSpectrumSettings();
         expectWithinAbsoluteError(renderSettings.floorDecibels, -180.0F, 0.001F);
         expectWithinAbsoluteError(renderSettings.ceilingDecibels, 12.0F, 0.001F);
-        expectWithinAbsoluteError(renderSettings.smoothing, 0.25F, 0.0001F);
+        expectWithinAbsoluteError(renderSettings.slopeDecibelsPerOctave, 4.5F, 0.0001F);
         expectWithinAbsoluteError(renderSettings.frequencySpacing, 0.65F, 0.0001F);
+        expectWithinAbsoluteError(renderSettings.fillOpacity, 0.50F, 0.0001F);
+        expect(renderSettings.traceColourRgb == 0x123456U);
 
-        visualization.setSpectrumSettings({ -40.0F, -24.0F, 0.40F, 1.0F });
+        visualization.setSpectrumSettings({ -40.0F, -24.0F, 3.0F, 1.0F, 0.0F, 0xffabcdefU });
         const auto minimumSpanSettings = visualization.getSpectrumSettings();
         expectWithinAbsoluteError(minimumSpanSettings.floorDecibels, -48.0F, 0.001F);
         expectWithinAbsoluteError(minimumSpanSettings.ceilingDecibels, -24.0F, 0.001F);
+        expectWithinAbsoluteError(minimumSpanSettings.fillOpacity, 0.0F, 0.0001F);
+        expect(minimumSpanSettings.traceColourRgb == 0xabcdefU);
 
         const auto notFinite = std::numeric_limits<float>::quiet_NaN();
-        visualization.setSpectrumSettings({ notFinite, notFinite, notFinite, notFinite });
+        visualization.setSpectrumSettings(
+            { notFinite, notFinite, notFinite, notFinite, notFinite });
         const auto defaultedSettings = visualization.getSpectrumSettings();
         expectWithinAbsoluteError(defaultedSettings.floorDecibels, -90.0F, 0.001F);
         expectWithinAbsoluteError(defaultedSettings.ceilingDecibels, 0.0F, 0.001F);
-        expectWithinAbsoluteError(defaultedSettings.smoothing, 0.35F, 0.0001F);
+        expectWithinAbsoluteError(defaultedSettings.slopeDecibelsPerOctave, 0.0F, 0.0001F);
         expectWithinAbsoluteError(defaultedSettings.frequencySpacing, 1.0F, 0.0001F);
+        expectWithinAbsoluteError(defaultedSettings.fillOpacity, 0.18F, 0.0001F);
+        expect(defaultedSettings.traceColourRgb == 0x55c7e8U);
 
         visualization.setEffectiveActivityCallback({ });
     }

@@ -4,7 +4,7 @@
 >
 > **Established:** 2026-08-15
 >
-> **Last updated:** 2026-08-15
+> **Last updated:** 2026-08-16
 
 This document records the requirements and technical choices agreed for Audio
 Insight. Keep accepted decisions current as the implementation evolves. Items
@@ -633,10 +633,11 @@ authorize fake values, background work, or speculative resource allocation.
   correlation result.
 - Resolved the remaining panel algorithms, scales, labels, controls, defaults,
   persistence, accessibility, and reset behavior in `docs/analyzer-ui.md`.
-- Moved Floor, Ceiling, and Smooth from the toolbar into the Spectrum settings
-  section. Until average-power temporal analysis lands, the interim normalized
-  Smooth control drives renderer interpolation and displays approximately
-  `0.35` for the fresh 75 ms configuration; zero remains immediate/off.
+- Moved Floor, Ceiling, and time-based Temporal averaging from the toolbar into
+  the Spectrum settings section. Temporal averaging now operates on calibrated
+  power with Off plus a logarithmic 25–2000 ms range and a responsive 75 ms
+  default. A separate fixed 6 ms renderer interpolation only bridges analysis
+  snapshots at display cadence and is not exposed as a setting.
 - Chose the macOS system monospaced font for the first scale-aware Metal glyph
   atlas, avoiding a bundled font asset while keeping rasterization and cached
   run construction outside the display callback.

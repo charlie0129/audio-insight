@@ -4,7 +4,7 @@
 >
 > **Established:** 2026-08-15
 >
-> **Last updated:** 2026-08-15
+> **Last updated:** 2026-08-16
 
 This document is the durable source of truth for Audio Insight's analyzer
 dashboard, layout editing, settings inspector, and per-panel presentation. The
@@ -157,13 +157,13 @@ there is no separate Apply step. Give each section a reset-to-default action.
 Keep settings for placeholder panels visibly disabled and labeled as not yet
 implemented rather than accepting changes that do nothing without explanation.
 
-Floor, Ceiling, and Smooth live in the Spectrum section rather than the toolbar;
-do not duplicate them. The current interim Smooth control remains normalized
-from `0` (immediate/off) to `1` (strongest renderer interpolation). A fresh
-75 ms analyzer configuration displays approximately `0.35`, replacing the
-earlier `0.40` default. This control describes the current visual interpolation,
-not the average-power analyzer defined below. Replace it with the logarithmic,
-time-based Temporal averaging control when that analyzer path is implemented.
+Floor, Ceiling, and Temporal averaging live in the Spectrum section rather than
+the toolbar; do not duplicate them. Temporal averaging exposes Off plus a
+logarithmic 25–2000 ms range and defaults to a responsive 75 ms. It controls the
+average-power analyzer defined below, not display interpolation. The Metal
+renderer separately applies a fixed 6 ms interpolation to bridge analysis
+snapshots smoothly at display refresh rate; that short presentation step is not
+user-adjustable or serialized.
 
 ### Settings and Metrics exclusivity
 

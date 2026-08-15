@@ -117,6 +117,11 @@ struct PeakRmsPanelLayout final {
     bool showReadouts = false;
 };
 
+struct SpectrumClearLayout final {
+    PeakRmsLogicalRect visualBounds;
+    PeakRmsLogicalRect hitBounds;
+};
+
 struct PeakRmsTickLabelSelection final {
     std::array<bool, peakRmsMajorDecibelTicks.size()> visible { };
 };
@@ -204,6 +209,20 @@ struct SpectrumDecibelTicks final {
     float headerHeight, std::uint32_t channelCount, float textHeight, float maximumTickLabelWidth,
     float maximumReadoutWidth) noexcept;
 
+/** Computes the shared Spectrum CLEAR drawing and pointer bounds in logical points. */
+[[nodiscard]] SpectrumClearLayout calculateSpectrumClearLayout(
+    float panelWidth, float panelHeight, float headerHeight) noexcept;
+
+/** Presentation-only slope adjustment referenced to 1 kHz. */
+[[nodiscard]] float spectrumSlopeCompensationDecibels(
+    float frequencyHz, float slopeDecibelsPerOctave) noexcept;
+
+/** Preserves calibrated analyzer dB until final presentation-range clipping. */
+[[nodiscard]] float sanitiseSpectrumAnalysisDecibels(float decibels) noexcept;
+
+/** Converts one normalized sRGB component to the linear value expected by Metal blending. */
+[[nodiscard]] float srgbComponentToLinear(float component) noexcept;
+
 /** Validates the fixed-capacity Spectrum metadata before indexing renderer storage. */
 [[nodiscard]] constexpr bool hasSupportedSpectrumMetadata(const VisualizationFrame& frame) noexcept
 {
@@ -216,12 +235,14 @@ struct SpectrumDecibelTicks final {
 
 /** Compile-time proof inputs for the one bounded shared vertex buffer. */
 struct MetalVisualizationGeometryLimits final {
-    static constexpr std::size_t vertexCapacity = 24'576;
+    static constexpr std::size_t vertexCapacity = 65'536;
     static constexpr std::size_t maximumShellVertices = dashboardPanelCount * 36;
     static constexpr std::size_t maximumDashboardSplitterVertices = dashboardSplitterCount * 6;
     static constexpr std::size_t maximumGridVertices
         = ((2 * maximumFrequencyAxisTickCount) + cachedDecibelTickCount) * 6;
-    static constexpr std::size_t maximumSpectrumVertices = 2 * maximumSpectrumBinCount;
+    // Fill, held trace, and live trace each require two vertices per FFT bin;
+    // the Spectrum CLEAR target adds one fill quad plus its four border quads.
+    static constexpr std::size_t maximumSpectrumVertices = (6 * maximumSpectrumBinCount) + (5 * 6);
     // Eight scale ticks, one five-quad CLEAR target, and four quads (track,
     // RMS, live sample peak, held sample peak) for each of two channels.
     static constexpr std::size_t maximumMeterVertices
@@ -231,11 +252,14 @@ struct MetalVisualizationGeometryLimits final {
     // CLEAR, two channel labels, two OVER labels, two six-glyph readouts,
     // and every fixed scale label.
     static constexpr std::size_t maximumPeakRmsTextGlyphs = 5 + 2 + 8 + 12 + 20;
+    static constexpr std::size_t maximumSpectrumControlTextGlyphs = 5;
     static constexpr std::size_t maximumNumericAxisTextGlyphs
         = (2 * maximumFrequencyAxisTickCount * maximumFrequencyAxisLabelGlyphs)
         + (cachedDecibelTickCount * maximumDecibelLabelGlyphs);
     static constexpr std::size_t maximumTextVertices
-        = (maximumFixedTextGlyphs + maximumNumericAxisTextGlyphs + maximumPeakRmsTextGlyphs) * 6;
+        = (maximumFixedTextGlyphs + maximumNumericAxisTextGlyphs + maximumPeakRmsTextGlyphs
+              + maximumSpectrumControlTextGlyphs)
+        * 6;
     static constexpr std::size_t maximumGeneratedVertices = maximumShellVertices
         + maximumDashboardSplitterVertices + maximumGridVertices + maximumSpectrumVertices
         + maximumMeterVertices + maximumTextVertices;
@@ -328,12 +352,14 @@ struct MetalRenderTelemetry {
     bool resetPending = false;
 };
 
-/** Thread-safe render settings corresponding to the spectrum APVTS values. */
+/** Coherently packed, presentation-only Spectrum settings. */
 struct SpectrumRenderSettings {
     float floorDecibels = -90.0F;
     float ceilingDecibels = 0.0F;
-    float smoothing = 0.35F;
+    float slopeDecibelsPerOctave = 0.0F;
     float frequencySpacing = 1.0F;
+    float fillOpacity = 0.18F;
+    std::uint32_t traceColourRgb = 0x55c7e8U;
 };
 
 /**
@@ -369,9 +395,9 @@ public:
     void setEffectiveActivityCallback(EffectiveActivityCallback callback);
 
     /**
-        Updates the render range and temporal smoothing without requiring the
-        message thread. smoothing is normalized: zero is immediate and one is
-        the strongest smoothing.
+        Updates presentation settings without requiring the message thread.
+        Analyzer temporal averaging is worker-owned and is not part of this
+        renderer snapshot.
     */
     void setSpectrumSettings(SpectrumRenderSettings settings) noexcept;
     [[nodiscard]] SpectrumRenderSettings getSpectrumSettings() const noexcept;

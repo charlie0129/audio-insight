@@ -1,10 +1,11 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 
 #include "AnalyzerSettingsPanel.h"
-#include "SpectrumSmoothingMapping.h"
 
 #include <algorithm>
 #include <array>
+#include <cmath>
+#include <optional>
 #include <utility>
 
 namespace audio_insight {
@@ -18,10 +19,11 @@ const auto disabledText = juce::Colour { 0xff758396 };
 const auto accent = juce::Colour { 0xff55c7e8 };
 
 constexpr int headerHeight = 52;
-constexpr int contentHeight = 1240;
+constexpr int contentHeight = 1210;
 constexpr int sectionGap = 10;
 constexpr int sectionHeaderHeight = 34;
 constexpr int rowHeight = 34;
+constexpr double temporalAveragingOffTrackProportion = 0.04;
 
 enum SectionIndex : std::size_t {
     sharedSection,
@@ -71,6 +73,72 @@ void configureSlider(juce::Slider& slider, const juce::String& name,
     slider.setColour(juce::Slider::textBoxOutlineColourId, panelOutline);
 }
 
+juce::NormalisableRange<double> makeTemporalAveragingRange()
+{
+    return { 0.0, TemporalAveragingSettings::maximumMilliseconds,
+        [](const double, const double, const double proportion) {
+            if (proportion <= temporalAveragingOffTrackProportion) {
+                return TemporalAveragingSettings::minimumMilliseconds * proportion
+                    / temporalAveragingOffTrackProportion;
+            }
+
+            const auto enabledProportion = (proportion - temporalAveragingOffTrackProportion)
+                / (1.0 - temporalAveragingOffTrackProportion);
+            const auto enabledRatio = TemporalAveragingSettings::maximumMilliseconds
+                / TemporalAveragingSettings::minimumMilliseconds;
+            return TemporalAveragingSettings::minimumMilliseconds
+                * std::pow(enabledRatio, enabledProportion);
+        },
+        [](const double, const double, const double value) {
+            if (value <= TemporalAveragingSettings::minimumMilliseconds) {
+                return temporalAveragingOffTrackProportion * value
+                    / TemporalAveragingSettings::minimumMilliseconds;
+            }
+
+            const auto enabledRatio = TemporalAveragingSettings::maximumMilliseconds
+                / TemporalAveragingSettings::minimumMilliseconds;
+            const auto enabledProportion
+                = std::log(value / TemporalAveragingSettings::minimumMilliseconds)
+                / std::log(enabledRatio);
+            return temporalAveragingOffTrackProportion
+                + ((1.0 - temporalAveragingOffTrackProportion) * enabledProportion);
+        },
+        [](const double, const double, const double value) {
+            if (!std::isfinite(value))
+                return TemporalAveragingSettings::defaultMilliseconds;
+            if (value <= TemporalAveragingSettings::minimumMilliseconds * 0.5)
+                return 0.0;
+
+            return std::clamp(std::round(value), TemporalAveragingSettings::minimumMilliseconds,
+                TemporalAveragingSettings::maximumMilliseconds);
+        } };
+}
+
+juce::String formatSrgbColor(const SrgbColor color)
+{
+    return "#"
+        + juce::String::toHexString(static_cast<int>(color.packedRgb()))
+              .paddedLeft('0', 6)
+              .toUpperCase();
+}
+
+std::optional<SrgbColor> parseSrgbColor(const juce::String& untrimmedText)
+{
+    const auto text = untrimmedText.trim();
+    if (text.length() != 7 || text[0] != '#')
+        return std::nullopt;
+
+    auto packed = std::uint32_t { 0 };
+    for (auto index = 1; index < text.length(); ++index) {
+        const auto digit = juce::CharacterFunctions::getHexDigitValue(text[index]);
+        if (digit < 0)
+            return std::nullopt;
+        packed = (packed << 4U) | static_cast<std::uint32_t>(digit);
+    }
+
+    return SrgbColor::fromPackedRgb(packed);
+}
+
 template <typename Control>
 void configureUnavailableControl(Control& control, const juce::String& tooltip)
 {
@@ -83,8 +151,10 @@ void configureUnavailableControl(Control& control, const juce::String& tooltip)
 class AnalyzerSettingsPanel::Content final : public juce::Component,
                                              private juce::Slider::Listener {
 public:
-    Content(AnalyzerConfiguration initialConfiguration, ConfigurationChanged configurationChanged)
-        : configurationChanged_(std::move(configurationChanged))
+    Content(AnalyzerConfiguration initialConfiguration, ConfigurationChanged configurationChanged,
+        CloseRequested closeRequested)
+        : configurationChanged_(std::move(configurationChanged)),
+          closeRequested_(std::move(closeRequested))
     {
         setName("Analyzer settings controls");
         setFocusContainerType(juce::Component::FocusContainerType::focusContainer);
@@ -196,7 +266,7 @@ public:
 
         configureLabel(floorLabel_, "Floor");
         configureLabel(ceilingLabel_, "Ceiling");
-        configureLabel(averagingLabel_, "Smooth");
+        configureLabel(averagingLabel_, "Temporal averaging");
         addAndMakeVisible(floorLabel_);
         addAndMakeVisible(ceilingLabel_);
         addAndMakeVisible(averagingLabel_);
@@ -216,64 +286,98 @@ public:
         ceiling_.addListener(this);
         addAndMakeVisible(ceiling_);
 
-        configureSlider(averaging_, "Spectrum smooth",
-            "Current visual smoothing; zero is immediate and one is strongest", "");
-        averaging_.setComponentID("settingsSpectrumSmooth");
-        averaging_.setRange(0.0, 1.0, 0.01);
-        averaging_.setNumDecimalPlacesToDisplay(2);
+        configureSlider(averaging_, "Spectrum temporal averaging",
+            "Average Spectrum power over time; Off uses each unsmoothed FFT snapshot", "");
+        averaging_.setComponentID("settingsSpectrumTemporalAveraging");
+        averaging_.setNormalisableRange(makeTemporalAveragingRange());
+        averaging_.setNumDecimalPlacesToDisplay(0);
+        averaging_.textFromValueFunction = [](const double value) {
+            if (value <= 0.0)
+                return juce::String("Off");
+            return juce::String(juce::roundToInt(value)) + " ms";
+        };
+        averaging_.valueFromTextFunction = [](juce::String text) {
+            text = text.trim().toLowerCase();
+            if (text == "off" || text == "none" || text == "immediate")
+                return 0.0;
+            return text.getDoubleValue();
+        };
         averaging_.addListener(this);
         addAndMakeVisible(averaging_);
-
-        configureLabel(spectrumFuture_,
-            "Additional Spectrum presentation controls are not yet implemented.", false);
-        spectrumFuture_.setMinimumHorizontalScale(0.8F);
-        addAndMakeVisible(spectrumFuture_);
 
         slope_.addItemList({ "0 dB/oct", "+3 dB/oct", "+4.5 dB/oct", "+6 dB/oct" }, 1);
         slope_.setName("Spectrum slope compensation");
         slope_.setTitle("Spectrum slope compensation");
         slope_.setDescription("Presentation slope compensation referenced at 1 kHz");
+        slope_.setTooltip("Raise higher-frequency presentation by a fixed dB-per-octave slope");
         slope_.setComponentID("settingsSpectrumSlope");
+        slope_.setWantsKeyboardFocus(true);
+        slope_.onChange = [this] {
+            if (synchronizing_)
+                return;
+
+            configuration_.spectrum.slope
+                = static_cast<SpectrumSlope>(std::max(1, slope_.getSelectedId()) - 1);
+            publishSanitizedConfiguration();
+        };
         addAndMakeVisible(slope_);
-        configureUnavailableControl(slope_, "Spectrum slope compensation is not yet implemented");
 
         peakHoldMode_.addItemList({ "Off", "Finite", "Infinite" }, 1);
         peakHoldMode_.setName("Spectrum peak hold mode");
         peakHoldMode_.setTitle("Spectrum peak hold mode");
         peakHoldMode_.setDescription("Whether Spectrum peak hold is off, finite, or infinite");
+        peakHoldMode_.setTooltip("Select Off, a timed hold followed by decay, or Infinite hold");
         peakHoldMode_.setComponentID("settingsSpectrumPeakHoldMode");
+        peakHoldMode_.setWantsKeyboardFocus(true);
+        peakHoldMode_.onChange = [this] {
+            if (synchronizing_)
+                return;
+
+            configuration_.spectrum.peakHoldMode
+                = static_cast<SpectrumPeakHoldMode>(std::max(1, peakHoldMode_.getSelectedId()) - 1);
+            publishSanitizedConfiguration();
+        };
         addAndMakeVisible(peakHoldMode_);
-        configureUnavailableControl(peakHoldMode_, "Spectrum peak hold is not yet implemented");
 
         configureSlider(peakHoldDuration_, "Spectrum finite peak-hold duration",
             "Duration of finite Spectrum peak hold before decay", " s");
         peakHoldDuration_.setComponentID("settingsSpectrumPeakHoldDuration");
         peakHoldDuration_.setRange(SpectrumSettings::minimumPeakHoldSeconds,
             SpectrumSettings::maximumPeakHoldSeconds, 0.01);
+        peakHoldDuration_.addListener(this);
         addAndMakeVisible(peakHoldDuration_);
-        configureUnavailableControl(
-            peakHoldDuration_, "Spectrum finite peak hold is not yet implemented");
 
         traceColor_.setName("Spectrum trace colour");
         traceColor_.setTitle("Spectrum trace colour");
-        traceColor_.setDescription("sRGB colour used for the Spectrum trace");
+        traceColor_.setDescription("sRGB colour used for the Spectrum trace, as #RRGGBB");
+        traceColor_.setTooltip(
+            "Enter an sRGB colour as #RRGGBB, then press Return or leave the field");
         traceColor_.setComponentID("settingsSpectrumTraceColor");
-        traceColor_.setReadOnly(true);
+        traceColor_.setReadOnly(false);
         traceColor_.setMultiLine(false);
+        traceColor_.setInputRestrictions(7, "#0123456789abcdefABCDEF");
+        traceColor_.setSelectAllWhenFocused(true);
+        traceColor_.setWantsKeyboardFocus(true);
         traceColor_.setJustification(juce::Justification::centredRight);
         traceColor_.setColour(juce::TextEditor::textColourId, primaryText);
         traceColor_.setColour(
             juce::TextEditor::backgroundColourId, panelBackground.brighter(0.08F));
         traceColor_.setColour(juce::TextEditor::outlineColourId, panelOutline);
+        traceColor_.onReturnKey = [this] { commitTraceColor(); };
+        traceColor_.onFocusLost = [this] { commitTraceColor(); };
+        traceColor_.onEscapeKey = [this] {
+            traceColor_.setText(formatSrgbColor(configuration_.spectrum.traceColor), false);
+            if (closeRequested_)
+                closeRequested_();
+        };
         addAndMakeVisible(traceColor_);
-        configureUnavailableControl(traceColor_, "Spectrum trace colour is not yet implemented");
 
         configureSlider(fillOpacity_, "Spectrum fill opacity",
             "Opacity of the area beneath the Spectrum trace", "%");
         fillOpacity_.setComponentID("settingsSpectrumFillOpacity");
         fillOpacity_.setRange(0.0, 50.0, 0.1);
+        fillOpacity_.addListener(this);
         addAndMakeVisible(fillOpacity_);
-        configureUnavailableControl(fillOpacity_, "Spectrum fill opacity is not yet implemented");
 
         configureLabel(peakRmsStatus_,
             "Live sample peak and RMS currently use fixed calibrated ballistics.", false);
@@ -360,12 +464,11 @@ public:
             addAndMakeVisible(rowLabels_[index]);
         }
 
-        const std::array<const char*, 5> spectrumUnavailableLabelText { "Slope", "Peak hold",
-            "Hold duration", "Trace colour", "Fill opacity" };
-        for (auto index = std::size_t { 0 }; index < spectrumUnavailableLabels_.size(); ++index) {
-            configureLabel(
-                spectrumUnavailableLabels_[index], spectrumUnavailableLabelText[index], false);
-            addAndMakeVisible(spectrumUnavailableLabels_[index]);
+        const std::array<const char*, 5> spectrumLabelText { "Slope", "Peak hold", "Hold duration",
+            "Trace colour", "Fill opacity" };
+        for (auto index = std::size_t { 0 }; index < spectrumLabels_.size(); ++index) {
+            configureLabel(spectrumLabels_[index], spectrumLabelText[index]);
+            addAndMakeVisible(spectrumLabels_[index]);
         }
 
         const std::array<const char*, 4> spectrogramUnavailableLabelText { "Colour response",
@@ -389,6 +492,11 @@ public:
         floor_.setExplicitFocusOrder(8);
         ceiling_.setExplicitFocusOrder(9);
         averaging_.setExplicitFocusOrder(10);
+        slope_.setExplicitFocusOrder(11);
+        peakHoldMode_.setExplicitFocusOrder(12);
+        peakHoldDuration_.setExplicitFocusOrder(13);
+        traceColor_.setExplicitFocusOrder(14);
+        fillOpacity_.setExplicitFocusOrder(15);
         resetButtons_[peakRmsSection].setEnabled(false);
         resetButtons_[spectrogramSection].setEnabled(false);
         resetButtons_[stereoSection].setEnabled(false);
@@ -402,10 +510,17 @@ public:
         fftSize_.onChange = nullptr;
         window_.onChange = nullptr;
         fftRate_.onChange = nullptr;
+        slope_.onChange = nullptr;
+        peakHoldMode_.onChange = nullptr;
+        traceColor_.onReturnKey = nullptr;
+        traceColor_.onFocusLost = nullptr;
+        traceColor_.onEscapeKey = nullptr;
         floor_.removeListener(this);
         ceiling_.removeListener(this);
         averaging_.removeListener(this);
         frequencySpacing_.removeListener(this);
+        peakHoldDuration_.removeListener(this);
+        fillOpacity_.removeListener(this);
         for (auto& reset : resetButtons_)
             reset.onClick = nullptr;
     }
@@ -438,7 +553,7 @@ public:
         const auto sectionWidth = std::min(680, available.getWidth());
         auto y = available.getY();
 
-        const std::array heights { 224, 352, 92, 280, 80, 124 };
+        const std::array heights { 224, 322, 92, 280, 80, 124 };
         for (auto index = std::size_t { 0 }; index < sectionAreas_.size(); ++index) {
             sectionAreas_[index] = { available.getX(), y, sectionWidth, heights[index] };
             auto header = sectionAreas_[index].reduced(10, 0).removeFromTop(sectionHeaderHeight);
@@ -461,16 +576,11 @@ public:
         layoutLabeledRow(spectrum.removeFromTop(rowHeight), floorLabel_, floor_);
         layoutLabeledRow(spectrum.removeFromTop(rowHeight), ceilingLabel_, ceiling_);
         layoutLabeledRow(spectrum.removeFromTop(rowHeight), averagingLabel_, averaging_);
-        spectrumFuture_.setBounds(spectrum.removeFromTop(30));
-        layoutLabeledRow(spectrum.removeFromTop(rowHeight), spectrumUnavailableLabels_[0], slope_);
-        layoutLabeledRow(
-            spectrum.removeFromTop(rowHeight), spectrumUnavailableLabels_[1], peakHoldMode_);
-        layoutLabeledRow(
-            spectrum.removeFromTop(rowHeight), spectrumUnavailableLabels_[2], peakHoldDuration_);
-        layoutLabeledRow(
-            spectrum.removeFromTop(rowHeight), spectrumUnavailableLabels_[3], traceColor_);
-        layoutLabeledRow(
-            spectrum.removeFromTop(rowHeight), spectrumUnavailableLabels_[4], fillOpacity_);
+        layoutLabeledRow(spectrum.removeFromTop(rowHeight), spectrumLabels_[0], slope_);
+        layoutLabeledRow(spectrum.removeFromTop(rowHeight), spectrumLabels_[1], peakHoldMode_);
+        layoutLabeledRow(spectrum.removeFromTop(rowHeight), spectrumLabels_[2], peakHoldDuration_);
+        layoutLabeledRow(spectrum.removeFromTop(rowHeight), spectrumLabels_[3], traceColor_);
+        layoutLabeledRow(spectrum.removeFromTop(rowHeight), spectrumLabels_[4], fillOpacity_);
 
         auto peak = sectionAreas_[peakRmsSection].reduced(12, 8);
         peak.removeFromTop(sectionHeaderHeight - 8);
@@ -511,13 +621,16 @@ private:
         else if (slider == &ceiling_)
             configuration_.spectrum.ceilingDb = ceiling_.getValue();
         else if (slider == &averaging_) {
-            const auto normalized = averaging_.getValue();
-            configuration_.spectrum.temporalAveraging.enabled = normalized > 0.0;
-            if (normalized > 0.0)
-                configuration_.spectrum.temporalAveraging.milliseconds
-                    = SpectrumSmoothingMapping::toMilliseconds(normalized);
+            const auto milliseconds = averaging_.getValue();
+            configuration_.spectrum.temporalAveraging.enabled = milliseconds > 0.0;
+            if (milliseconds > 0.0)
+                configuration_.spectrum.temporalAveraging.milliseconds = milliseconds;
         } else if (slider == &frequencySpacing_)
             configuration_.sharedAnalysis.frequencySpacing = frequencySpacing_.getValue();
+        else if (slider == &peakHoldDuration_)
+            configuration_.spectrum.finitePeakHoldSeconds = peakHoldDuration_.getValue();
+        else if (slider == &fillOpacity_)
+            configuration_.spectrum.fillOpacity = fillOpacity_.getValue() / 100.0;
         else
             return;
 
@@ -546,13 +659,47 @@ private:
             configurationChanged_(configuration_);
     }
 
+    void commitTraceColor()
+    {
+        if (synchronizing_)
+            return;
+
+        const auto parsed = parseSrgbColor(traceColor_.getText());
+        if (!parsed.has_value()) {
+            traceColor_.setText(formatSrgbColor(configuration_.spectrum.traceColor), false);
+            return;
+        }
+
+        if (*parsed == configuration_.spectrum.traceColor) {
+            traceColor_.setText(formatSrgbColor(*parsed), false);
+            return;
+        }
+
+        configuration_.spectrum.traceColor = *parsed;
+        publishSanitizedConfiguration();
+    }
+
+    void updatePeakHoldDurationAvailability()
+    {
+        const auto finite = configuration_.spectrum.peakHoldMode == SpectrumPeakHoldMode::finite;
+        peakHoldDuration_.setEnabled(finite);
+        peakHoldDuration_.setWantsKeyboardFocus(finite);
+        peakHoldDuration_.setAlpha(finite ? 1.0F : 0.58F);
+        peakHoldDuration_.setTooltip(finite
+                ? "Duration of finite Spectrum peak hold before fixed decay begins"
+                : "Available when Spectrum peak hold is set to Finite");
+        spectrumLabels_[2].setEnabled(finite);
+        spectrumLabels_[2].setAlpha(finite ? 1.0F : 0.58F);
+    }
+
     void synchronizeControls()
     {
         const juce::ScopedValueSetter synchronizing(synchronizing_, true);
         floor_.setValue(configuration_.spectrum.floorDb, juce::dontSendNotification);
         ceiling_.setValue(configuration_.spectrum.ceilingDb, juce::dontSendNotification);
-        averaging_.setValue(
-            SpectrumSmoothingMapping::toNormalized(configuration_.spectrum.temporalAveraging),
+        averaging_.setValue(configuration_.spectrum.temporalAveraging.enabled
+                ? configuration_.spectrum.temporalAveraging.milliseconds
+                : 0.0,
             juce::dontSendNotification);
         frequencySpacing_.setValue(
             configuration_.sharedAnalysis.frequencySpacing, juce::dontSendNotification);
@@ -563,12 +710,8 @@ private:
             static_cast<int>(configuration_.spectrum.peakHoldMode) + 1, juce::dontSendNotification);
         peakHoldDuration_.setValue(
             configuration_.spectrum.finitePeakHoldSeconds, juce::dontSendNotification);
-        traceColor_.setText("#"
-                + juce::String::toHexString(
-                    static_cast<int>(configuration_.spectrum.traceColor.packedRgb()))
-                    .paddedLeft('0', 6)
-                    .toUpperCase(),
-            false);
+        updatePeakHoldDurationAvailability();
+        traceColor_.setText(formatSrgbColor(configuration_.spectrum.traceColor), false);
         fillOpacity_.setValue(
             configuration_.spectrum.fillOpacity * 100.0, juce::dontSendNotification);
 
@@ -610,6 +753,7 @@ private:
     }
 
     ConfigurationChanged configurationChanged_;
+    CloseRequested closeRequested_;
     AnalyzerConfiguration configuration_;
     bool synchronizing_ = false;
 
@@ -617,7 +761,7 @@ private:
     std::array<juce::Label, sectionCount> sectionHeadings_;
     std::array<juce::TextButton, sectionCount> resetButtons_;
     std::array<juce::Label, 7> rowLabels_;
-    std::array<juce::Label, 5> spectrumUnavailableLabels_;
+    std::array<juce::Label, 5> spectrumLabels_;
     std::array<juce::Label, 4> spectrogramUnavailableLabels_;
 
     juce::Label sharedStatus_;
@@ -632,7 +776,6 @@ private:
     juce::Slider floor_;
     juce::Slider ceiling_;
     juce::Slider averaging_;
-    juce::Label spectrumFuture_;
     juce::ComboBox slope_;
     juce::ComboBox peakHoldMode_;
     juce::Slider peakHoldDuration_;
@@ -660,7 +803,8 @@ private:
 AnalyzerSettingsPanel::AnalyzerSettingsPanel(AnalyzerConfiguration initialConfiguration,
     ConfigurationChanged configurationChanged, CloseRequested closeRequested)
     : closeRequested_(std::move(closeRequested)),
-      content_(std::make_unique<Content>(initialConfiguration, std::move(configurationChanged)))
+      content_(std::make_unique<Content>(
+          initialConfiguration, std::move(configurationChanged), closeRequested_))
 {
     setName("Analyzer settings");
     setComponentID("analyzerSettingsPanel");

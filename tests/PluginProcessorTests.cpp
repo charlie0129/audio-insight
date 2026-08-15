@@ -3,7 +3,6 @@
 #include "plugin/PluginEditor.h"
 #include "plugin/PluginProcessor.h"
 #include "ui/MetalVisualization.h"
-#include "ui/SpectrumSmoothingMapping.h"
 
 #include <juce_core/juce_core.h>
 
@@ -271,7 +270,9 @@ public:
             configuration.sharedAnalysis.frequencySpacing = 0.25;
             configuration.spectrum.floorDb = -120.0;
             configuration.spectrum.ceilingDb = 6.0;
-            configuration.spectrum.temporalAveraging.milliseconds = 125.0;
+            configuration.spectrum.slope = SpectrumSlope::db4Point5PerOctave;
+            configuration.spectrum.fillOpacity = 0.42;
+            configuration.spectrum.traceColor = SrgbColor::fromPackedRgb(0x123456U);
             processor.setAnalyzerConfiguration(configuration);
             const auto afterEdit = processor.getAnalysisTelemetry();
 
@@ -280,6 +281,23 @@ public:
             expect(afterEdit.configuredFftSize == beforeEdit.configuredFftSize);
             expect(afterEdit.configuredFftWindow == beforeEdit.configuredFftWindow);
             expect(afterEdit.requestedFftSliceRateHz == beforeEdit.requestedFftSliceRateHz);
+            expect(afterEdit.spectrumTemporalConfigurationChanges
+                == beforeEdit.spectrumTemporalConfigurationChanges);
+        });
+
+        testCase("Temporal analyzer edits remain scoped away from the FFT generation", [this] {
+            PluginProcessor processor;
+            const auto beforeEdit = processor.getAnalysisTelemetry();
+            auto configuration = processor.getAnalyzerConfiguration();
+            configuration.spectrum.temporalAveraging.milliseconds = 125.0;
+            configuration.spectrum.peakHoldMode = SpectrumPeakHoldMode::finite;
+            processor.setAnalyzerConfiguration(configuration);
+            const auto afterEdit = processor.getAnalysisTelemetry();
+
+            expectEquals(afterEdit.fftGeneration, beforeEdit.fftGeneration);
+            expectEquals(afterEdit.fftConfigurationChanges, beforeEdit.fftConfigurationChanges);
+            expect(afterEdit.spectrumTemporalConfigurationChanges
+                == beforeEdit.spectrumTemporalConfigurationChanges + 1);
         });
 
         testCase("Fresh state uses responsive time-based averaging defaults", [this] {
@@ -667,11 +685,10 @@ public:
             if (visualization != nullptr) {
                 expect(visualization->getDashboardLayoutSplits() == initialLayout);
                 const auto renderSettings = visualization->getSpectrumSettings();
-                expectWithinAbsoluteError(renderSettings.smoothing,
-                    static_cast<float>(
-                        SpectrumSmoothingMapping::toNormalized(TemporalAveragingSettings { })),
-                    0.0001F);
+                expectWithinAbsoluteError(renderSettings.slopeDecibelsPerOctave, 0.0F, 0.0001F);
                 expectWithinAbsoluteError(renderSettings.frequencySpacing, 1.0F, 0.0001F);
+                expectWithinAbsoluteError(renderSettings.fillOpacity, 0.18F, 0.0001F);
+                expect(renderSettings.traceColourRgb == 0x55c7e8U);
             }
 
             if (settingsButton != nullptr && settingsPanel != nullptr && metricsPanel != nullptr

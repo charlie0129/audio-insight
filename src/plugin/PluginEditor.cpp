@@ -1,7 +1,6 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 
 #include "PluginEditor.h"
-#include "../ui/SpectrumSmoothingMapping.h"
 
 #include <algorithm>
 #include <functional>
@@ -28,6 +27,22 @@ bool readMetricsRequested(PluginProcessor& processor) noexcept
 {
     const auto* value = processor.getParameters().getRawParameterValue(performanceMetricsParameter);
     return value != nullptr && value->load(std::memory_order_relaxed) >= 0.5F;
+}
+
+float spectrumSlopeDecibelsPerOctave(const SpectrumSlope slope) noexcept
+{
+    switch (slope) {
+    case SpectrumSlope::flat:
+        return 0.0F;
+    case SpectrumSlope::db3PerOctave:
+        return 3.0F;
+    case SpectrumSlope::db4Point5PerOctave:
+        return 4.5F;
+    case SpectrumSlope::db6PerOctave:
+        return 6.0F;
+    }
+
+    return 0.0F;
 }
 
 } // namespace
@@ -440,9 +455,10 @@ void PluginEditor::updateSpectrumSettings(const AnalyzerConfiguration& configura
     visualization.setSpectrumSettings(SpectrumRenderSettings {
         static_cast<float>(sanitized.spectrum.floorDb),
         static_cast<float>(sanitized.spectrum.ceilingDb),
-        static_cast<float>(
-            SpectrumSmoothingMapping::toNormalized(sanitized.spectrum.temporalAveraging)),
+        spectrumSlopeDecibelsPerOctave(sanitized.spectrum.slope),
         static_cast<float>(sanitized.sharedAnalysis.frequencySpacing),
+        static_cast<float>(sanitized.spectrum.fillOpacity),
+        sanitized.spectrum.traceColor.packedRgb(),
     });
 }
 

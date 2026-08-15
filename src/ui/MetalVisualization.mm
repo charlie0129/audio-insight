@@ -56,6 +56,7 @@ class MetalRenderBackend;
 - (void)setDisplayLinkPaused:(BOOL)shouldBePaused;
 - (void)setDisplayLinkMaximumFramesPerSecond:(NSInteger)maximumFramesPerSecond;
 - (BOOL)hasDisplayLink;
+- (BOOL)performSpectrumClearAccessibilityAction;
 - (BOOL)performPeakRmsClearAccessibilityAction;
 - (void)dashboardLayoutEditingStateChanged;
 - (void)dashboardLayoutGeometryChanged;
@@ -534,6 +535,53 @@ PeakRmsPanelLayout calculatePeakRmsPanelLayout(const float panelWidth, const flo
     return result;
 }
 
+SpectrumClearLayout calculateSpectrumClearLayout(
+    const float panelWidth, const float panelHeight, const float requestedHeaderHeight) noexcept
+{
+    SpectrumClearLayout result;
+    if (!std::isfinite(panelWidth) || !std::isfinite(panelHeight) || panelWidth < 96.0F
+        || panelHeight <= 0.0F) {
+        return result;
+    }
+
+    const auto headerHeight = std::clamp(
+        std::isfinite(requestedHeaderHeight) ? requestedHeaderHeight : 0.0F, 0.0F, panelHeight);
+    if (headerHeight < 14.0F)
+        return result;
+
+    constexpr auto visualWidth = 45.0F;
+    const auto visualBottom = panelHeight - headerHeight + 3.0F;
+    result.visualBounds
+        = { panelWidth - visualWidth - 5.0F, visualBottom, panelWidth - 5.0F, panelHeight - 3.0F };
+    const auto hitHeight = std::min(panelHeight, std::max(24.0F, headerHeight));
+    result.hitBounds = { std::max(0.0F, result.visualBounds.left - 7.0F), panelHeight - hitHeight,
+        panelWidth, panelHeight };
+    return result;
+}
+
+float spectrumSlopeCompensationDecibels(
+    const float frequencyHz, const float slopeDecibelsPerOctave) noexcept
+{
+    if (!std::isfinite(frequencyHz) || frequencyHz <= 0.0F
+        || !std::isfinite(slopeDecibelsPerOctave)) {
+        return 0.0F;
+    }
+
+    return slopeDecibelsPerOctave * std::log2(frequencyHz / 1'000.0F);
+}
+
+float sanitiseSpectrumAnalysisDecibels(const float decibels) noexcept
+{
+    return std::isfinite(decibels) ? std::max(decibels, minimumSpectrumDecibels)
+                                   : minimumSpectrumDecibels;
+}
+
+float srgbComponentToLinear(const float component) noexcept
+{
+    const auto bounded = std::clamp(std::isfinite(component) ? component : 0.0F, 0.0F, 1.0F);
+    return bounded <= 0.04045F ? bounded / 12.92F : std::pow((bounded + 0.055F) / 1.055F, 2.4F);
+}
+
 namespace {
 using Clock = std::chrono::steady_clock;
 
@@ -574,8 +622,8 @@ constexpr std::size_t cachedPeakRmsReadoutCount
     = static_cast<std::size_t>(maximumPeakRmsReadoutTenths - minimumPeakRmsReadoutTenths + 1);
 
 // The fixed capacity covers five filled/bordered/header-divided tiles, both
-// numeric frequency axes, every possible decibel tick, the maximum FFT trace,
-// both live meter channels, and every cached text run. Keep this proof beside
+// numeric frequency axes, every possible decibel tick, all maximum-size FFT
+// traces and fill, both live meter channels, and every cached text run. Keep this proof beside
 // the allocation so a future builder cannot silently truncate a frame.
 constexpr std::size_t fixedTextGlyphCount = [] {
     std::size_t glyphCount = 0;
@@ -600,6 +648,8 @@ constexpr std::size_t peakRmsTextGlyphCount = [] {
 }();
 static_assert(fixedTextGlyphCount == MetalVisualizationGeometryLimits::maximumFixedTextGlyphs);
 static_assert(peakRmsTextGlyphCount == MetalVisualizationGeometryLimits::maximumPeakRmsTextGlyphs);
+static_assert(cachedFixedTextStrings[clearTextRunIndex].size()
+    == MetalVisualizationGeometryLimits::maximumSpectrumControlTextGlyphs);
 static_assert(MetalVisualizationGeometryLimits::maximumGeneratedVertices <= maximumVertexCount);
 static_assert([] {
     for (const auto text : cachedFixedTextStrings) {
@@ -938,8 +988,11 @@ struct VertexRange {
 
 struct VertexBatches {
     VertexRange shell;
+    VertexRange spectrumFill;
     VertexRange spectrumGrid;
+    VertexRange spectrumHeld;
     VertexRange spectrum;
+    VertexRange spectrumControls;
     VertexRange spectrogramAxis;
     VertexRange peakRms;
     VertexRange dashboardSplitters;
@@ -976,11 +1029,14 @@ SpectrumRenderSettings sanitiseSpectrumSettings(SpectrumRenderSettings settings)
     if (!std::isfinite(settings.ceilingDecibels))
         settings.ceilingDecibels = SpectrumRenderSettings { }.ceilingDecibels;
 
-    if (!std::isfinite(settings.smoothing))
-        settings.smoothing = SpectrumRenderSettings { }.smoothing;
+    if (!std::isfinite(settings.slopeDecibelsPerOctave))
+        settings.slopeDecibelsPerOctave = SpectrumRenderSettings { }.slopeDecibelsPerOctave;
 
     if (!std::isfinite(settings.frequencySpacing))
         settings.frequencySpacing = SpectrumRenderSettings { }.frequencySpacing;
+
+    if (!std::isfinite(settings.fillOpacity))
+        settings.fillOpacity = SpectrumRenderSettings { }.fillOpacity;
 
     settings.floorDecibels = std::clamp(
         settings.floorDecibels, minimumAllowedSpectrumFloor, maximumAllowedSpectrumFloor);
@@ -988,40 +1044,52 @@ SpectrumRenderSettings sanitiseSpectrumSettings(SpectrumRenderSettings settings)
         settings.ceilingDecibels, minimumAllowedSpectrumCeiling, maximumAllowedSpectrumCeiling);
     if (settings.ceilingDecibels - settings.floorDecibels < minimumSpectrumRange)
         settings.floorDecibels = settings.ceilingDecibels - minimumSpectrumRange;
-    settings.smoothing = std::clamp(settings.smoothing, 0.0F, 1.0F);
+    constexpr std::array supportedSlopes { 0.0F, 3.0F, 4.5F, 6.0F };
+    settings.slopeDecibelsPerOctave = *std::min_element(
+        supportedSlopes.begin(), supportedSlopes.end(), [&](const auto left, const auto right) {
+            return std::abs(left - settings.slopeDecibelsPerOctave)
+                < std::abs(right - settings.slopeDecibelsPerOctave);
+        });
     settings.frequencySpacing = std::clamp(settings.frequencySpacing, 0.0F, 1.0F);
+    settings.fillOpacity = std::clamp(settings.fillOpacity, 0.0F, 0.5F);
+    settings.traceColourRgb &= 0x00ffffffU;
     return settings;
 }
 
 std::uint64_t packSpectrumSettings(SpectrumRenderSettings settings) noexcept
 {
     settings = sanitiseSpectrumSettings(settings);
-    const auto floorValue = static_cast<std::uint16_t>(
-        std::lround((settings.floorDecibels - minimumAllowedSpectrumFloor) * 100.0F));
-    const auto ceilingValue = static_cast<std::uint16_t>(
-        std::lround((settings.ceilingDecibels - minimumAllowedSpectrumFloor) * 100.0F));
-    const auto smoothingValue
-        = static_cast<std::uint16_t>(std::lround(settings.smoothing * 65'535.0F));
+    constexpr std::array supportedSlopes { 0.0F, 3.0F, 4.5F, 6.0F };
+    const auto floorValue = static_cast<std::uint64_t>(
+        std::lround(settings.floorDecibels - minimumAllowedSpectrumFloor));
+    const auto ceilingValue = static_cast<std::uint64_t>(
+        std::lround(settings.ceilingDecibels - minimumAllowedSpectrumCeiling));
+    const auto slopeValue = static_cast<std::uint64_t>(std::distance(supportedSlopes.begin(),
+        std::find(
+            supportedSlopes.begin(), supportedSlopes.end(), settings.slopeDecibelsPerOctave)));
     const auto frequencySpacingValue
-        = static_cast<std::uint16_t>(std::lround(settings.frequencySpacing * 65'535.0F));
+        = static_cast<std::uint64_t>(std::lround(settings.frequencySpacing * 32'767.0F));
+    const auto fillOpacityValue
+        = static_cast<std::uint64_t>(std::lround(settings.fillOpacity * 1'000.0F));
 
-    return static_cast<std::uint64_t>(floorValue)
-        | (static_cast<std::uint64_t>(ceilingValue) << 16U)
-        | (static_cast<std::uint64_t>(smoothingValue) << 32U)
-        | (static_cast<std::uint64_t>(frequencySpacingValue) << 48U);
+    return floorValue | (ceilingValue << 8U) | (slopeValue << 14U) | (frequencySpacingValue << 16U)
+        | (fillOpacityValue << 31U) | (static_cast<std::uint64_t>(settings.traceColourRgb) << 40U);
 }
 
 SpectrumRenderSettings unpackSpectrumSettings(std::uint64_t packed) noexcept
 {
-    const auto floorValue = static_cast<std::uint16_t>(packed & 0xffffU);
-    const auto ceilingValue = static_cast<std::uint16_t>((packed >> 16U) & 0xffffU);
-    const auto smoothingValue = static_cast<std::uint16_t>((packed >> 32U) & 0xffffU);
-    const auto frequencySpacingValue = static_cast<std::uint16_t>((packed >> 48U) & 0xffffU);
+    constexpr std::array supportedSlopes { 0.0F, 3.0F, 4.5F, 6.0F };
+    const auto floorValue = static_cast<std::uint8_t>(packed & 0xffU);
+    const auto ceilingValue = static_cast<std::uint8_t>((packed >> 8U) & 0x3fU);
+    const auto slopeValue = static_cast<std::uint8_t>((packed >> 14U) & 0x03U);
+    const auto frequencySpacingValue = static_cast<std::uint16_t>((packed >> 16U) & 0x7fffU);
+    const auto fillOpacityValue = static_cast<std::uint16_t>((packed >> 31U) & 0x01ffU);
+    const auto traceColourRgb = static_cast<std::uint32_t>((packed >> 40U) & 0x00ffffffU);
 
-    return { minimumAllowedSpectrumFloor + (static_cast<float>(floorValue) * 0.01F),
-        minimumAllowedSpectrumFloor + (static_cast<float>(ceilingValue) * 0.01F),
-        static_cast<float>(smoothingValue) / 65'535.0F,
-        static_cast<float>(frequencySpacingValue) / 65'535.0F };
+    return { minimumAllowedSpectrumFloor + static_cast<float>(floorValue),
+        minimumAllowedSpectrumCeiling + static_cast<float>(ceilingValue),
+        supportedSlopes[slopeValue], static_cast<float>(frequencySpacingValue) / 32'767.0F,
+        static_cast<float>(fillOpacityValue) / 1'000.0F, traceColourRgb };
 }
 
 std::uint32_t packDashboardLayoutSplits(DashboardLayoutSplits splits) noexcept
@@ -1787,6 +1855,45 @@ public:
         refreshEffectiveActivity();
     }
 
+    bool tryClearSpectrumAt(const NSPoint point) noexcept
+    {
+        assertMessageThread();
+
+        if (view == nil || !std::isfinite(point.x) || !std::isfinite(point.y))
+            return false;
+
+        const auto boundsSize = view.bounds.size;
+        const auto dashboardLayout = DashboardLayout::calculateTileLayout(
+            { 0.0, 0.0, static_cast<double>(boundsSize.width),
+                static_cast<double>(boundsSize.height) },
+            getDashboardLayoutSplits());
+        const auto panel = toRenderRect(
+            dashboardLayout[DashboardPanel::spectrum], static_cast<float>(boundsSize.height));
+        const auto panelHeaderHeight
+            = std::min(panel.height(), std::clamp(panel.height() * 0.13F, 18.0F, 26.0F));
+        const auto layout
+            = calculateSpectrumClearLayout(panel.width(), panel.height(), panelHeaderHeight);
+        const auto localX = static_cast<float>(point.x) - panel.left;
+        const auto localY = static_cast<float>(point.y) - panel.bottom;
+
+        if (!layout.hitBounds.contains(localX, localY))
+            return false;
+
+        source.resetSpectrum();
+        return true;
+    }
+
+    bool performSpectrumClearAction() noexcept
+    {
+        assertMessageThread();
+
+        if (isDashboardLayoutEditing())
+            return false;
+
+        source.resetSpectrum();
+        return true;
+    }
+
     bool tryClearPeakRmsAt(const NSPoint point) noexcept
     {
         assertMessageThread();
@@ -1910,7 +2017,7 @@ public:
         }
 
         const auto spectrumSettings = getSpectrumSettings();
-        updateSmoothedDisplayValues(callbackTime, spectrumSettings);
+        updateInterpolatedDisplayValues(callbackTime);
 
         const auto boundsSize = view.bounds.size;
         const auto dashboardLayout = DashboardLayout::calculateTileLayout(
@@ -1963,15 +2070,30 @@ public:
         if (spectrumScissor.width != 0 && spectrumScissor.height != 0) {
             [encoder setScissorRect:spectrumScissor];
 
+            if (batches.spectrumFill.count >= 4)
+                [encoder drawPrimitives:MTLPrimitiveTypeTriangleStrip
+                            vertexStart:batches.spectrumFill.start
+                            vertexCount:batches.spectrumFill.count];
+
             if (batches.spectrumGrid.count != 0)
                 [encoder drawPrimitives:MTLPrimitiveTypeTriangle
                             vertexStart:batches.spectrumGrid.start
                             vertexCount:batches.spectrumGrid.count];
 
+            if (batches.spectrumHeld.count >= 2)
+                [encoder drawPrimitives:MTLPrimitiveTypeTriangleStrip
+                            vertexStart:batches.spectrumHeld.start
+                            vertexCount:batches.spectrumHeld.count];
+
             if (batches.spectrum.count >= 2)
                 [encoder drawPrimitives:MTLPrimitiveTypeTriangleStrip
                             vertexStart:batches.spectrum.start
                             vertexCount:batches.spectrum.count];
+
+            if (batches.spectrumControls.count != 0)
+                [encoder drawPrimitives:MTLPrimitiveTypeTriangle
+                            vertexStart:batches.spectrumControls.start
+                            vertexCount:batches.spectrumControls.count];
         }
 
         const auto spectrogramScissor
@@ -2175,13 +2297,14 @@ private:
 
     VisualizationFrame targetFrame;
     std::array<float, maximumSpectrumBinCount> displayedSpectrum { };
+    std::array<float, maximumSpectrumBinCount> displayedSpectrumPeakHold { };
     std::uint64_t lastSpectrumSequence = 0;
     std::uint64_t lastMeterSequence = 0;
     std::uint64_t lastGeneration = 0;
     std::uint64_t lastFftGeneration = 0;
     bool hasDisplayFrame = false;
 
-    Clock::time_point previousSmoothingTime;
+    Clock::time_point previousInterpolationTime;
     CFTimeInterval previousDisplayCallbackHostTime = 0.0;
     CFTimeInterval previousTargetTimestamp = 0.0;
     CFTimeInterval previousTargetPresentationTimestamp = 0.0;
@@ -2653,12 +2776,13 @@ private:
     {
         targetFrame = { };
         displayedSpectrum.fill(minimumSpectrumDecibels);
+        displayedSpectrumPeakHold.fill(minimumSpectrumDecibels);
         lastGeneration = 0;
         lastFftGeneration = 0;
         lastSpectrumSequence = 0;
         lastMeterSequence = 0;
         hasDisplayFrame = false;
-        previousSmoothingTime = { };
+        previousInterpolationTime = { };
         resetTelemetryTimingAtCallbackBoundary();
     }
 
@@ -2861,44 +2985,50 @@ private:
         telemetry.lastSpectrumSequence.store(lastSpectrumSequence, std::memory_order_relaxed);
 
         if (!hasDisplayFrame || generationChanged || fftGenerationChanged) {
-            const auto settings = getSpectrumSettings();
-            displayedSpectrum.fill(settings.floorDecibels);
+            displayedSpectrum.fill(minimumSpectrumDecibels);
+            displayedSpectrumPeakHold.fill(minimumSpectrumDecibels);
             const auto activeBinCount
                 = std::min<std::size_t>(targetFrame.spectrumBinCount, displayedSpectrum.size());
 
-            for (std::size_t index = 0; index < activeBinCount; ++index)
-                displayedSpectrum[index] = sanitiseDecibels(targetFrame.spectrumDecibels[index],
-                    settings.floorDecibels, settings.ceilingDecibels);
+            for (std::size_t index = 0; index < activeBinCount; ++index) {
+                displayedSpectrum[index]
+                    = sanitiseSpectrumAnalysisDecibels(targetFrame.spectrumDecibels[index]);
+                displayedSpectrumPeakHold[index] = targetFrame.spectrumPeakHoldValid
+                    ? sanitiseSpectrumAnalysisDecibels(targetFrame.spectrumPeakHoldDecibels[index])
+                    : minimumSpectrumDecibels;
+            }
 
             hasDisplayFrame = true;
         }
     }
 
-    void updateSmoothedDisplayValues(Clock::time_point now, SpectrumRenderSettings settings)
+    void updateInterpolatedDisplayValues(Clock::time_point now)
     {
         if (!hasDisplayFrame)
             return;
 
-        const auto elapsed = previousSmoothingTime != Clock::time_point { }
-            ? std::chrono::duration<double>(now - previousSmoothingTime).count()
+        const auto elapsed = previousInterpolationTime != Clock::time_point { }
+            ? std::chrono::duration<double>(now - previousInterpolationTime).count()
             : 1.0 / 60.0;
-        previousSmoothingTime = now;
+        previousInterpolationTime = now;
 
-        const auto smoothingShape = settings.smoothing * settings.smoothing;
-        const auto spectrumRise = settings.smoothing <= 0.0F
-            ? 1.0F
-            : smoothingCoefficient(elapsed, 0.004 + (0.096 * smoothingShape));
-        const auto spectrumFall = settings.smoothing <= 0.0F
-            ? 1.0F
-            : smoothingCoefficient(elapsed, 0.015 + (0.435 * smoothingShape));
+        // This short display-domain interpolation makes 60 Hz FFT snapshots
+        // move smoothly on a 120 Hz display without becoming a user-visible
+        // second averaging stage.
+        constexpr auto rendererInterpolationSeconds = 0.006;
+        const auto coefficient = smoothingCoefficient(elapsed, rendererInterpolationSeconds);
         const auto activeBinCount
             = std::min<std::size_t>(targetFrame.spectrumBinCount, displayedSpectrum.size());
         for (std::size_t index = 0; index < activeBinCount; ++index) {
-            const auto target = sanitiseDecibels(targetFrame.spectrumDecibels[index],
-                settings.floorDecibels, settings.ceilingDecibels);
-            const auto coefficient
-                = target >= displayedSpectrum[index] ? spectrumRise : spectrumFall;
+            const auto target
+                = sanitiseSpectrumAnalysisDecibels(targetFrame.spectrumDecibels[index]);
             displayedSpectrum[index] += coefficient * (target - displayedSpectrum[index]);
+
+            const auto heldTarget = targetFrame.spectrumPeakHoldValid
+                ? sanitiseSpectrumAnalysisDecibels(targetFrame.spectrumPeakHoldDecibels[index])
+                : minimumSpectrumDecibels;
+            displayedSpectrumPeakHold[index]
+                += coefficient * (heldTarget - displayedSpectrumPeakHold[index]);
         }
     }
 
@@ -3120,6 +3250,13 @@ private:
         }
 
         const auto spectrumPanel = toRenderRect(dashboardLayout[DashboardPanel::spectrum], height);
+        const auto spectrumClearLayout = calculateSpectrumClearLayout(
+            spectrumPanel.width(), spectrumPanel.height(), headerHeight(spectrumPanel));
+        const auto toSpectrumPanelRect = [&](const PeakRmsLogicalRect& bounds) noexcept {
+            return RenderRect { spectrumPanel.left + bounds.left,
+                spectrumPanel.bottom + bounds.bottom, spectrumPanel.left + bounds.right,
+                spectrumPanel.bottom + bounds.top };
+        };
         const auto spectrumPlot
             = insetRenderRect(spectrumPanel, (maximumCachedDecibelTextWidth * axisTextScale) + 8.0F,
                 axisTextHeight + 7.0F, 8.0F, headerHeight(spectrumPanel) + 7.0F);
@@ -3160,49 +3297,101 @@ private:
         }
 
         batches.spectrumGrid.count = cursor - batches.spectrumGrid.start;
-        batches.spectrum.start = cursor;
 
-        if (spectrumPlot.width() > 0.0F && spectrumPlot.height() > 0.0F && hasDisplayFrame
-            && targetFrame.spectrumValid && targetFrame.sampleRate > 0.0
-            && detail::hasSupportedSpectrumMetadata(targetFrame)) {
-            const auto binFrequency = static_cast<float>(
+        const auto traceRed = srgbComponentToLinear(
+            static_cast<float>((settings.traceColourRgb >> 16U) & 0xffU) / 255.0F);
+        const auto traceGreen = srgbComponentToLinear(
+            static_cast<float>((settings.traceColourRgb >> 8U) & 0xffU) / 255.0F);
+        const auto traceBlue
+            = srgbComponentToLinear(static_cast<float>(settings.traceColourRgb & 0xffU) / 255.0F);
+        const auto spectrumColour = simd_make_float4(traceRed, traceGreen, traceBlue, 1.0F);
+        const auto spectrumFillColour
+            = simd_make_float4(traceRed, traceGreen, traceBlue, settings.fillOpacity);
+        const auto spectrumHeldColour = simd_make_float4(traceRed, traceGreen, traceBlue, 0.62F);
+        std::array<simd_float2, maximumSpectrumBinCount> spectrumPoints;
+        std::size_t pointCount = 0;
+        auto binFrequency = 0.0F;
+        auto firstBin = std::size_t { 0 };
+        auto finalBin = std::size_t { 0 };
+        const auto canRenderSpectrum = spectrumPlot.width() > 0.0F && spectrumPlot.height() > 0.0F
+            && hasDisplayFrame && targetFrame.spectrumValid && targetFrame.sampleRate > 0.0
+            && detail::hasSupportedSpectrumMetadata(targetFrame);
+
+        if (canRenderSpectrum) {
+            binFrequency = static_cast<float>(
                 targetFrame.sampleRate / static_cast<double>(targetFrame.spectrumFftSize));
-            const auto firstBin = std::max<std::size_t>(
+            firstBin = std::max<std::size_t>(
                 1, static_cast<std::size_t>(std::ceil(minimumSpectrumFrequency / binFrequency)));
-            const auto finalBin = std::min<std::size_t>(targetFrame.spectrumBinCount - 1,
+            finalBin = std::min<std::size_t>(targetFrame.spectrumBinCount - 1,
                 static_cast<std::size_t>(std::floor(maximumFrequency / binFrequency)));
-            constexpr auto spectrumColour = simd_float4 { 0.18F, 0.90F, 0.85F, 1.0F };
-            constexpr auto spectrumHalfWidthPoints = 0.75F;
-            std::array<simd_float2, maximumSpectrumBinCount> spectrumPoints;
-            std::size_t pointCount = 0;
+        }
+
+        const auto buildSpectrumPoints = [&](const auto& decibels) noexcept {
+            pointCount = 0;
+            if (!canRenderSpectrum || binFrequency <= 0.0F || firstBin > finalBin)
+                return;
 
             for (auto bin = firstBin; bin <= finalBin && pointCount < spectrumPoints.size();
                 ++bin) {
                 const auto frequency
                     = std::max(minimumSpectrumFrequency, static_cast<float>(bin) * binFrequency);
+                const auto compensatedDecibels = decibels[bin]
+                    + spectrumSlopeCompensationDecibels(frequency, settings.slopeDecibelsPerOctave);
                 spectrumPoints[pointCount++] = simd_make_float2(frequencyToX(frequency),
                     decibelsToY(
-                        displayedSpectrum[bin], settings.floorDecibels, settings.ceilingDecibels));
+                        compensatedDecibels, settings.floorDecibels, settings.ceilingDecibels));
             }
+        };
+        const auto appendThickTrace
+            = [&](const float halfWidth, const simd_float4 colour) noexcept {
+                  for (std::size_t index = 0; index < pointCount; ++index) {
+                      const auto previous = spectrumPoints[index == 0 ? index : index - 1];
+                      const auto next = spectrumPoints[index + 1 < pointCount ? index + 1 : index];
+                      const auto deltaX = next.x - previous.x;
+                      const auto deltaY = next.y - previous.y;
+                      const auto length = std::sqrt((deltaX * deltaX) + (deltaY * deltaY));
+                      const auto inverseLength = length > 0.0001F ? 1.0F / length : 0.0F;
+                      const auto normalX = -deltaY * inverseLength * halfWidth;
+                      const auto normalY = deltaX * inverseLength * halfWidth;
 
+                      appendVertex(spectrumPoints[index].x + normalX,
+                          spectrumPoints[index].y + normalY, colour);
+                      appendVertex(spectrumPoints[index].x - normalX,
+                          spectrumPoints[index].y - normalY, colour);
+                  }
+              };
+
+        buildSpectrumPoints(displayedSpectrum);
+        batches.spectrumFill.start = cursor;
+        if (settings.fillOpacity > 0.0F) {
             for (std::size_t index = 0; index < pointCount; ++index) {
-                const auto previous = spectrumPoints[index == 0 ? index : index - 1];
-                const auto next = spectrumPoints[index + 1 < pointCount ? index + 1 : index];
-                const auto deltaX = next.x - previous.x;
-                const auto deltaY = next.y - previous.y;
-                const auto length = std::sqrt((deltaX * deltaX) + (deltaY * deltaY));
-                const auto inverseLength = length > 0.0001F ? 1.0F / length : 0.0F;
-                const auto normalX = -deltaY * inverseLength * spectrumHalfWidthPoints;
-                const auto normalY = deltaX * inverseLength * spectrumHalfWidthPoints;
-
-                appendVertex(spectrumPoints[index].x + normalX, spectrumPoints[index].y + normalY,
-                    spectrumColour);
-                appendVertex(spectrumPoints[index].x - normalX, spectrumPoints[index].y - normalY,
-                    spectrumColour);
+                appendVertex(spectrumPoints[index].x, plotBottom, spectrumFillColour);
+                appendVertex(spectrumPoints[index].x, spectrumPoints[index].y, spectrumFillColour);
             }
         }
+        batches.spectrumFill.count = cursor - batches.spectrumFill.start;
 
+        batches.spectrum.start = cursor;
+        appendThickTrace(0.75F, spectrumColour);
         batches.spectrum.count = cursor - batches.spectrum.start;
+
+        batches.spectrumHeld.start = cursor;
+        if (canRenderSpectrum && targetFrame.spectrumPeakHoldValid) {
+            buildSpectrumPoints(displayedSpectrumPeakHold);
+            appendThickTrace(0.50F, spectrumHeldColour);
+        }
+        batches.spectrumHeld.count = cursor - batches.spectrumHeld.start;
+
+        batches.spectrumControls.start = cursor;
+        if (spectrumClearLayout.visualBounds.width() > 0.0F) {
+            constexpr auto clearButtonColour = simd_float4 { 0.055F, 0.075F, 0.105F, 1.0F };
+            constexpr auto clearButtonBorderColour = simd_float4 { 0.20F, 0.27F, 0.36F, 0.90F };
+            const auto clearBounds = toSpectrumPanelRect(spectrumClearLayout.visualBounds);
+            appendQuad(clearBounds.left, clearBounds.bottom, clearBounds.right, clearBounds.top,
+                clearButtonColour);
+            appendBorder(clearBounds, 1.0F, clearButtonBorderColour);
+        }
+        batches.spectrumControls.count = cursor - batches.spectrumControls.start;
         const auto spectrogramPanel
             = toRenderRect(dashboardLayout[DashboardPanel::spectrogram], height);
         const auto spectrogramPlot = insetRenderRect(spectrogramPanel,
@@ -3364,10 +3553,13 @@ private:
             const auto bounds = toRenderRect(dashboardLayout[panel], height);
             const auto panelHeaderHeight = headerHeight(bounds);
             const auto& titleRun = cachedFixedTextRuns[panelTitleTextRunIndices[index]];
-            const auto titleAvailableWidth
-                = panel == DashboardPanel::peakRms && meterLayout.clearVisualBounds.width() > 0.0F
-                ? std::max(0.0F, meterLayout.clearVisualBounds.left - 12.0F)
-                : std::max(0.0F, bounds.width() - 14.0F);
+            auto titleAvailableWidth = std::max(0.0F, bounds.width() - 14.0F);
+            if (panel == DashboardPanel::peakRms && meterLayout.clearVisualBounds.width() > 0.0F) {
+                titleAvailableWidth = std::max(0.0F, meterLayout.clearVisualBounds.left - 12.0F);
+            } else if (panel == DashboardPanel::spectrum
+                && spectrumClearLayout.visualBounds.width() > 0.0F) {
+                titleAvailableWidth = std::max(0.0F, spectrumClearLayout.visualBounds.left - 12.0F);
+            }
             const auto titleScale = titleRun.width > 0.0F
                 ? std::min(1.0F, titleAvailableWidth / titleRun.width)
                 : 1.0F;
@@ -3462,6 +3654,21 @@ private:
                     }
                 }
             } else if (panel == DashboardPanel::spectrum) {
+                if (spectrumClearLayout.visualBounds.width() > 0.0F) {
+                    constexpr auto clearTextColour = simd_float4 { 0.58F, 0.69F, 0.80F, 0.96F };
+                    const auto clearBounds = toSpectrumPanelRect(spectrumClearLayout.visualBounds);
+                    const auto& clearRun = cachedFixedTextRuns[clearTextRunIndex];
+                    const auto clearScale = std::min(0.78F,
+                        std::min(clearBounds.width() / clearRun.width,
+                            clearBounds.height() / clearRun.height));
+                    appendTextRun(clearRun,
+                        clearBounds.left
+                            + ((clearBounds.width() - (clearRun.width * clearScale)) * 0.5F),
+                        clearBounds.bottom
+                            + ((clearBounds.height() - (clearRun.height * clearScale)) * 0.5F),
+                        clearScale, clearTextColour);
+                }
+
                 for (std::size_t tickIndex = 0; tickIndex < spectrumFrequencyTicks.count;
                     ++tickIndex) {
                     const auto& tick = spectrumFrequencyTicks.ticks[tickIndex];
@@ -3730,7 +3937,12 @@ NSString* makeDashboardAccessibilityString(const std::string_view value)
         initWithName:@"Clear Peak/RMS holds and OVER"
               target:self
             selector:@selector(performPeakRmsClearAccessibilityAction)];
-    self.accessibilityCustomActions = @[ clearAction ];
+    auto* spectrumClearAction = [[NSAccessibilityCustomAction alloc]
+        initWithName:@"Clear Spectrum averaging and peak holds"
+              target:self
+            selector:@selector(performSpectrumClearAccessibilityAction)];
+    self.accessibilityCustomActions = @[ spectrumClearAction, clearAction ];
+    [spectrumClearAction release];
     [clearAction release];
 
     auto* accessibilityElements =
@@ -3802,7 +4014,7 @@ NSString* makeDashboardAccessibilityString(const std::string_view value)
             return;
         }
 
-        if (renderBackend->tryClearPeakRmsAt(point))
+        if (renderBackend->tryClearSpectrumAt(point) || renderBackend->tryClearPeakRmsAt(point))
             return;
     }
 
@@ -4041,6 +4253,11 @@ NSString* makeDashboardAccessibilityString(const std::string_view value)
 - (BOOL)performPeakRmsClearAccessibilityAction
 {
     return renderBackend != nullptr && renderBackend->performPeakRmsClearAction();
+}
+
+- (BOOL)performSpectrumClearAccessibilityAction
+{
+    return renderBackend != nullptr && renderBackend->performSpectrumClearAction();
 }
 
 - (void)setDisplayLinkPaused:(BOOL)shouldBePaused

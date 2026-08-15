@@ -84,8 +84,11 @@ saving them. **Cancel** or Escape restores the layout from before editing, while
 shared by AUv2 and VST3 instances; it is not stored in an individual DAW
 project.
 
-Spectrum **Smooth** is in **Settings**. Fresh instances default to approximately
-`0.35`; set it to `0` for immediate display with no renderer interpolation.
+Spectrum **Temporal averaging** is in **Settings**, together with its floor,
+ceiling, slope, peak-hold, trace-colour, and fill controls. Fresh instances use
+a responsive 75 ms average; choose **Off** to show each new FFT snapshot without
+analysis averaging. The renderer still applies a fixed, very short interpolation
+between snapshots so a 60 Hz analysis remains fluid on a 120 Hz display.
 
 ## Performance metrics
 
