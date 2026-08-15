@@ -32,7 +32,8 @@ StereoMeterAccumulator::StereoMeterAccumulator() noexcept = default;
 StereoMeterAccumulator::PublishResult StereoMeterAccumulator::publishBlock(const float* const left,
     const float* const right, const std::size_t frameCount, const double sampleRate,
     const std::uint64_t generation, const std::uint32_t channelCount,
-    const bool followsDiscontinuity) noexcept
+    const bool followsDiscontinuity, const std::uint64_t captureDiscontinuityRevision,
+    const std::uint64_t captureLifecycleGeneration) noexcept
 {
     PublishResult result;
     if (frameCount == 0)
@@ -42,8 +43,11 @@ StereoMeterAccumulator::PublishResult StereoMeterAccumulator::publishBlock(const
     capturedFrameCursor_ += frameCount;
     attemptedBlocks_.fetch_add(1, std::memory_order_relaxed);
 
+    const auto lifecycleGeneration
+        = captureLifecycleGeneration == 0 ? generation : captureLifecycleGeneration;
     const auto reading = measureEndpoint(left, right, frameCount, sampleRate, generation,
-        result.sequence, capturedFrameCursor_, channelCount, followsDiscontinuity);
+        result.sequence, capturedFrameCursor_, channelCount, followsDiscontinuity,
+        captureDiscontinuityRevision, lifecycleGeneration);
     const auto hasCorrelationEndpoint = reading.valid && reading.channelCount == 2;
     if (hasCorrelationEndpoint)
         correlationProcessedSamples_.fetch_add(frameCount, std::memory_order_relaxed);
@@ -144,7 +148,9 @@ bool StereoMeterAccumulator::consumeLatest(StereoMeterReading& destination) noex
             = consumerPreviousSequence_ != std::numeric_limits<std::uint64_t>::max()
             && combined.firstSequence == consumerPreviousSequence_ + 1;
         const auto sameFormat = consumerPreviousValid_ && combined.valid
-            && consumerPreviousGeneration_ == combined.generation
+            && consumerPreviousGeneration_ == combined.captureLifecycleGeneration
+            && consumerPreviousCaptureDiscontinuityRevision_
+                == combined.captureDiscontinuityRevision
             && consumerPreviousChannelCount_ == combined.channelCount
             && !sampleRatesDiffer(consumerPreviousSampleRate_, combined.sampleRate);
         combined.followsDiscontinuity = combined.followsDiscontinuity || !contiguous || !sameFormat;
@@ -155,7 +161,8 @@ bool StereoMeterAccumulator::consumeLatest(StereoMeterReading& destination) noex
 
     consumerHasPreviousSequence_ = true;
     consumerPreviousValid_ = combined.valid;
-    consumerPreviousGeneration_ = combined.generation;
+    consumerPreviousGeneration_ = combined.captureLifecycleGeneration;
+    consumerPreviousCaptureDiscontinuityRevision_ = combined.captureDiscontinuityRevision;
     consumerPreviousSequence_ = combined.lastSequence;
     consumerPreviousChannelCount_ = combined.channelCount;
     consumerPreviousSampleRate_ = combined.sampleRate;
@@ -245,6 +252,7 @@ void StereoMeterAccumulator::discardPending() noexcept
     consumerHasPreviousSequence_ = false;
     consumerPreviousValid_ = false;
     consumerPreviousGeneration_ = 0;
+    consumerPreviousCaptureDiscontinuityRevision_ = 0;
     consumerPreviousSequence_ = 0;
     consumerPreviousChannelCount_ = 0;
     consumerPreviousSampleRate_ = 0.0;
@@ -254,11 +262,13 @@ StereoMeterReading StereoMeterAccumulator::measureEndpoint(const float* const le
     const float* const right, const std::size_t frameCount, const double sampleRate,
     const std::uint64_t generation, const std::uint64_t sequence,
     const std::uint64_t capturedFrameEnd, const std::uint32_t channelCount,
-    const bool followsDiscontinuity) noexcept
+    const bool followsDiscontinuity, const std::uint64_t captureDiscontinuityRevision,
+    const std::uint64_t captureLifecycleGeneration) noexcept
 {
     const auto previous = ballistics_.current();
     const auto formatChanged = previous.valid
-        && (previous.generation != generation || previous.channelCount != channelCount
+        && (previous.generation != captureLifecycleGeneration
+            || previous.channelCount != channelCount
             || sampleRatesDiffer(previous.sampleRate, sampleRate));
     auto correlationWasReset
         = previous.valid && previous.channelCount == 2 && (formatChanged || followsDiscontinuity);
@@ -276,8 +286,8 @@ StereoMeterReading StereoMeterAccumulator::measureEndpoint(const float* const le
         correlationWasReset = correlationWasReset || (previous.valid && previous.channelCount == 2);
     }
 
-    const auto endpoint = ballistics_.processBlock(
-        left, right, frameCount, sampleRate, generation, channelCount, followsDiscontinuity);
+    const auto endpoint = ballistics_.processBlock(left, right, frameCount, sampleRate,
+        captureLifecycleGeneration, channelCount, followsDiscontinuity);
     if (correlationWasReset)
         correlationStateResets_.fetch_add(1, std::memory_order_relaxed);
 
@@ -300,6 +310,8 @@ StereoMeterReading StereoMeterAccumulator::measureEndpoint(const float* const le
     reading.representedFrames = frameCount;
     reading.appliedUserResetEpoch = appliedUserResetEpoch_;
     reading.appliedLiveClearEpoch = appliedLiveClearEpoch_;
+    reading.captureDiscontinuityRevision = captureDiscontinuityRevision;
+    reading.captureLifecycleGeneration = captureLifecycleGeneration;
     reading.channelCount = endpoint.channelCount;
     reading.sampleRate = endpoint.sampleRate;
     reading.rawCaptureDiscontinuity = followsDiscontinuity;
@@ -329,7 +341,9 @@ void StereoMeterAccumulator::skipNextEndpointSequenceForTesting() noexcept
 bool StereoMeterAccumulator::formatsMatch(
     const StereoMeterReading& left, const StereoMeterReading& right) noexcept
 {
-    return left.valid && right.valid && left.generation == right.generation
+    return left.valid && right.valid
+        && left.captureLifecycleGeneration == right.captureLifecycleGeneration
+        && left.captureDiscontinuityRevision == right.captureDiscontinuityRevision
         && left.channelCount == right.channelCount
         && !sampleRatesDiffer(left.sampleRate, right.sampleRate);
 }

@@ -859,7 +859,7 @@ public:
                     return candidate.capturedFrameEnd > capturedFrameEnd
                         && !candidate.spectrumValid;
                 }));
-            expect(invalidated.generation == valid.generation);
+            expect(invalidated.generation > valid.generation);
             expect(invalidated.fftGeneration == valid.fftGeneration);
             expect(invalidated.spectrumSequence > valid.spectrumSequence,
                 "Capture-gap invalidation reused the preceding valid Spectrum sequence");
@@ -897,6 +897,8 @@ public:
                 }));
 
             const auto telemetryAfterGap = coordinator.telemetry();
+            expect(second.generation == first.generation);
+            expect(telemetryAfterGap.captureGeneration == telemetryBeforeGap.captureGeneration);
             expect(second.stereoFieldPointCount > first.stereoFieldPointCount);
             expect(telemetryAfterGap.stereoFieldHistoryResets
                 == telemetryBeforeGap.stereoFieldHistoryResets);
@@ -1430,18 +1432,43 @@ public:
             for (std::size_t index = 0; index < StereoSampleCapture::slotCount + 2; ++index)
                 coordinator.captureAudioBlock(block.data(), block.data(), block.size(), 48'000.0);
 
+            auto observedInvalidBoundary = false;
             VisualizationFrame afterGap;
-            expect(waitForFrame(
-                coordinator, afterGap, [sequence = beforeGap.meterSequence](const auto& candidate) {
-                    return candidate.meterSequence > sequence && !candidate.over[0];
+            expect(waitForFrame(coordinator, afterGap,
+                [sequence = beforeGap.meterSequence, generation = beforeGap.generation,
+                    &observedInvalidBoundary](const auto& candidate) {
+                    if (candidate.generation > generation && !candidate.spectrumValid
+                        && !candidate.meterValid && !candidate.stereoFieldValid
+                        && !candidate.loudnessMomentaryValid && !candidate.loudnessShortTermValid
+                        && !candidate.loudnessIntegratedValid) {
+                        observedInvalidBoundary = true;
+                    }
+                    return candidate.meterValid && candidate.meterSequence > sequence
+                        && !candidate.over[0];
                 }));
+            expect(observedInvalidBoundary,
+                "Post-gap data was delivered before the invalid capture boundary");
             expect(!afterGap.over[0] && !afterGap.over[1]);
             expectWithinAbsoluteError(afterGap.heldPeakDecibels[0], -20.0F, 0.01F);
+            expect(afterGap.generation == beforeGap.generation + 1,
+                "Raw and meter reports of one overflow advanced generation more than once");
             const auto afterGapTelemetry = coordinator.telemetry();
+            expect(afterGapTelemetry.captureGeneration == afterGap.generation);
             expect(afterGapTelemetry.capture.reclaimedReadyChunks > 0);
             expect(afterGapTelemetry.stereoFieldHistoryResets > historyResetsBeforeGap);
             expect(afterGap.stereoFieldValid);
             expect(afterGap.stereoCapturedFrameEnd == afterGapTelemetry.stereoCapturedFrameEnd);
+
+            for (std::size_t index = 0; index < StereoSampleCapture::slotCount + 2; ++index)
+                coordinator.captureAudioBlock(block.data(), block.data(), block.size(), 48'000.0);
+
+            VisualizationFrame afterSecondGap;
+            expect(waitForFrame(coordinator, afterSecondGap,
+                [generation = afterGap.generation](const auto& candidate) {
+                    return candidate.generation > generation && candidate.meterValid;
+                }));
+            expect(afterSecondGap.generation == afterGap.generation + 1,
+                "A distinct later overflow did not advance generation exactly once");
         }
 
         beginTest("A split host block resets Peak/RMS at the chunk that overflows");
@@ -1472,6 +1499,107 @@ public:
         }
 
 #if defined(JUCE_UNIT_TESTS) && JUCE_UNIT_TESTS
+        beginTest("A rejected gap boundary is retried before post-gap state");
+        {
+            AnalysisCoordinator coordinator;
+            coordinator.setSpectrumAnalysisConfiguration({ 16384, FftWindow::periodicHann, 60 });
+            coordinator.setVisualizationActive(true);
+
+            std::array<float, maximumFftSize> warmup { };
+            warmup.fill(0.25F);
+            coordinator.captureAudioBlock(warmup.data(), warmup.data(), warmup.size(), 48'000.0);
+            VisualizationFrame beforeGap;
+            expect(waitForFrame(coordinator, beforeGap,
+                [](const auto& candidate) { return candidate.spectrumValid; }));
+            while (coordinator.copyLatestVisualizationFrame(beforeGap)) { }
+
+            coordinator.failNextFramePublicationForTesting();
+            constexpr std::array<float, 64> shortChunk { };
+            for (std::size_t index = 0; index < StereoSampleCapture::slotCount + 1; ++index) {
+                coordinator.captureAudioBlock(
+                    shortChunk.data(), shortChunk.data(), shortChunk.size(), 48'000.0);
+            }
+
+            const auto dropsBefore = coordinator.telemetry().droppedFramePublications;
+            const auto failureDeadline = std::chrono::steady_clock::now() + 2s;
+            while (coordinator.telemetry().droppedFramePublications == dropsBefore
+                && std::chrono::steady_clock::now() < failureDeadline) {
+                coordinator.requestAnalysis();
+                std::this_thread::sleep_for(1ms);
+            }
+            expect(coordinator.telemetry().droppedFramePublications == dropsBefore + 1);
+
+            VisualizationFrame rejected;
+            expect(!coordinator.copyLatestVisualizationFrame(rejected),
+                "A pre-gap frame crossed the new-generation copy fence");
+
+            VisualizationFrame afterGap;
+            expect(waitForFrame(
+                coordinator, afterGap, [generation = beforeGap.generation](const auto& candidate) {
+                    return candidate.generation > generation && !candidate.spectrumValid;
+                }));
+            expect(afterGap.generation == coordinator.telemetry().captureGeneration);
+        }
+
+        beginTest("A format restart supersedes a racing gap rollover");
+        {
+            AnalysisCoordinator coordinator;
+            coordinator.setCaptureFormat(48'000.0, 2);
+            coordinator.setVisualizationActive(true);
+
+            VisualizationFrame activation;
+            expect(coordinator.copyLatestVisualizationFrame(activation));
+
+            WorkerHookBarrier barrier(
+                AnalysisCoordinator::WorkerTestOperation::beforeFramePublication);
+            coordinator.setWorkerTestHook(&barrier, &WorkerHookBarrier::invoke);
+
+            std::array<float, StereoSampleCapture::framesPerSlot> block { };
+            block.fill(0.25F);
+            for (std::size_t index = 0; index < StereoSampleCapture::slotCount + 2; ++index)
+                coordinator.captureAudioBlock(block.data(), block.data(), block.size(), 48'000.0);
+
+            auto reachedGapBoundary = false;
+            const auto boundaryDeadline = std::chrono::steady_clock::now() + 2s;
+            while (!reachedGapBoundary && std::chrono::steady_clock::now() < boundaryDeadline) {
+                coordinator.requestAnalysis();
+                reachedGapBoundary = barrier.waitUntilEntered(2ms);
+            }
+            expect(reachedGapBoundary, "The worker did not reach the gap boundary publication");
+            const auto racingGapGeneration = coordinator.telemetry().captureGeneration;
+            expect(racingGapGeneration > activation.generation);
+
+            std::thread formatRestart(
+                [&coordinator] { coordinator.setCaptureFormat(96'000.0, 2); });
+            const auto closeDeadline = std::chrono::steady_clock::now() + 2s;
+            while (coordinator.isVisualizationActive()
+                && std::chrono::steady_clock::now() < closeDeadline) {
+                std::this_thread::yield();
+            }
+            expect(!coordinator.isVisualizationActive(),
+                "The format restart did not close capture before waiting for the worker");
+
+            barrier.release();
+            formatRestart.join();
+            coordinator.setWorkerTestHook(nullptr, nullptr);
+
+            VisualizationFrame restarted;
+            expect(coordinator.copyLatestVisualizationFrame(restarted));
+            expect(restarted.generation > racingGapGeneration);
+            expect(!restarted.spectrumValid);
+            expect(!restarted.meterValid);
+            expect(!restarted.stereoFieldValid);
+            expect(!restarted.loudnessMomentaryValid);
+            expect(!restarted.loudnessShortTermValid);
+            expect(!restarted.loudnessIntegratedValid);
+            expect(coordinator.telemetry().captureGeneration == restarted.generation);
+
+            SpectrogramColumn restartMarker;
+            expect(coordinator.copyNextSpectrogramColumn(restartMarker));
+            expect(restartMarker.resetMarker);
+            expect(restartMarker.captureGeneration == restarted.generation);
+        }
+
         beginTest("Deactivation linearizes before a renderer request waiting at the gate");
         {
             AnalysisCoordinator coordinator;

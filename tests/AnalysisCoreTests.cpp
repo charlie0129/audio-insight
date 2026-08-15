@@ -34,6 +34,8 @@ public:
                     = capture.publishBlock(left.data(), right.data(), left.size(), 48000.0, 7);
                 expect(result.publishedChunks == 1);
                 expect(result.droppedIncomingChunks == 0);
+                expect(result.captureDiscontinuityRevision == 0);
+                expect(!result.beganCaptureDiscontinuity);
             }
 
             for (std::uint64_t expectedSequence = 1; expectedSequence <= 3; ++expectedSequence) {
@@ -42,6 +44,8 @@ public:
                 expect(handle.view().sequence == expectedSequence);
                 expect(handle.view().capturedFrameEnd == expectedSequence * left.size());
                 expect(!handle.view().followsDiscontinuity);
+                expect(handle.view().captureDiscontinuityRevision == 0);
+                expect(handle.view().captureLifecycleGeneration == 7);
                 expectWithinAbsoluteError(handle.view().left[2], left[2], 1.0e-7F);
                 expectWithinAbsoluteError(handle.view().right[2], right[2], 1.0e-7F);
             }
@@ -69,11 +73,16 @@ public:
             expect(capture.tryAcquireOldest(held[0]));
             expectWithinAbsoluteError(held[0].view().left[0], 1.0F, 1.0e-7F);
 
+            auto firstGapRevision = std::uint64_t { 0 };
             for (std::size_t index = 0; index < StereoSampleCapture::slotCount; ++index) {
                 sample[0] = 100.0F + static_cast<float>(index);
-                expect(capture.publishBlock(sample.data(), sample.data(), sample.size(), 48000.0, 1)
-                           .publishedChunks
-                    == 1);
+                const auto publication
+                    = capture.publishBlock(sample.data(), sample.data(), sample.size(), 48000.0, 1);
+                expect(publication.publishedChunks == 1);
+                expect(publication.beganCaptureDiscontinuity == (index == 0));
+                if (index == 0)
+                    firstGapRevision = publication.captureDiscontinuityRevision;
+                expect(publication.captureDiscontinuityRevision == firstGapRevision);
             }
 
             // The producer reclaimed only ready slots; the held payload is intact.
@@ -86,6 +95,7 @@ public:
                 expect(capture.tryAcquireOldest(held[index]));
 
             expect(held[1].view().followsDiscontinuity);
+            expect(held[1].view().captureDiscontinuityRevision == firstGapRevision);
             telemetry = capture.telemetry();
             expect(telemetry.consumerDiscontinuities == 1);
 
@@ -94,8 +104,22 @@ public:
             const auto dropped
                 = capture.publishBlock(sample.data(), sample.data(), sample.size(), 48000.0, 1);
             expect(dropped.droppedIncomingChunks == 1);
+            expect(dropped.captureDiscontinuityRevision > firstGapRevision);
+            expect(dropped.beganCaptureDiscontinuity);
             expect(capture.telemetry().droppedIncomingChunks == 1);
             expectWithinAbsoluteError(held[0].view().left[0], 1.0F, 1.0e-7F);
+
+            held[0].release();
+            const auto afterDrop
+                = capture.publishBlock(sample.data(), sample.data(), sample.size(), 48000.0, 1);
+            expect(afterDrop.publishedChunks == 1);
+            expect(afterDrop.captureDiscontinuityRevision == dropped.captureDiscontinuityRevision);
+            expect(!afterDrop.beganCaptureDiscontinuity);
+
+            StereoSampleCapture::ReadHandle afterDropHandle;
+            expect(capture.tryAcquireOldest(afterDropHandle));
+            expect(afterDropHandle.view().captureDiscontinuityRevision
+                == dropped.captureDiscontinuityRevision);
         }
 
         beginTest("Mono layout metadata is preserved without duplicating its samples");
@@ -120,6 +144,35 @@ public:
             expect(capture.tryAcquireOldest(stereoHandle));
             expect(stereoHandle.view().channelCount == 2);
             expect(stereoHandle.view().followsDiscontinuity);
+        }
+
+        beginTest("Raw discontinuity revisions stay within one capture lifecycle");
+        {
+            StereoSampleCapture capture;
+            constexpr std::array<float, 1> sample { 0.25F };
+            constexpr auto oldLifecycle = std::uint64_t { 41 };
+            constexpr auto newLifecycle = std::uint64_t { 73 };
+
+            StereoSampleCapture::PublishResult oldPublication;
+            for (std::size_t index = 0; index <= StereoSampleCapture::slotCount; ++index) {
+                oldPublication = capture.publishBlock(
+                    sample.data(), sample.data(), sample.size(), 48'000.0, 1, 2, oldLifecycle);
+            }
+            expect(oldPublication.captureDiscontinuityRevision != 0);
+            expect(capture.captureDiscontinuityRevision(oldLifecycle)
+                == oldPublication.captureDiscontinuityRevision);
+            expect(capture.captureDiscontinuityRevision(newLifecycle) == 0);
+
+            capture.discardPending();
+            const auto newPublication = capture.publishBlock(
+                sample.data(), sample.data(), sample.size(), 48'000.0, 2, 2, newLifecycle);
+            expect(newPublication.captureDiscontinuityRevision == 0);
+            expect(!newPublication.beganCaptureDiscontinuity);
+
+            StereoSampleCapture::ReadHandle handle;
+            expect(capture.tryAcquireOldest(handle));
+            expect(handle.view().captureLifecycleGeneration == newLifecycle);
+            expect(handle.view().captureDiscontinuityRevision == 0);
         }
 
         beginTest("Unsupported channel metadata is preserved for downstream rejection");
@@ -298,14 +351,27 @@ public:
             expect(meters.consumeLatest(beforeGap));
             expect(beforeGap.over[0]);
 
-            expect(meters.publishBlock(low.data(), low.data(), low.size(), 1'000.0, 1, 2, true)
+            expect(
+                meters.publishBlock(low.data(), low.data(), low.size(), 1'000.0, 1, 2, true, 7, 99)
                     .published);
             StereoMeterReading afterGap;
             expect(meters.consumeLatest(afterGap));
             expect(afterGap.followsDiscontinuity);
+            expect(afterGap.captureDiscontinuityRevision == 7);
+            expect(afterGap.captureLifecycleGeneration == 99);
             expect(!afterGap.over[0] && !afterGap.over[1]);
             expectWithinAbsoluteError(afterGap.peakDecibels[0], -20.0F, 0.001F);
             expectWithinAbsoluteError(afterGap.heldPeakDecibels[0], -20.0F, 0.001F);
+
+            expect(
+                meters.publishBlock(low.data(), low.data(), low.size(), 1'000.0, 2, 2, false, 7, 99)
+                    .published);
+            StereoMeterReading sameSegment;
+            expect(meters.consumeLatest(sameSegment));
+            expect(!sameSegment.followsDiscontinuity);
+            expect(sameSegment.generation == 2);
+            expect(sameSegment.captureDiscontinuityRevision == 7);
+            expect(sameSegment.captureLifecycleGeneration == 99);
         }
 
         beginTest("Mono meter readings preserve the real channel count");

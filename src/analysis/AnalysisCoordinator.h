@@ -169,6 +169,9 @@ public:
 
     /** Simulates one lost meter endpoint without disturbing the raw-sample capture sequence. */
     void skipNextMeterEndpointSequenceForTesting() noexcept;
+
+    /** Forces one immutable-frame publication to fail at its normal non-blocking boundary. */
+    void failNextFramePublicationForTesting() noexcept;
 #endif
 
 private:
@@ -184,9 +187,6 @@ private:
     std::shared_ptr<State> state_;
     std::shared_ptr<SharedAnalysisScheduler::Client> client_;
 
-    // Zero means inactive. A non-zero value is the generation stamped by the
-    // audio producer without any scheduler interaction.
-    std::atomic<std::uint64_t> captureGeneration_ { 0 };
     std::atomic<std::int64_t> nextAnalysisRequestNanoseconds_ { 0 };
 
     // Accessed only while lifecycleMutex_ is held.
@@ -201,7 +201,6 @@ private:
     SpectrumTemporalConfiguration spectrumTemporalConfiguration_;
     double spectrogramFrequencySpacing_ = 1.0;
     std::int64_t analysisRequestPeriodNanoseconds_ = 16'666'667;
-    std::uint64_t captureGenerationCounter_ = 0;
     std::uint64_t fftGenerationCounter_ = 1;
     std::uint64_t spectrogramMappingGenerationCounter_ = 1;
 

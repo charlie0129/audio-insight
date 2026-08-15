@@ -20,6 +20,8 @@ struct CapturedStereoChunkView {
     double sampleRate = 0.0;
     bool followsDiscontinuity = false;
     std::uint32_t channelCount = 2;
+    std::uint64_t captureDiscontinuityRevision = 0;
+    std::uint64_t captureLifecycleGeneration = 0;
 };
 
 /**
@@ -45,6 +47,8 @@ public:
         std::uint32_t publishedChunks = 0;
         std::uint32_t reclaimedReadyChunks = 0;
         std::uint32_t droppedIncomingChunks = 0;
+        std::uint64_t captureDiscontinuityRevision = 0;
+        bool beganCaptureDiscontinuity = false;
     };
 
     struct Telemetry {
@@ -104,17 +108,25 @@ public:
         Publishes all frames, splitting blocks larger than framesPerSlot.
 
         A null channel pointer is treated as silence. Passing the same pointer for
-        both channels is supported. generation is owned by the plugin lifecycle,
-        not by host transport state.
+        both channels is supported. generation is the public capture generation;
+        captureLifecycleGeneration is the stable producer-admission token. Neither
+        is derived from host transport state.
     */
     [[nodiscard]] PublishResult publishBlock(const float* left, const float* right,
         std::size_t frameCount, double sampleRate, std::uint64_t generation,
-        std::uint32_t channelCount = 2) noexcept;
+        std::uint32_t channelCount = 2, std::uint64_t captureLifecycleGeneration = 0) noexcept;
 
     /** Acquires the oldest currently ready chunk without waiting. */
     [[nodiscard]] bool tryAcquireOldest(ReadHandle& destination) noexcept;
 
     [[nodiscard]] Telemetry telemetry() const noexcept;
+
+    /** Latest raw capture boundary for one lifecycle, including unconsumed drops. */
+    [[nodiscard]] std::uint64_t captureDiscontinuityRevision(
+        std::uint64_t captureLifecycleGeneration) const noexcept;
+
+    /** Marks a revision as handled; safe from the single non-audio consumer. */
+    void acknowledgeCaptureDiscontinuityRevision(std::uint64_t revision) noexcept;
 
     /**
         Drops all queued chunks and resets consumer continuity tracking.
@@ -143,12 +155,14 @@ private:
         std::uint64_t capturedFrameEnd = 0;
         double sampleRate = 0.0;
         std::uint32_t channelCount = 2;
+        std::uint64_t captureDiscontinuityRevision = 0;
+        std::uint64_t captureLifecycleGeneration = 0;
     };
 
     [[nodiscard]] Slot* claimSlot(bool& reclaimedReady, std::size_t& slotIndex) noexcept;
     void publishChunk(const float* left, const float* right, std::size_t frameCount,
         double sampleRate, std::uint64_t generation, std::uint32_t channelCount,
-        PublishResult& result) noexcept;
+        std::uint64_t captureLifecycleGeneration, PublishResult& result) noexcept;
     void releaseReadSlot(std::size_t slotIndex) noexcept;
     void updateReadyHighWaterMark() noexcept;
 
@@ -157,6 +171,8 @@ private:
     // Written only by the audio producer.
     std::uint64_t nextSequence_ = 1;
     std::uint64_t capturedFrameCursor_ = 0;
+    std::uint64_t producerCaptureLifecycleGeneration_ = 0;
+    std::uint64_t captureDiscontinuityRevision_ = 0;
     std::uint32_t producerReadyHighWaterMark_ = 0;
 
     // Written only by the logical consumer.
@@ -172,6 +188,9 @@ private:
     std::atomic<std::uint64_t> consumerDiscontinuities_ { 0 };
     std::atomic<std::uint64_t> lastAttemptedSequence_ { 0 };
     std::atomic<std::uint64_t> capturedFrames_ { 0 };
+    std::atomic<std::uint64_t> publishedCaptureDiscontinuityRevision_ { 0 };
+    std::atomic<std::uint64_t> publishedCaptureDiscontinuityLifecycleGeneration_ { 0 };
+    std::atomic<std::uint64_t> acknowledgedCaptureDiscontinuityRevision_ { 0 };
     std::atomic<std::uint32_t> readyHighWaterMark_ { 0 };
 };
 } // namespace audio_insight

@@ -31,6 +31,8 @@ struct StereoMeterReading {
     std::uint64_t representedFrames = 0;
     std::uint64_t appliedUserResetEpoch = 0;
     std::uint64_t appliedLiveClearEpoch = 0;
+    std::uint64_t captureDiscontinuityRevision = 0;
+    std::uint64_t captureLifecycleGeneration = 0;
     std::uint32_t channelCount = 0;
     double sampleRate = 0.0;
     bool rawCaptureDiscontinuity = false;
@@ -87,7 +89,9 @@ public:
     */
     [[nodiscard]] PublishResult publishBlock(const float* left, const float* right,
         std::size_t frameCount, double sampleRate, std::uint64_t generation,
-        std::uint32_t channelCount = 2, bool followsDiscontinuity = false) noexcept;
+        std::uint32_t channelCount = 2, bool followsDiscontinuity = false,
+        std::uint64_t captureDiscontinuityRevision = 0,
+        std::uint64_t captureLifecycleGeneration = 0) noexcept;
 
     /**
         Drains a bounded set of complete publications and returns the newest
@@ -132,8 +136,9 @@ private:
 
     [[nodiscard]] StereoMeterReading measureEndpoint(const float* left, const float* right,
         std::size_t frameCount, double sampleRate, std::uint64_t generation, std::uint64_t sequence,
-        std::uint64_t capturedFrameEnd, std::uint32_t channelCount,
-        bool followsDiscontinuity) noexcept;
+        std::uint64_t capturedFrameEnd, std::uint32_t channelCount, bool followsDiscontinuity,
+        std::uint64_t captureDiscontinuityRevision,
+        std::uint64_t captureLifecycleGeneration) noexcept;
     static void prependRepresentedMetadata(
         StereoMeterReading& newer, const StereoMeterReading& older) noexcept;
     [[nodiscard]] static bool formatsMatch(
@@ -156,6 +161,7 @@ private:
     bool consumerHasPreviousSequence_ = false;
     bool consumerPreviousValid_ = false;
     std::uint64_t consumerPreviousGeneration_ = 0;
+    std::uint64_t consumerPreviousCaptureDiscontinuityRevision_ = 0;
     std::uint64_t consumerPreviousSequence_ = 0;
     std::uint32_t consumerPreviousChannelCount_ = 0;
     double consumerPreviousSampleRate_ = 0.0;

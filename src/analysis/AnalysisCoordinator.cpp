@@ -81,6 +81,12 @@ class VisualizationSnapshotExchange final {
 public:
     [[nodiscard]] bool publish(const VisualizationFrame& frame) noexcept
     {
+#if defined(JUCE_UNIT_TESTS) && JUCE_UNIT_TESTS
+        if (failNextPublication_.exchange(false, std::memory_order_acq_rel)) {
+            droppedPublications_.fetch_add(1, std::memory_order_relaxed);
+            return false;
+        }
+#endif
         std::size_t selected = slots_.size();
 
         // A consumer can retire every ready slot while the producer moves from
@@ -187,6 +193,13 @@ public:
         return droppedPublications_.load(std::memory_order_relaxed);
     }
 
+#if defined(JUCE_UNIT_TESTS) && JUCE_UNIT_TESTS
+    void failNextPublication() noexcept
+    {
+        failNextPublication_.store(true, std::memory_order_release);
+    }
+#endif
+
 private:
     enum class SlotState : std::uint32_t { free, writing, ready, reading };
 
@@ -204,15 +217,24 @@ private:
     mutable std::atomic<std::uint64_t> lastCopiedSequence_ { 0 };
     std::atomic<std::uint64_t> publishedFrames_ { 0 };
     std::atomic<std::uint64_t> droppedPublications_ { 0 };
+#if defined(JUCE_UNIT_TESTS) && JUCE_UNIT_TESTS
+    std::atomic<bool> failNextPublication_ { false };
+#endif
 };
 } // namespace
 
 struct AnalysisCoordinator::State final : SharedAnalysisScheduler::JobClient,
                                           SpectrumTransformSink {
     void captureAudioBlock(const float* const left, const float* const right,
-        const std::size_t frameCount, const double sampleRate, const std::uint64_t generation,
+        const std::size_t frameCount, const double sampleRate,
         const std::uint32_t channelCount) noexcept
     {
+        const auto lifecycleGeneration
+            = activeCaptureLifecycleGeneration.load(std::memory_order_acquire);
+        const auto captureGeneration = activeCaptureGeneration.load(std::memory_order_acquire);
+        if (lifecycleGeneration == 0 || captureGeneration == 0 || frameCount == 0)
+            return;
+
         attemptedCaptureSampleRateBits.store(
             std::bit_cast<std::uint64_t>(sampleRate), std::memory_order_relaxed);
 
@@ -222,19 +244,20 @@ struct AnalysisCoordinator::State final : SharedAnalysisScheduler::JobClient,
                 = std::min(StereoSampleCapture::framesPerSlot, frameCount - offset);
             const auto* const chunkLeft = left != nullptr ? left + offset : nullptr;
             const auto* const chunkRight = right != nullptr ? right + offset : nullptr;
-            const auto samplePublication = samples.publishBlock(
-                chunkLeft, chunkRight, chunkFrames, sampleRate, generation, channelCount);
-            const auto followsCaptureDiscontinuity = samplePublication.reclaimedReadyChunks != 0
-                || samplePublication.droppedIncomingChunks != 0;
+            const auto samplePublication = samples.publishBlock(chunkLeft, chunkRight, chunkFrames,
+                sampleRate, captureGeneration, channelCount, lifecycleGeneration);
+            const auto followsCaptureDiscontinuity = samplePublication.beganCaptureDiscontinuity;
             static_cast<void>(meters.publishBlock(chunkLeft, chunkRight, chunkFrames, sampleRate,
-                generation, channelCount, followsCaptureDiscontinuity));
+                captureGeneration, channelCount, followsCaptureDiscontinuity,
+                samplePublication.captureDiscontinuityRevision, lifecycleGeneration));
             offset += chunkFrames;
         }
 
         captureRevision.fetch_add(1, std::memory_order_release);
     }
 
-    void beginGeneration(const std::uint64_t captureGeneration, const std::uint64_t jobGeneration,
+    void beginGeneration(const std::uint64_t captureGeneration,
+        const std::uint64_t captureLifecycleGeneration, const std::uint64_t jobGeneration,
         const bool followsFormatChange) noexcept
     {
         workingFrame = { };
@@ -267,6 +290,15 @@ struct AnalysisCoordinator::State final : SharedAnalysisScheduler::JobClient,
         peakRmsResetPendingEpoch.store(0, std::memory_order_relaxed);
         requiredUserResetEpoch = 0;
         requiredLiveClearEpoch = 0;
+        appliedCaptureDiscontinuityRevision
+            = samples.captureDiscontinuityRevision(captureLifecycleGeneration);
+        samples.acknowledgeCaptureDiscontinuityRevision(appliedCaptureDiscontinuityRevision);
+        pendingCaptureDiscontinuityRevision = 0;
+        pendingCaptureBoundaryGeneration = 0;
+        captureBoundaryPublicationPending.store(false, std::memory_order_release);
+        captureBoundaryDeliveryGeneration.store(0, std::memory_order_relaxed);
+        captureBoundaryDeliveryPending.store(false, std::memory_order_release);
+        captureBoundaryResumePending.store(false, std::memory_order_release);
         lastAnalyzedCaptureRevision.store(
             captureRevision.load(std::memory_order_acquire), std::memory_order_release);
 
@@ -276,7 +308,35 @@ struct AnalysisCoordinator::State final : SharedAnalysisScheduler::JobClient,
         // snapshot are complete. Defensive checks in execute() can therefore
         // never expose partially initialised state.
         currentCaptureGeneration.store(captureGeneration, std::memory_order_release);
+        currentCaptureLifecycleGeneration.store(
+            captureLifecycleGeneration, std::memory_order_release);
         currentJobGeneration.store(jobGeneration, std::memory_order_release);
+        activeCaptureGeneration.store(captureGeneration, std::memory_order_release);
+        activeCaptureLifecycleGeneration.store(
+            captureLifecycleGeneration, std::memory_order_release);
+    }
+
+    void closeCapture() noexcept
+    {
+        // Zero the public producer generation first. A concurrent worker CAS
+        // can therefore either linearize before this close or fail; it cannot
+        // resurrect capture after the lifecycle boundary.
+        activeCaptureGeneration.store(0, std::memory_order_release);
+        activeCaptureLifecycleGeneration.store(0, std::memory_order_release);
+    }
+
+    [[nodiscard]] bool isCaptureActive() const noexcept
+    {
+        return activeCaptureLifecycleGeneration.load(std::memory_order_acquire) != 0
+            && activeCaptureGeneration.load(std::memory_order_acquire) != 0;
+    }
+
+    [[nodiscard]] std::uint64_t allocateCaptureGeneration() noexcept
+    {
+        auto generation = captureGenerationCounter.fetch_add(1, std::memory_order_acq_rel) + 1;
+        if (generation == 0)
+            generation = captureGenerationCounter.fetch_add(1, std::memory_order_acq_rel) + 1;
+        return generation;
     }
 
     [[nodiscard]] bool reconfigureSpectrum(const SpectrumAnalysisConfiguration& configuration,
@@ -356,7 +416,15 @@ struct AnalysisCoordinator::State final : SharedAnalysisScheduler::JobClient,
 
     void endGeneration() noexcept
     {
+        closeCapture();
         currentCaptureGeneration.store(0, std::memory_order_release);
+        currentCaptureLifecycleGeneration.store(0, std::memory_order_release);
+        pendingCaptureDiscontinuityRevision = 0;
+        pendingCaptureBoundaryGeneration = 0;
+        captureBoundaryPublicationPending.store(false, std::memory_order_release);
+        captureBoundaryDeliveryGeneration.store(0, std::memory_order_relaxed);
+        captureBoundaryDeliveryPending.store(false, std::memory_order_release);
+        captureBoundaryResumePending.store(false, std::memory_order_release);
         attemptedCaptureSampleRateBits.store(0, std::memory_order_relaxed);
         spectrum.reset(nullptr);
         stereoField.reset(nullptr);
@@ -370,7 +438,55 @@ struct AnalysisCoordinator::State final : SharedAnalysisScheduler::JobClient,
 
     [[nodiscard]] bool copyNextSpectrogramColumn(SpectrogramColumn& destination) const noexcept
     {
-        return spectrogramColumns.copyNext(destination);
+        for (std::size_t attempt = 0; attempt < SpectrogramColumnQueue::capacity; ++attempt) {
+            if (activeCaptureLifecycleGeneration.load(std::memory_order_acquire) == 0
+                || activeCaptureGeneration.load(std::memory_order_acquire) == 0) {
+                return false;
+            }
+
+            SpectrogramColumn candidate;
+            if (!spectrogramColumns.copyNext(candidate))
+                return false;
+
+            const auto generationAfter = activeCaptureGeneration.load(std::memory_order_acquire);
+            const auto lifecycleAfter
+                = activeCaptureLifecycleGeneration.load(std::memory_order_acquire);
+            // The rollover may have happened during the destructive queue read.
+            // Accept a candidate already belonging to the stable post-read generation.
+            if (lifecycleAfter != 0 && generationAfter != 0
+                && candidate.captureGeneration == generationAfter) {
+                destination = candidate;
+                return true;
+            }
+        }
+
+        return false;
+    }
+
+    [[nodiscard]] bool copyLatestVisualizationFrame(VisualizationFrame& destination) noexcept
+    {
+        if (activeCaptureLifecycleGeneration.load(std::memory_order_acquire) == 0
+            || activeCaptureGeneration.load(std::memory_order_acquire) == 0) {
+            return false;
+        }
+
+        VisualizationFrame candidate;
+        if (!snapshots.copyLatest(candidate))
+            return false;
+
+        const auto generationAfter = activeCaptureGeneration.load(std::memory_order_acquire);
+        const auto lifecycleAfter
+            = activeCaptureLifecycleGeneration.load(std::memory_order_acquire);
+        // copyLatest retires ready slots, so a boundary from a rollover that
+        // raced the read must be accepted when it matches the post-read state.
+        if (lifecycleAfter == 0 || generationAfter == 0
+            || candidate.generation != generationAfter) {
+            return false;
+        }
+
+        destination = candidate;
+        acknowledgeCaptureBoundaryDelivery(candidate.generation);
+        return true;
     }
 
     void discardPendingSpectrogramColumns() noexcept
@@ -476,6 +592,26 @@ struct AnalysisCoordinator::State final : SharedAnalysisScheduler::JobClient,
         return hasPublishedAudioFrame.load(std::memory_order_acquire);
     }
 
+    [[nodiscard]] bool hasPendingCaptureBoundary() const noexcept
+    {
+        return captureBoundaryPublicationPending.load(std::memory_order_acquire)
+            || captureBoundaryResumePending.load(std::memory_order_acquire);
+    }
+
+    [[nodiscard]] bool waitingForCaptureBoundaryDelivery() const noexcept
+    {
+        return captureBoundaryDeliveryPending.load(std::memory_order_acquire);
+    }
+
+    void acknowledgeCaptureBoundaryDelivery(const std::uint64_t generation) noexcept
+    {
+        if (captureBoundaryDeliveryPending.load(std::memory_order_acquire)
+            && captureBoundaryDeliveryGeneration.load(std::memory_order_relaxed) == generation) {
+            captureBoundaryDeliveryPending.store(false, std::memory_order_release);
+            captureBoundaryResumePending.store(true, std::memory_order_release);
+        }
+    }
+
     void noteEmptyRequestAvoided() noexcept
     {
         emptyAnalysisRequestsAvoided.fetch_add(1, std::memory_order_relaxed);
@@ -498,6 +634,11 @@ struct AnalysisCoordinator::State final : SharedAnalysisScheduler::JobClient,
     {
         workerTestHookContext.store(context, std::memory_order_relaxed);
         workerTestHook.store(hook, std::memory_order_release);
+    }
+
+    void failNextFramePublicationForTesting() noexcept
+    {
+        snapshots.failNextPublication();
     }
 
     void invokeWorkerTestHook(const AnalysisCoordinator::WorkerTestOperation operation) noexcept
@@ -629,11 +770,32 @@ struct AnalysisCoordinator::State final : SharedAnalysisScheduler::JobClient,
         return true;
     }
 
-    [[nodiscard]] bool publishWorkingFrame() noexcept
+    [[nodiscard]] bool publishWorkingFrame(
+        const SharedAnalysisScheduler::JobContext* const context = nullptr,
+        const std::uint64_t expectedJobGeneration = 0,
+        const std::uint64_t expectedCaptureGeneration = 0,
+        const std::uint64_t expectedLifecycleGeneration = 0) noexcept
     {
 #if defined(JUCE_UNIT_TESTS) && JUCE_UNIT_TESTS
         invokeWorkerTestHook(AnalysisCoordinator::WorkerTestOperation::beforeFramePublication);
 #endif
+        if (context != nullptr
+            && (context->stopRequested()
+                || expectedJobGeneration != currentJobGeneration.load(std::memory_order_acquire)
+                || expectedCaptureGeneration
+                    != currentCaptureGeneration.load(std::memory_order_acquire)
+                || expectedCaptureGeneration
+                    != activeCaptureGeneration.load(std::memory_order_acquire)
+                || expectedLifecycleGeneration
+                    != currentCaptureLifecycleGeneration.load(std::memory_order_acquire)
+                || expectedLifecycleGeneration
+                    != activeCaptureLifecycleGeneration.load(std::memory_order_acquire))) {
+#if defined(JUCE_UNIT_TESTS) && JUCE_UNIT_TESTS
+            invokeWorkerTestHook(AnalysisCoordinator::WorkerTestOperation::afterFramePublication);
+#endif
+            return false;
+        }
+
         if (!snapshots.publish(workingFrame)) {
 #if defined(JUCE_UNIT_TESTS) && JUCE_UNIT_TESTS
             invokeWorkerTestHook(AnalysisCoordinator::WorkerTestOperation::afterFramePublication);
@@ -645,6 +807,114 @@ struct AnalysisCoordinator::State final : SharedAnalysisScheduler::JobClient,
         invokeWorkerTestHook(AnalysisCoordinator::WorkerTestOperation::afterFramePublication);
 #endif
         return true;
+    }
+
+    void resetForCaptureDiscontinuity(const std::uint64_t captureGeneration) noexcept
+    {
+        workingFrame = { };
+        workingFrame.spectrumDecibels.fill(minimumSpectrumDecibels);
+        workingFrame.spectrumPeakHoldDecibels.fill(minimumSpectrumDecibels);
+        workingFrame.generation = captureGeneration;
+        newestCapturedFrameEnd = 0;
+
+        spectrum.reset(&workingFrame);
+        observeSpectrumReset(captureGeneration, false);
+        workingFrame.spectrumSequence = nextSpectrumSequence++;
+        spectrumCapturedFrameEnd.store(0, std::memory_order_relaxed);
+
+        stereoField.reset(&workingFrame);
+        workingFrame.stereoCorrelation = 0.0F;
+        workingFrame.stereoCorrelationValid = false;
+        workingFrame.stereoSequence = nextStereoSequence++;
+        mirrorStereoFrameState();
+
+        loudness.resetForDiscontinuity();
+        mirroredLoudnessStateSequence = 0;
+        mirroredLoudnessResetEpoch = 0;
+        static_cast<void>(refreshLoudnessFrameState(true));
+
+        workingFrame.meterSequence = nextMeterSequence++;
+        meterCapturedFrameEnd.store(0, std::memory_order_relaxed);
+        hasPublishedAudioFrame.store(false, std::memory_order_release);
+        staleClearPending.store(false, std::memory_order_release);
+    }
+
+    [[nodiscard]] bool publishPendingCaptureBoundary(
+        const SharedAnalysisScheduler::JobContext& context, const std::uint64_t jobGeneration,
+        const std::uint64_t lifecycleGeneration, const std::uint64_t captureGeneration) noexcept
+    {
+        if (!captureBoundaryPublicationPending.load(std::memory_order_acquire))
+            return true;
+
+        if (captureGeneration != pendingCaptureBoundaryGeneration)
+            return false;
+
+        captureBoundaryDeliveryGeneration.store(captureGeneration, std::memory_order_relaxed);
+        captureBoundaryDeliveryPending.store(true, std::memory_order_release);
+        if (!publishWorkingFrame(&context, jobGeneration, captureGeneration, lifecycleGeneration)) {
+            captureBoundaryDeliveryPending.store(false, std::memory_order_release);
+            captureBoundaryDeliveryGeneration.store(0, std::memory_order_relaxed);
+            return false;
+        }
+
+        appliedCaptureDiscontinuityRevision = pendingCaptureDiscontinuityRevision;
+        samples.acknowledgeCaptureDiscontinuityRevision(appliedCaptureDiscontinuityRevision);
+        pendingCaptureDiscontinuityRevision = 0;
+        pendingCaptureBoundaryGeneration = 0;
+        captureBoundaryPublicationPending.store(false, std::memory_order_release);
+        return true;
+    }
+
+    [[nodiscard]] bool advanceCaptureGenerationForDiscontinuity(
+        const SharedAnalysisScheduler::JobContext& context, const std::uint64_t jobGeneration,
+        const std::uint64_t lifecycleGeneration, const std::uint64_t discontinuityRevision,
+        std::uint64_t& captureGeneration) noexcept
+    {
+        if (discontinuityRevision <= appliedCaptureDiscontinuityRevision)
+            return true;
+
+        if (captureBoundaryPublicationPending.load(std::memory_order_acquire)
+            && discontinuityRevision == pendingCaptureDiscontinuityRevision) {
+            return publishPendingCaptureBoundary(
+                context, jobGeneration, lifecycleGeneration, captureGeneration);
+        }
+
+        if (context.stopRequested()
+            || jobGeneration != currentJobGeneration.load(std::memory_order_acquire)
+            || lifecycleGeneration
+                != currentCaptureLifecycleGeneration.load(std::memory_order_acquire)
+            || lifecycleGeneration
+                != activeCaptureLifecycleGeneration.load(std::memory_order_acquire)) {
+            return false;
+        }
+
+        const auto nextCaptureGeneration = allocateCaptureGeneration();
+        resetForCaptureDiscontinuity(nextCaptureGeneration);
+
+        if (context.stopRequested()
+            || jobGeneration != currentJobGeneration.load(std::memory_order_acquire)
+            || lifecycleGeneration
+                != currentCaptureLifecycleGeneration.load(std::memory_order_acquire)
+            || lifecycleGeneration
+                != activeCaptureLifecycleGeneration.load(std::memory_order_acquire)
+            || captureGeneration != activeCaptureGeneration.load(std::memory_order_acquire)) {
+            return false;
+        }
+
+        auto expectedCaptureGeneration = captureGeneration;
+        if (!activeCaptureGeneration.compare_exchange_strong(expectedCaptureGeneration,
+                nextCaptureGeneration, std::memory_order_acq_rel, std::memory_order_acquire)) {
+            return false;
+        }
+
+        currentCaptureGeneration.store(nextCaptureGeneration, std::memory_order_release);
+        captureGeneration = nextCaptureGeneration;
+        pendingCaptureDiscontinuityRevision = discontinuityRevision;
+        pendingCaptureBoundaryGeneration = captureGeneration;
+        captureBoundaryPublicationPending.store(true, std::memory_order_release);
+        static_cast<void>(publishSpectrogramResetMarker(captureGeneration));
+        return publishPendingCaptureBoundary(
+            context, jobGeneration, lifecycleGeneration, captureGeneration);
     }
 
     void suppressUnpublishedLoudnessReset(VisualizationFrame& frame) const noexcept
@@ -681,10 +951,42 @@ struct AnalysisCoordinator::State final : SharedAnalysisScheduler::JobClient,
         };
 
         const auto jobGeneration = context.generation();
-        const auto captureGeneration = currentCaptureGeneration.load(std::memory_order_acquire);
-        if (context.stopRequested() || captureGeneration == 0
-            || jobGeneration != currentJobGeneration.load(std::memory_order_acquire)) {
+        auto captureGeneration = currentCaptureGeneration.load(std::memory_order_acquire);
+        const auto lifecycleGeneration
+            = currentCaptureLifecycleGeneration.load(std::memory_order_acquire);
+        if (context.stopRequested() || captureGeneration == 0 || lifecycleGeneration == 0
+            || jobGeneration != currentJobGeneration.load(std::memory_order_acquire)
+            || captureGeneration != activeCaptureGeneration.load(std::memory_order_acquire)
+            || lifecycleGeneration
+                != activeCaptureLifecycleGeneration.load(std::memory_order_acquire)) {
             finish(true);
+            return;
+        }
+
+        if (!publishPendingCaptureBoundary(
+                context, jobGeneration, lifecycleGeneration, captureGeneration)) {
+            finish(true);
+            return;
+        }
+        if (waitingForCaptureBoundaryDelivery()) {
+            finish(false);
+            return;
+        }
+
+        const auto advanceToLatestCaptureDiscontinuity
+            = [this, &context, jobGeneration, lifecycleGeneration, &captureGeneration]() noexcept {
+                  const auto latestRevision
+                      = samples.captureDiscontinuityRevision(lifecycleGeneration);
+                  return latestRevision <= appliedCaptureDiscontinuityRevision
+                      || advanceCaptureGenerationForDiscontinuity(context, jobGeneration,
+                          lifecycleGeneration, latestRevision, captureGeneration);
+              };
+        if (!advanceToLatestCaptureDiscontinuity()) {
+            finish(true);
+            return;
+        }
+        if (waitingForCaptureBoundaryDelivery()) {
+            finish(false);
             return;
         }
 
@@ -716,14 +1018,61 @@ struct AnalysisCoordinator::State final : SharedAnalysisScheduler::JobClient,
                 return;
             }
 
+            if (!advanceToLatestCaptureDiscontinuity()) {
+                finish(true);
+                return;
+            }
+            if (waitingForCaptureBoundaryDelivery()) {
+                finish(false);
+                return;
+            }
+
             if (!samples.tryAcquireOldest(handle))
                 break;
 
-            const auto& chunk = handle.view();
-            if (chunk.generation != captureGeneration) {
+            auto chunk = handle.view();
+            if (chunk.captureLifecycleGeneration != lifecycleGeneration) {
                 ignoredGenerationChunks.fetch_add(1, std::memory_order_relaxed);
                 continue;
             }
+
+            if (chunk.captureDiscontinuityRevision < appliedCaptureDiscontinuityRevision) {
+                ignoredGenerationChunks.fetch_add(1, std::memory_order_relaxed);
+                continue;
+            }
+
+            const auto advancesCaptureGeneration
+                = chunk.captureDiscontinuityRevision > appliedCaptureDiscontinuityRevision;
+            if (advancesCaptureGeneration) {
+                if (!advanceCaptureGenerationForDiscontinuity(context, jobGeneration,
+                        lifecycleGeneration, chunk.captureDiscontinuityRevision,
+                        captureGeneration)) {
+                    finish(true);
+                    return;
+                }
+                if (waitingForCaptureBoundaryDelivery()) {
+                    finish(false);
+                    return;
+                }
+
+                frameChanged = false;
+                stereoStateChanged = false;
+                loudnessStateChanged = false;
+                consumedValidAudio = false;
+                retainedFrames = 0;
+                retainedFrameEnd = 0;
+                previousChunkSequence = 0;
+                previousChunkFrameEnd = 0;
+                retainedSampleRate = 0.0;
+                retainedChannelCount = 0;
+                hasPreviousChunk = false;
+                inputFollowsDiscontinuity = true;
+                retainedChunkCount = 0;
+                retentionCapacity = std::max(activeFftSize, StereoSampleCapture::framesPerSlot);
+            }
+
+            chunk.generation = captureGeneration;
+            chunk.followsDiscontinuity = chunk.followsDiscontinuity || advancesCaptureGeneration;
 
             const auto hasValidRange = chunk.capturedFrameEnd >= chunk.frameCount;
             const auto chunkFrameStart
@@ -848,6 +1197,8 @@ struct AnalysisCoordinator::State final : SharedAnalysisScheduler::JobClient,
                 retainedSampleRate,
                 inputFollowsDiscontinuity,
                 retainedChannelCount,
+                appliedCaptureDiscontinuityRevision,
+                lifecycleGeneration,
             };
             const auto spectrumWasValid = workingFrame.spectrumValid;
             const auto producedSpectrum = spectrum.process(coalescedInput, workingFrame, this);
@@ -869,19 +1220,40 @@ struct AnalysisCoordinator::State final : SharedAnalysisScheduler::JobClient,
 #if defined(JUCE_UNIT_TESTS) && JUCE_UNIT_TESTS
         invokeWorkerTestHook(AnalysisCoordinator::WorkerTestOperation::beforeMeterConsumption);
 #endif
-        if (meters.consumeLatest(meterReading) && meterReading.generation == captureGeneration) {
-            const auto meterGapIsNewerThanField = meterReading.rawCaptureDiscontinuity
-                && meterReading.capturedFrameEnd > workingFrame.stereoCapturedFrameEnd;
-            if (meterGapIsNewerThanField)
-                stereoField.reset(&workingFrame);
+        if (!advanceToLatestCaptureDiscontinuity()) {
+            finish(true);
+            return;
+        }
+        if (waitingForCaptureBoundaryDelivery()) {
+            finish(false);
+            return;
+        }
+        if (meters.consumeLatest(meterReading)
+            && meterReading.captureLifecycleGeneration == lifecycleGeneration
+            && meterReading.captureDiscontinuityRevision >= appliedCaptureDiscontinuityRevision) {
+            const auto advancesCaptureGeneration
+                = meterReading.captureDiscontinuityRevision > appliedCaptureDiscontinuityRevision;
+            if (advancesCaptureGeneration) {
+                if (!advanceCaptureGenerationForDiscontinuity(context, jobGeneration,
+                        lifecycleGeneration, meterReading.captureDiscontinuityRevision,
+                        captureGeneration)) {
+                    finish(true);
+                    return;
+                }
+                if (waitingForCaptureBoundaryDelivery()) {
+                    finish(false);
+                    return;
+                }
 
-            const auto meterGapIsNewerThanLoudness = meterReading.rawCaptureDiscontinuity
-                && meterReading.capturedFrameEnd > loudness.statistics().capturedFrameEnd;
-            if (meterGapIsNewerThanLoudness) {
-                loudness.resetForDiscontinuity();
-                loudnessStateChanged = refreshLoudnessFrameState() || loudnessStateChanged;
+                frameChanged = false;
+                stereoStateChanged = false;
+                loudnessStateChanged = false;
+                consumedValidAudio = false;
             }
 
+            meterReading.generation = captureGeneration;
+            meterReading.rawCaptureDiscontinuity
+                = meterReading.rawCaptureDiscontinuity || advancesCaptureGeneration;
             applyPeakRmsReading(meterReading);
             newestCapturedFrameEnd
                 = std::max(newestCapturedFrameEnd, meterReading.capturedFrameEnd);
@@ -916,7 +1288,12 @@ struct AnalysisCoordinator::State final : SharedAnalysisScheduler::JobClient,
 
         if (context.stopRequested()
             || jobGeneration != currentJobGeneration.load(std::memory_order_acquire)
-            || captureGeneration != currentCaptureGeneration.load(std::memory_order_acquire)) {
+            || captureGeneration != currentCaptureGeneration.load(std::memory_order_acquire)
+            || captureGeneration != activeCaptureGeneration.load(std::memory_order_acquire)
+            || lifecycleGeneration
+                != currentCaptureLifecycleGeneration.load(std::memory_order_acquire)
+            || lifecycleGeneration
+                != activeCaptureLifecycleGeneration.load(std::memory_order_acquire)) {
             finish(true);
             return;
         }
@@ -962,9 +1339,11 @@ struct AnalysisCoordinator::State final : SharedAnalysisScheduler::JobClient,
             workingFrame.generation = captureGeneration;
             workingFrame.capturedFrameEnd = newestCapturedFrameEnd;
             workingFrame.droppedChunks = samples.telemetry().lostChunks();
-            static_cast<void>(publishWorkingFrame());
+            static_cast<void>(publishWorkingFrame(
+                &context, jobGeneration, captureGeneration, lifecycleGeneration));
         }
 
+        captureBoundaryResumePending.store(false, std::memory_order_release);
         lastAnalyzedCaptureRevision.store(revisionAtStart, std::memory_order_release);
         finish(false);
     }
@@ -975,6 +1354,12 @@ struct AnalysisCoordinator::State final : SharedAnalysisScheduler::JobClient,
         AnalysisTelemetry result;
         const auto captureGenerationBefore
             = currentCaptureGeneration.load(std::memory_order_acquire);
+        const auto lifecycleGenerationBefore
+            = currentCaptureLifecycleGeneration.load(std::memory_order_acquire);
+        const auto activeCaptureGenerationBefore
+            = activeCaptureGeneration.load(std::memory_order_acquire);
+        const auto activeLifecycleGenerationBefore
+            = activeCaptureLifecycleGeneration.load(std::memory_order_acquire);
         const auto sampleRateBitsBefore
             = attemptedCaptureSampleRateBits.load(std::memory_order_relaxed);
         result.capture = samples.telemetry();
@@ -1005,8 +1390,19 @@ struct AnalysisCoordinator::State final : SharedAnalysisScheduler::JobClient,
             = attemptedCaptureSampleRateBits.load(std::memory_order_relaxed);
         const auto captureGenerationAfter
             = currentCaptureGeneration.load(std::memory_order_acquire);
+        const auto lifecycleGenerationAfter
+            = currentCaptureLifecycleGeneration.load(std::memory_order_acquire);
+        const auto activeCaptureGenerationAfter
+            = activeCaptureGeneration.load(std::memory_order_acquire);
+        const auto activeLifecycleGenerationAfter
+            = activeCaptureLifecycleGeneration.load(std::memory_order_acquire);
         const auto freshnessBoundaryIsStable = captureGenerationBefore != 0
-            && captureGenerationBefore == captureGenerationAfter
+            && captureGenerationBefore == captureGenerationAfter && lifecycleGenerationBefore != 0
+            && lifecycleGenerationBefore == lifecycleGenerationAfter
+            && activeCaptureGenerationBefore == captureGenerationBefore
+            && activeCaptureGenerationAfter == captureGenerationAfter
+            && activeLifecycleGenerationBefore == lifecycleGenerationBefore
+            && activeLifecycleGenerationAfter == lifecycleGenerationAfter
             && sampleRateBitsBefore == sampleRateBitsAfter;
         result.captureGeneration = captureGenerationAfter;
         if (freshnessBoundaryIsStable)
@@ -1100,6 +1496,9 @@ struct AnalysisCoordinator::State final : SharedAnalysisScheduler::JobClient,
     std::uint64_t observedSpectrumResetEpoch = 0;
     std::uint64_t requiredUserResetEpoch = 0;
     std::uint64_t requiredLiveClearEpoch = 0;
+    std::uint64_t appliedCaptureDiscontinuityRevision = 0;
+    std::uint64_t pendingCaptureDiscontinuityRevision = 0;
+    std::uint64_t pendingCaptureBoundaryGeneration = 0;
     std::uint64_t appliedLoudnessResetEpoch = 0;
     std::uint64_t mirroredLoudnessStateSequence = 0;
     std::uint64_t mirroredLoudnessResetEpoch = 0;
@@ -1107,11 +1506,19 @@ struct AnalysisCoordinator::State final : SharedAnalysisScheduler::JobClient,
     bool mappingSeedWasPublished = false;
     mutable std::mutex loudnessMeasurementMutex;
     LoudnessMeasurement loudnessMeasurementTelemetry;
+    std::atomic<std::uint64_t> captureGenerationCounter { 0 };
+    std::atomic<std::uint64_t> activeCaptureGeneration { 0 };
+    std::atomic<std::uint64_t> activeCaptureLifecycleGeneration { 0 };
     std::atomic<std::uint64_t> currentJobGeneration { 0 };
     std::atomic<std::uint64_t> currentCaptureGeneration { 0 };
+    std::atomic<std::uint64_t> currentCaptureLifecycleGeneration { 0 };
     std::atomic<std::uint64_t> attemptedCaptureSampleRateBits { 0 };
     std::atomic<std::uint64_t> captureRevision { 0 };
     std::atomic<std::uint64_t> lastAnalyzedCaptureRevision { 0 };
+    std::atomic<bool> captureBoundaryPublicationPending { false };
+    std::atomic<std::uint64_t> captureBoundaryDeliveryGeneration { 0 };
+    std::atomic<bool> captureBoundaryDeliveryPending { false };
+    std::atomic<bool> captureBoundaryResumePending { false };
     std::atomic<bool> hasPublishedAudioFrame { false };
     std::atomic<bool> staleClearPending { false };
     std::atomic<std::uint64_t> peakRmsResetPendingEpoch { 0 };
@@ -1168,7 +1575,7 @@ AnalysisCoordinator::AnalysisCoordinator()
 AnalysisCoordinator::~AnalysisCoordinator()
 {
     const std::lock_guard lifecycleLock(lifecycleMutex_);
-    captureGeneration_.store(0, std::memory_order_release);
+    state_->closeCapture();
 
     if (client_ != nullptr)
         static_cast<void>(client_->cancelAndWait());
@@ -1182,11 +1589,7 @@ void AnalysisCoordinator::captureAudioBlock(const float* const left, const float
     const std::size_t frameCount, const double sampleRate,
     const std::uint32_t channelCount) noexcept
 {
-    const auto generation = captureGeneration_.load(std::memory_order_acquire);
-    if (generation == 0 || frameCount == 0)
-        return;
-
-    state_->captureAudioBlock(left, right, frameCount, sampleRate, generation, channelCount);
+    state_->captureAudioBlock(left, right, frameCount, sampleRate, channelCount);
 }
 
 void AnalysisCoordinator::setCaptureFormat(
@@ -1209,12 +1612,12 @@ void AnalysisCoordinator::setCaptureFormat(
         configuredChannelCount_ = channelCount;
         hasConfiguredFormat_ = true;
 
-        if (captureGeneration_.load(std::memory_order_acquire) == 0 || client_ == nullptr)
+        if (!state_->isCaptureActive() || client_ == nullptr)
             return;
 
         static_cast<void>(restartActiveGenerationLocked(true));
     } catch (...) {
-        captureGeneration_.store(0, std::memory_order_release);
+        state_->closeCapture();
     }
 }
 
@@ -1229,7 +1632,7 @@ void AnalysisCoordinator::setSpectrumAnalysisConfiguration(
         }
 
         auto jobGeneration = client_->generation();
-        const auto isActive = captureGeneration_.load(std::memory_order_acquire) != 0;
+        const auto isActive = state_->isCaptureActive();
         if (isActive) {
             jobGeneration = client_->cancelAndAdvanceGeneration();
             if (!client_->waitUntilIdle())
@@ -1268,7 +1671,7 @@ void AnalysisCoordinator::setSpectrumTemporalConfiguration(
         }
 
         auto jobGeneration = client_->generation();
-        const auto isActive = captureGeneration_.load(std::memory_order_acquire) != 0;
+        const auto isActive = state_->isCaptureActive();
         if (isActive) {
             jobGeneration = client_->cancelAndAdvanceGeneration();
             if (!client_->waitUntilIdle())
@@ -1298,7 +1701,7 @@ void AnalysisCoordinator::setSpectrogramFrequencySpacing(const double spacing) n
         }
 
         auto jobGeneration = client_->generation();
-        const auto isActive = captureGeneration_.load(std::memory_order_acquire) != 0;
+        const auto isActive = state_->isCaptureActive();
         if (isActive) {
             jobGeneration = client_->cancelAndAdvanceGeneration();
             if (!client_->waitUntilIdle())
@@ -1328,8 +1731,12 @@ void AnalysisCoordinator::requestAnalysis() noexcept
         if (lifecycleTestHook_ != nullptr)
             lifecycleTestHook_(lifecycleTestHookContext_, LifecycleTestOperation::request);
 #endif
-        if (captureGeneration_.load(std::memory_order_acquire) == 0 || client_ == nullptr)
+        if (!state_->isCaptureActive() || client_ == nullptr)
             return;
+        if (state_->waitingForCaptureBoundaryDelivery()) {
+            state_->noteEmptyRequestAvoided();
+            return;
+        }
 
         const auto now
             = std::chrono::duration_cast<std::chrono::nanoseconds>(Clock::now().time_since_epoch())
@@ -1346,7 +1753,8 @@ void AnalysisCoordinator::requestAnalysis() noexcept
 
         const auto coveredRevision
             = std::max(lastRequestedCaptureRevision_, state_->analyzedCaptureRevision());
-        const auto hasNewCapture = captureRevision > coveredRevision;
+        const auto hasNewCapture
+            = captureRevision > coveredRevision || state_->hasPendingCaptureBoundary();
         const auto staleClearIsDue = !staleClearRequested_ && state_->hasAudioFrame()
             && now - lastObservedCaptureNanoseconds_ >= staleInputTimeoutNanoseconds;
 
@@ -1403,12 +1811,12 @@ void AnalysisCoordinator::setVisualizationActive(const bool shouldBeActive) noex
                                : LifecycleTestOperation::deactivate);
         }
 #endif
-        const auto isActive = captureGeneration_.load(std::memory_order_acquire) != 0;
+        const auto isActive = state_->isCaptureActive();
         if (isActive == shouldBeActive || client_ == nullptr)
             return;
 
         if (!shouldBeActive) {
-            captureGeneration_.store(0, std::memory_order_release);
+            state_->closeCapture();
             staleClearRequested_ = false;
             state_->cancelStaleClear();
             static_cast<void>(client_->cancelAndAdvanceGeneration());
@@ -1419,13 +1827,13 @@ void AnalysisCoordinator::setVisualizationActive(const bool shouldBeActive) noex
 
         static_cast<void>(restartActiveGenerationLocked(false));
     } catch (...) {
-        captureGeneration_.store(0, std::memory_order_release);
+        state_->closeCapture();
     }
 }
 
 bool AnalysisCoordinator::restartActiveGenerationLocked(const bool discardPendingCapture)
 {
-    captureGeneration_.store(0, std::memory_order_release);
+    state_->closeCapture();
     staleClearRequested_ = false;
     state_->cancelStaleClear();
 
@@ -1436,8 +1844,9 @@ bool AnalysisCoordinator::restartActiveGenerationLocked(const bool discardPendin
     if (discardPendingCapture)
         state_->discardPendingCapture();
 
-    const auto captureGeneration = nextNonzeroGeneration(captureGenerationCounter_);
-    state_->beginGeneration(captureGeneration, jobGeneration, discardPendingCapture);
+    const auto captureGeneration = state_->allocateCaptureGeneration();
+    state_->beginGeneration(
+        captureGeneration, captureGeneration, jobGeneration, discardPendingCapture);
     const auto now
         = std::chrono::duration_cast<std::chrono::nanoseconds>(Clock::now().time_since_epoch())
               .count();
@@ -1447,7 +1856,6 @@ bool AnalysisCoordinator::restartActiveGenerationLocked(const bool discardPendin
     lastObservedCaptureNanoseconds_ = now;
     staleClearRequested_ = false;
     nextAnalysisRequestNanoseconds_.store(0, std::memory_order_relaxed);
-    captureGeneration_.store(captureGeneration, std::memory_order_release);
     return true;
 }
 
@@ -1463,7 +1871,7 @@ void AnalysisCoordinator::resetPeakRms() noexcept
 {
     try {
         const std::lock_guard lifecycleLock(lifecycleMutex_);
-        if (captureGeneration_.load(std::memory_order_acquire) == 0 || client_ == nullptr)
+        if (!state_->isCaptureActive() || client_ == nullptr)
             return;
 
         state_->requestPeakRmsReset();
@@ -1477,7 +1885,7 @@ void AnalysisCoordinator::resetSpectrum() noexcept
 {
     try {
         const std::lock_guard lifecycleLock(lifecycleMutex_);
-        if (captureGeneration_.load(std::memory_order_acquire) == 0 || client_ == nullptr)
+        if (!state_->isCaptureActive() || client_ == nullptr)
             return;
 
         state_->requestSpectrumClear();
@@ -1491,7 +1899,7 @@ void AnalysisCoordinator::resetLoudness() noexcept
 {
     try {
         const std::lock_guard lifecycleLock(lifecycleMutex_);
-        if (captureGeneration_.load(std::memory_order_acquire) == 0 || client_ == nullptr)
+        if (!state_->isCaptureActive() || client_ == nullptr)
             return;
 
         state_->requestLoudnessReset();
@@ -1504,7 +1912,7 @@ void AnalysisCoordinator::resetLoudness() noexcept
 bool AnalysisCoordinator::copyLatestVisualizationFrame(
     VisualizationFrame& destination) const noexcept
 {
-    if (!state_->snapshots.copyLatest(destination))
+    if (!state_->copyLatestVisualizationFrame(destination))
         return false;
 
     state_->suppressUnpublishedLoudnessReset(destination);
@@ -1523,7 +1931,7 @@ void AnalysisCoordinator::discardPendingSpectrogramColumns() noexcept
 
 bool AnalysisCoordinator::isVisualizationActive() const noexcept
 {
-    return captureGeneration_.load(std::memory_order_acquire) != 0;
+    return state_->isCaptureActive();
 }
 
 AnalysisTelemetry AnalysisCoordinator::telemetry() const noexcept
@@ -1557,6 +1965,11 @@ void AnalysisCoordinator::setWorkerTestHook(void* const context, const WorkerTes
 void AnalysisCoordinator::skipNextMeterEndpointSequenceForTesting() noexcept
 {
     state_->meters.skipNextEndpointSequenceForTesting();
+}
+
+void AnalysisCoordinator::failNextFramePublicationForTesting() noexcept
+{
+    state_->failNextFramePublicationForTesting();
 }
 #endif
 } // namespace audio_insight

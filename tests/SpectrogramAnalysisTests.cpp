@@ -706,17 +706,42 @@ private:
         for (std::size_t index = 0; index < StereoSampleCapture::slotCount + 2; ++index)
             coordinator.captureAudioBlock(block.data(), block.data(), block.size(), 48'000.0, 2);
 
-        expect(waitForTelemetry(coordinator, [beforeGap](const AnalysisTelemetry& value) {
-            return value.jobsCompleted > beforeGap.jobsCompleted
-                && value.spectrogramColumnsMapped > beforeGap.spectrogramColumnsMapped;
-        }));
+        auto observedBoundary = false;
+        auto analyzedPostGapAudio = false;
+        VisualizationFrame boundaryFrame;
+        const auto deadline = std::chrono::steady_clock::now() + 2s;
+        while (std::chrono::steady_clock::now() < deadline) {
+            coordinator.requestAnalysis();
+            if (coordinator.copyLatestVisualizationFrame(boundaryFrame)
+                && boundaryFrame.generation > firstOldColumn.captureGeneration
+                && !boundaryFrame.spectrumValid && !boundaryFrame.meterValid
+                && !boundaryFrame.stereoFieldValid && !boundaryFrame.loudnessMomentaryValid
+                && !boundaryFrame.loudnessShortTermValid
+                && !boundaryFrame.loudnessIntegratedValid) {
+                observedBoundary = true;
+            }
+
+            const auto telemetry = coordinator.telemetry();
+            if (observedBoundary && telemetry.jobsCompleted > beforeGap.jobsCompleted
+                && telemetry.spectrogramColumnsMapped > beforeGap.spectrogramColumnsMapped) {
+                analyzedPostGapAudio = true;
+                break;
+            }
+            std::this_thread::sleep_for(1ms);
+        }
+        expect(observedBoundary);
+        expect(analyzedPostGapAudio);
 
         const auto afterGapColumns = drainSpectrogramColumns(coordinator);
-        expect(afterGapColumns.size() == 1);
-        if (!afterGapColumns.empty()) {
-            expect(!afterGapColumns.front().resetMarker);
+        expect(afterGapColumns.size() == 2);
+        if (afterGapColumns.size() == 2) {
+            expect(afterGapColumns.front().resetMarker);
+            expect(!afterGapColumns.back().resetMarker);
             expect(afterGapColumns.front().resetEpoch > oldResetEpoch);
-            expect(afterGapColumns.front().captureGeneration == firstOldColumn.captureGeneration);
+            expect(afterGapColumns.back().resetEpoch == afterGapColumns.front().resetEpoch);
+            expect(afterGapColumns.front().captureGeneration > firstOldColumn.captureGeneration);
+            expect(afterGapColumns.back().captureGeneration
+                == afterGapColumns.front().captureGeneration);
         }
 
         const auto afterGap = coordinator.telemetry();

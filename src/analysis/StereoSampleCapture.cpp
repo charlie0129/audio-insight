@@ -52,16 +52,28 @@ StereoSampleCapture::StereoSampleCapture() noexcept = default;
 
 StereoSampleCapture::PublishResult StereoSampleCapture::publishBlock(const float* const left,
     const float* const right, const std::size_t frameCount, const double sampleRate,
-    const std::uint64_t generation, const std::uint32_t channelCount) noexcept
+    const std::uint64_t generation, const std::uint32_t channelCount,
+    const std::uint64_t captureLifecycleGeneration) noexcept
 {
+    const auto lifecycleGeneration
+        = captureLifecycleGeneration == 0 ? generation : captureLifecycleGeneration;
+    if (producerCaptureLifecycleGeneration_ != lifecycleGeneration) {
+        producerCaptureLifecycleGeneration_ = lifecycleGeneration;
+        captureDiscontinuityRevision_ = 0;
+        publishedCaptureDiscontinuityRevision_.store(0, std::memory_order_relaxed);
+        publishedCaptureDiscontinuityLifecycleGeneration_.store(
+            lifecycleGeneration, std::memory_order_release);
+    }
+
     PublishResult result;
+    result.captureDiscontinuityRevision = captureDiscontinuityRevision_;
     std::size_t offset = 0;
 
     while (offset < frameCount) {
         const auto chunkFrames = std::min(framesPerSlot, frameCount - offset);
         publishChunk(left != nullptr ? left + offset : nullptr,
             right != nullptr ? right + offset : nullptr, chunkFrames, sampleRate, generation,
-            channelCount, result);
+            channelCount, lifecycleGeneration, result);
         offset += chunkFrames;
     }
 
@@ -116,7 +128,8 @@ StereoSampleCapture::Slot* StereoSampleCapture::claimSlot(
 
 void StereoSampleCapture::publishChunk(const float* const left, const float* const right,
     const std::size_t frameCount, const double sampleRate, const std::uint64_t generation,
-    const std::uint32_t channelCount, PublishResult& result) noexcept
+    const std::uint32_t channelCount, const std::uint64_t captureLifecycleGeneration,
+    PublishResult& result) noexcept
 {
     const auto sequence = nextSequence_++;
     capturedFrameCursor_ += frameCount;
@@ -131,12 +144,30 @@ void StereoSampleCapture::publishChunk(const float* const left, const float* con
     auto* const slot = claimSlot(reclaimedReady, slotIndex);
 
     if (slot == nullptr) {
+        if (captureDiscontinuityRevision_ == 0
+            || captureDiscontinuityRevision_
+                == acknowledgedCaptureDiscontinuityRevision_.load(std::memory_order_acquire)) {
+            captureDiscontinuityRevision_ = sequence;
+            result.beganCaptureDiscontinuity = true;
+        }
+        result.captureDiscontinuityRevision = captureDiscontinuityRevision_;
+        publishedCaptureDiscontinuityRevision_.store(
+            captureDiscontinuityRevision_, std::memory_order_release);
         ++result.droppedIncomingChunks;
         droppedIncomingChunks_.fetch_add(1, std::memory_order_relaxed);
         return;
     }
 
     if (reclaimedReady) {
+        if (captureDiscontinuityRevision_ == 0
+            || captureDiscontinuityRevision_
+                == acknowledgedCaptureDiscontinuityRevision_.load(std::memory_order_acquire)) {
+            captureDiscontinuityRevision_ = sequence;
+            result.beganCaptureDiscontinuity = true;
+        }
+        result.captureDiscontinuityRevision = captureDiscontinuityRevision_;
+        publishedCaptureDiscontinuityRevision_.store(
+            captureDiscontinuityRevision_, std::memory_order_release);
         ++result.reclaimedReadyChunks;
         reclaimedReadyChunks_.fetch_add(1, std::memory_order_relaxed);
     }
@@ -157,6 +188,8 @@ void StereoSampleCapture::publishChunk(const float* const left, const float* con
     slot->capturedFrameEnd = capturedFrameCursor_;
     slot->sampleRate = sampleRate;
     slot->channelCount = channelCount;
+    slot->captureDiscontinuityRevision = captureDiscontinuityRevision_;
+    slot->captureLifecycleGeneration = captureLifecycleGeneration;
     slot->publishedSequence.store(sequence, std::memory_order_relaxed);
     slot->state.store(SlotState::ready, std::memory_order_release);
 
@@ -207,10 +240,19 @@ bool StereoSampleCapture::tryAcquireOldest(ReadHandle& destination) noexcept
         consumerPreviousGeneration_ = slot.generation;
         consumerPreviousSequence_ = slot.sequence;
         consumerPreviousChannelCount_ = slot.channelCount;
+        auto captureDiscontinuityRevision = slot.captureDiscontinuityRevision;
+        if (publishedCaptureDiscontinuityLifecycleGeneration_.load(std::memory_order_acquire)
+            == slot.captureLifecycleGeneration) {
+            captureDiscontinuityRevision = std::max(captureDiscontinuityRevision,
+                publishedCaptureDiscontinuityRevision_.load(std::memory_order_acquire));
+        }
+        acknowledgedCaptureDiscontinuityRevision_.store(
+            captureDiscontinuityRevision, std::memory_order_release);
 
         destination = ReadHandle(*this, oldestIndex,
             { slot.left.data(), slot.right.data(), slot.frameCount, slot.generation, slot.sequence,
-                slot.capturedFrameEnd, slot.sampleRate, followsDiscontinuity, slot.channelCount });
+                slot.capturedFrameEnd, slot.sampleRate, followsDiscontinuity, slot.channelCount,
+                captureDiscontinuityRevision, slot.captureLifecycleGeneration });
         return true;
     }
 
@@ -234,6 +276,23 @@ StereoSampleCapture::Telemetry StereoSampleCapture::telemetry() const noexcept
             ++result.readySlots;
 
     return result;
+}
+
+std::uint64_t StereoSampleCapture::captureDiscontinuityRevision(
+    const std::uint64_t captureLifecycleGeneration) const noexcept
+{
+    if (publishedCaptureDiscontinuityLifecycleGeneration_.load(std::memory_order_acquire)
+        != captureLifecycleGeneration) {
+        return 0;
+    }
+
+    return publishedCaptureDiscontinuityRevision_.load(std::memory_order_acquire);
+}
+
+void StereoSampleCapture::acknowledgeCaptureDiscontinuityRevision(
+    const std::uint64_t revision) noexcept
+{
+    acknowledgedCaptureDiscontinuityRevision_.store(revision, std::memory_order_release);
 }
 
 void StereoSampleCapture::discardPending() noexcept
