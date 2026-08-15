@@ -4,6 +4,7 @@
 
 #include <juce_core/juce_core.h>
 
+#include <algorithm>
 #include <array>
 #include <atomic>
 #include <chrono>
@@ -137,12 +138,23 @@ public:
             expectWithinAbsoluteError(frame.spectrumDecibels[sineBin], -6.0206F, 0.15F);
             expectWithinAbsoluteError(frame.peakDecibels[0], -6.0206F, 0.02F);
             expectWithinAbsoluteError(frame.peakDecibels[1], -12.0412F, 0.02F);
-            expectWithinAbsoluteError(frame.rmsDecibels[0], -9.0309F, 0.02F);
-            expectWithinAbsoluteError(frame.rmsDecibels[1], -15.0515F, 0.02F);
+            const auto representedSeconds = static_cast<double>(fftSize) / 48'000.0;
+            const auto rmsIntegration = std::sqrt(1.0 - std::exp(-representedSeconds / 0.300));
+            expectWithinAbsoluteError(frame.rmsDecibels[0],
+                static_cast<float>(20.0 * std::log10((0.5 / std::sqrt(2.0)) * rmsIntegration)),
+                0.02F);
+            expectWithinAbsoluteError(frame.rmsDecibels[1],
+                static_cast<float>(20.0 * std::log10((0.25 / std::sqrt(2.0)) * rmsIntegration)),
+                0.02F);
+            expect(frame.meterValid);
+            expect(frame.meterSequence != 0);
+            expectWithinAbsoluteError(frame.heldPeakDecibels[0], -6.0206F, 0.02F);
+            expectWithinAbsoluteError(frame.heldPeakDecibels[1], -12.0412F, 0.02F);
+            expect(!frame.over[0] && !frame.over[1]);
 
             const auto activeTelemetry = coordinator.telemetry();
             expect(activeTelemetry.capture.attemptedChunks == 2);
-            expect(activeTelemetry.meters.attemptedBlocks == 1);
+            expect(activeTelemetry.meters.attemptedBlocks == 2);
             expect(activeTelemetry.jobsCompleted >= 1);
             expect(activeTelemetry.spectrumCapturedFrameEnd == fftSize);
             expect(activeTelemetry.meterCapturedFrameEnd == fftSize);
@@ -216,13 +228,116 @@ public:
                 freshnessTelemetry.meterCapturedFrameEnd == spectrumEndpoint + shortBlock.size());
         }
 
+        beginTest("Mono analysis publishes one honest meter channel");
+        {
+            AnalysisCoordinator coordinator;
+            coordinator.setVisualizationActive(true);
+
+            std::array<float, fftSize> mono { };
+            mono.fill(0.5F);
+            coordinator.captureAudioBlock(
+                mono.data(), nullptr, mono.size(), 48'000.0, std::uint32_t { 1 });
+
+            VisualizationFrame frame;
+            const auto received = waitForFrame(coordinator, frame,
+                [](const auto& candidate) { return candidate.channelCount == 1; });
+            expect(received);
+            expect(frame.channelCount == 1);
+            expectWithinAbsoluteError(frame.peakDecibels[0], -6.0206F, 0.02F);
+            expect(isDisplayFloor(frame.peakDecibels[1]));
+            expect(isDisplayFloor(frame.rmsDecibels[1]));
+        }
+
+        beginTest("Sample-rate changes start a clean capture generation");
+        {
+            AnalysisCoordinator coordinator;
+            coordinator.setCaptureFormat(48'000.0, 2);
+            coordinator.setVisualizationActive(true);
+
+            std::array<float, fftSize> signal { };
+            signal.fill(0.25F);
+            coordinator.captureAudioBlock(signal.data(), signal.data(), signal.size(), 48'000.0, 2);
+
+            VisualizationFrame original;
+            expect(waitForFrame(coordinator, original, [](const auto& candidate) {
+                return candidate.spectrumValid && candidate.meterValid;
+            }));
+
+            coordinator.setCaptureFormat(96'000.0, 2);
+            VisualizationFrame restarted;
+            expect(waitForFrame(
+                coordinator, restarted, [generation = original.generation](const auto& candidate) {
+                    return candidate.generation > generation && !candidate.spectrumValid
+                        && !candidate.meterValid;
+                }));
+
+            constexpr std::array<float, 128> shortSignal { };
+            coordinator.captureAudioBlock(
+                shortSignal.data(), shortSignal.data(), shortSignal.size(), 96'000.0, 2);
+
+            VisualizationFrame warming;
+            expect(waitForFrame(
+                coordinator, warming, [generation = restarted.generation](const auto& candidate) {
+                    return candidate.generation == generation && candidate.meterValid
+                        && !candidate.spectrumValid;
+                }));
+            expectWithinAbsoluteError(warming.sampleRate, 96'000.0, 0.001);
+
+            coordinator.captureAudioBlock(signal.data(), signal.data(), signal.size(), 96'000.0, 2);
+            VisualizationFrame ready;
+            expect(waitForFrame(
+                coordinator, ready, [generation = restarted.generation](const auto& candidate) {
+                    return candidate.generation == generation && candidate.spectrumValid
+                        && candidate.meterValid;
+                }));
+
+            while (coordinator.copyLatestVisualizationFrame(ready)) { }
+            coordinator.setCaptureFormat(96'000.0, 2);
+            expect(!coordinator.copyLatestVisualizationFrame(ready),
+                "An identical format unnecessarily restarted capture");
+        }
+
+        beginTest("Channel-layout changes never retain a stereo spectrum beside a mono meter");
+        {
+            AnalysisCoordinator coordinator;
+            coordinator.setCaptureFormat(48'000.0, 2);
+            coordinator.setVisualizationActive(true);
+
+            std::array<float, fftSize> stereo { };
+            stereo.fill(0.25F);
+            coordinator.captureAudioBlock(stereo.data(), stereo.data(), stereo.size(), 48'000.0, 2);
+
+            VisualizationFrame original;
+            expect(waitForFrame(coordinator, original, [](const auto& candidate) {
+                return candidate.spectrumValid && candidate.channelCount == 2;
+            }));
+
+            coordinator.setCaptureFormat(48'000.0, 1);
+            VisualizationFrame restarted;
+            expect(waitForFrame(
+                coordinator, restarted, [generation = original.generation](const auto& candidate) {
+                    return candidate.generation > generation && !candidate.spectrumValid
+                        && !candidate.meterValid;
+                }));
+
+            constexpr std::array<float, 128> mono { };
+            coordinator.captureAudioBlock(mono.data(), nullptr, mono.size(), 48'000.0, 1);
+            VisualizationFrame warming;
+            expect(waitForFrame(
+                coordinator, warming, [generation = restarted.generation](const auto& candidate) {
+                    return candidate.generation == generation && candidate.meterValid
+                        && candidate.channelCount == 1;
+                }));
+            expect(!warming.spectrumValid);
+        }
+
         beginTest("Transport-stop staleness publishes one cleared frame without empty jobs");
         {
             AnalysisCoordinator coordinator;
             coordinator.setVisualizationActive(true);
 
             std::array<float, fftSize> signal { };
-            signal.fill(0.5F);
+            signal.fill(1.1F);
             coordinator.captureAudioBlock(signal.data(), signal.data(), signal.size(), 48'000.0);
 
             VisualizationFrame signalFrame;
@@ -243,6 +358,11 @@ public:
             expect(receivedClear, "A stopped transport left the last meters frozen");
             expect(clearedFrame.generation == signalFrame.generation);
             expect(clearedFrame.spectrumSequence > signalFrame.spectrumSequence);
+            expect(clearedFrame.meterSequence > signalFrame.meterSequence);
+            expectWithinAbsoluteError(
+                clearedFrame.heldPeakDecibels[0], signalFrame.heldPeakDecibels[0], 0.0001F);
+            expect(signalFrame.over[0] && signalFrame.over[1]);
+            expect(clearedFrame.over[0] && clearedFrame.over[1]);
 
             const auto afterClear = coordinator.telemetry();
             expect(afterClear.staleFramesPublished == 1);
@@ -254,6 +374,45 @@ public:
             const auto afterRepeatedIdleRequests = coordinator.telemetry();
             expect(afterRepeatedIdleRequests.scheduler.submitted == submittedAfterClear);
             expect(afterRepeatedIdleRequests.staleFramesPublished == 1);
+        }
+
+        beginTest("Stale live measurements do not reappear when silent capture resumes");
+        {
+            AnalysisCoordinator coordinator;
+            coordinator.setVisualizationActive(true);
+
+            std::array<float, 512> signal { };
+            signal.fill(1.1F);
+            coordinator.captureAudioBlock(signal.data(), signal.data(), signal.size(), 48'000.0);
+
+            VisualizationFrame signalFrame;
+            expect(waitForFrame(coordinator, signalFrame,
+                [](const auto& candidate) { return candidate.meterValid && candidate.over[0]; }));
+
+            VisualizationFrame clearedFrame;
+            expect(waitForFrame(
+                coordinator, clearedFrame,
+                [sequence = signalFrame.meterSequence](const auto& candidate) {
+                    return candidate.meterSequence > sequence
+                        && isDisplayFloor(candidate.peakDecibels[0])
+                        && isDisplayFloor(candidate.rmsDecibels[0]);
+                },
+                1s));
+            expect(clearedFrame.over[0]);
+            expect(!isDisplayFloor(clearedFrame.heldPeakDecibels[0]));
+
+            constexpr std::array<float, 128> silence { };
+            coordinator.captureAudioBlock(silence.data(), silence.data(), silence.size(), 48'000.0);
+
+            VisualizationFrame resumedFrame;
+            expect(waitForFrame(coordinator, resumedFrame,
+                [sequence = clearedFrame.meterSequence](
+                    const auto& candidate) { return candidate.meterSequence > sequence; }));
+            expect(isDisplayFloor(resumedFrame.peakDecibels[0]));
+            expect(isDisplayFloor(resumedFrame.rmsDecibels[0]));
+            expectWithinAbsoluteError(
+                resumedFrame.heldPeakDecibels[0], clearedFrame.heldPeakDecibels[0], 0.001F);
+            expect(resumedFrame.over[0] && resumedFrame.over[1]);
         }
 
         beginTest("Reactivation begins with a fresh generation and cleared snapshot");
@@ -282,6 +441,110 @@ public:
             expect(isDisplayFloor(reopenedFrame.peakDecibels[1]));
             expect(isDisplayFloor(reopenedFrame.rmsDecibels[0]));
             expect(isDisplayFloor(reopenedFrame.rmsDecibels[1]));
+            expect(isDisplayFloor(reopenedFrame.heldPeakDecibels[0]));
+            expect(isDisplayFloor(reopenedFrame.heldPeakDecibels[1]));
+            expect(!reopenedFrame.over[0] && !reopenedFrame.over[1]);
+            expect(!reopenedFrame.meterValid);
+        }
+
+        beginTest("Peak/RMS user reset clears holds and OVER without clearing live values");
+        {
+            AnalysisCoordinator coordinator;
+            coordinator.setVisualizationActive(true);
+
+            std::array<float, 512> signal { };
+            signal.fill(1.1F);
+            coordinator.captureAudioBlock(signal.data(), signal.data(), signal.size(), 48'000.0);
+
+            VisualizationFrame beforeReset;
+            expect(waitForFrame(coordinator, beforeReset,
+                [](const auto& candidate) { return candidate.meterValid && candidate.over[0]; }));
+
+            coordinator.resetPeakRms();
+            coordinator.resetPeakRms();
+            VisualizationFrame afterReset;
+            expect(waitForFrame(coordinator, afterReset,
+                [sequence = beforeReset.meterSequence](const auto& candidate) {
+                    return candidate.meterSequence > sequence && !candidate.over[0]
+                        && isDisplayFloor(candidate.heldPeakDecibels[0]);
+                }));
+            expectWithinAbsoluteError(
+                afterReset.peakDecibels[0], beforeReset.peakDecibels[0], 0.0001F);
+            expectWithinAbsoluteError(
+                afterReset.rmsDecibels[0], beforeReset.rmsDecibels[0], 0.0001F);
+            expect(coordinator.telemetry().peakRmsUserResets == 2);
+        }
+
+        beginTest("Peak/RMS reset before first audio does not fabricate stale state");
+        {
+            AnalysisCoordinator coordinator;
+            coordinator.setVisualizationActive(true);
+            coordinator.resetPeakRms();
+
+            const auto deadline = std::chrono::steady_clock::now() + 350ms;
+            while (std::chrono::steady_clock::now() < deadline) {
+                coordinator.requestAnalysis();
+                std::this_thread::sleep_for(2ms);
+            }
+
+            const auto telemetry = coordinator.telemetry();
+            expect(telemetry.peakRmsUserResets == 1);
+            expect(telemetry.meterCapturedFrameEnd == 0);
+            expect(telemetry.staleFramesPublished == 0);
+        }
+
+        beginTest("Raw capture overflow resets Peak/RMS at the shared discontinuity");
+        {
+            AnalysisCoordinator coordinator;
+            coordinator.setVisualizationActive(true);
+
+            std::array<float, StereoSampleCapture::framesPerSlot> block { };
+            block.fill(1.1F);
+            coordinator.captureAudioBlock(block.data(), block.data(), block.size(), 48'000.0);
+
+            VisualizationFrame beforeGap;
+            expect(waitForFrame(coordinator, beforeGap,
+                [](const auto& candidate) { return candidate.meterValid && candidate.over[0]; }));
+
+            block.fill(0.1F);
+            for (std::size_t index = 0; index < StereoSampleCapture::slotCount + 2; ++index)
+                coordinator.captureAudioBlock(block.data(), block.data(), block.size(), 48'000.0);
+
+            VisualizationFrame afterGap;
+            expect(waitForFrame(
+                coordinator, afterGap, [sequence = beforeGap.meterSequence](const auto& candidate) {
+                    return candidate.meterSequence > sequence && !candidate.over[0];
+                }));
+            expect(!afterGap.over[0] && !afterGap.over[1]);
+            expectWithinAbsoluteError(afterGap.heldPeakDecibels[0], -20.0F, 0.01F);
+            expect(coordinator.telemetry().capture.reclaimedReadyChunks > 0);
+        }
+
+        beginTest("A split host block resets Peak/RMS at the chunk that overflows");
+        {
+            AnalysisCoordinator coordinator;
+            coordinator.setVisualizationActive(true);
+
+            std::array<float, StereoSampleCapture::framesPerSlot> queued { };
+            queued.fill(0.1F);
+            for (std::size_t index = 0; index + 1 < StereoSampleCapture::slotCount; ++index)
+                coordinator.captureAudioBlock(
+                    queued.data(), queued.data(), queued.size(), 48'000.0);
+
+            std::array<float, StereoSampleCapture::framesPerSlot * 2> splitBlock { };
+            std::fill_n(splitBlock.begin(), StereoSampleCapture::framesPerSlot, 1.1F);
+            std::fill(splitBlock.begin()
+                    + static_cast<std::ptrdiff_t>(StereoSampleCapture::framesPerSlot),
+                splitBlock.end(), 0.1F);
+            coordinator.captureAudioBlock(
+                splitBlock.data(), splitBlock.data(), splitBlock.size(), 48'000.0);
+
+            VisualizationFrame frame;
+            expect(waitForFrame(
+                coordinator, frame, [](const auto& candidate) { return candidate.meterValid; }));
+            expect(!frame.over[0] && !frame.over[1]);
+            expectWithinAbsoluteError(frame.heldPeakDecibels[0], -20.0F, 0.01F);
+            expect(coordinator.telemetry().capture.reclaimedReadyChunks > 0);
         }
 
 #if defined(JUCE_UNIT_TESTS) && JUCE_UNIT_TESTS

@@ -38,6 +38,7 @@ struct AnalysisTelemetry {
     std::uint64_t lastAnalyzedCaptureRevision = 0;
     std::uint64_t emptyAnalysisRequestsAvoided = 0;
     std::uint64_t staleFramesPublished = 0;
+    std::uint64_t peakRmsUserResets = 0;
 };
 
 /**
@@ -58,11 +59,21 @@ public:
     AnalysisCoordinator& operator=(const AnalysisCoordinator&) = delete;
 
     /** Audio-thread entry point. Null channels are treated as silence. */
-    void captureAudioBlock(
-        const float* left, const float* right, std::size_t frameCount, double sampleRate) noexcept;
+    void captureAudioBlock(const float* left, const float* right, std::size_t frameCount,
+        double sampleRate, std::uint32_t channelCount = 2) noexcept;
+
+    /**
+        Records a host format at a non-real-time boundary.
+
+        The caller must ensure that audio callbacks are quiescent, as JUCE does
+        around prepareToPlay(). A changed active format starts a fresh capture
+        generation so snapshots never combine analyzers from different formats.
+    */
+    void setCaptureFormat(double sampleRate, std::uint32_t channelCount) noexcept;
 
     void requestAnalysis() noexcept override;
     void setVisualizationActive(bool shouldBeActive) noexcept override;
+    void resetPeakRms() noexcept override;
     [[nodiscard]] bool copyLatestVisualizationFrame(
         VisualizationFrame& destination) const noexcept override;
 
@@ -81,6 +92,8 @@ public:
 private:
     struct State;
 
+    [[nodiscard]] bool restartActiveGenerationLocked(bool discardPendingCapture);
+
     static_assert(std::atomic<std::uint64_t>::is_always_lock_free);
     static_assert(std::atomic<std::int64_t>::is_always_lock_free);
 
@@ -97,6 +110,9 @@ private:
     std::uint64_t lastRequestedCaptureRevision_ = 0;
     std::uint64_t lastObservedCaptureRevision_ = 0;
     std::int64_t lastObservedCaptureNanoseconds_ = 0;
+    double configuredSampleRate_ = 0.0;
+    std::uint32_t configuredChannelCount_ = 0;
+    bool hasConfiguredFormat_ = false;
     bool staleClearRequested_ = false;
 
     // Serialises renderer requests against non-real-time lifecycle changes so

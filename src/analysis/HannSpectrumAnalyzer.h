@@ -16,9 +16,9 @@ namespace audio_insight {
     Streaming 4096-point Hann-window spectrum analysis.
 
     Input chunks may have any size. The analyzer keeps overlap state and emits at
-    approximately targetUpdatesPerSecond. It performs one transform per channel
-    and publishes the larger channel magnitude for each bin, avoiding phase
-    cancellation in a single-spectrum stereo display.
+    approximately targetUpdatesPerSecond. Mono is transformed once. Stereo is
+    transformed once per channel and publishes the larger channel magnitude for
+    each bin, avoiding phase cancellation in the shared display.
 
     A generation change, chunk-sequence gap, captured-frame gap, or sample-rate
     change invalidates the current spectrum and clears all overlap state before
@@ -75,7 +75,7 @@ private:
     void resetTemporalState(ResetReason reason, VisualizationFrame* destination) noexcept;
     void configureSampleRate(double sampleRate) noexcept;
     void runTransform(std::uint64_t generation, std::uint64_t capturedFrameEnd,
-        VisualizationFrame& destination) noexcept;
+        std::uint32_t channelCount, VisualizationFrame& destination) noexcept;
     void prepareChannelTransform(const std::array<float, fftSize>& ring,
         std::array<float, transformWorkspaceSize>& workspace) noexcept;
     [[nodiscard]] static float magnitudeToDecibels(float magnitude) noexcept;
@@ -100,6 +100,7 @@ private:
     std::uint64_t previousGeneration_ = 0;
     std::uint64_t previousChunkSequence_ = 0;
     std::uint64_t previousCapturedFrameEnd_ = 0;
+    std::uint32_t previousChannelCount_ = 0;
     std::uint64_t nextSpectrumSequence_ = 1;
     Statistics statistics_ { };
 };

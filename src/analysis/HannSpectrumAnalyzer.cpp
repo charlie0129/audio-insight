@@ -39,8 +39,10 @@ bool HannSpectrumAnalyzer::process(
 {
     ++statistics_.inputChunks;
 
-    if (chunk.frameCount == 0 || chunk.left == nullptr || chunk.right == nullptr
-        || !std::isfinite(chunk.sampleRate) || chunk.sampleRate <= 0.0) {
+    const auto hasSupportedChannels = chunk.channelCount == 1 || chunk.channelCount == 2;
+    if (chunk.frameCount == 0 || chunk.left == nullptr || !hasSupportedChannels
+        || (chunk.channelCount == 2 && chunk.right == nullptr) || !std::isfinite(chunk.sampleRate)
+        || chunk.sampleRate <= 0.0) {
         return false;
     }
 
@@ -50,6 +52,7 @@ bool HannSpectrumAnalyzer::process(
         previousGeneration_ = 0;
         previousChunkSequence_ = 0;
         previousCapturedFrameEnd_ = 0;
+        previousChannelCount_ = 0;
         return false;
     }
 
@@ -70,7 +73,8 @@ bool HannSpectrumAnalyzer::process(
             if (!hasValidFrameRange || capturedFrameStart != previousCapturedFrameEnd_) {
                 resetReason = ResetReason::capturedFrameGap;
                 needsReset = true;
-            } else if (sampleRatesDiffer(sampleRate_, chunk.sampleRate)) {
+            } else if (sampleRatesDiffer(sampleRate_, chunk.sampleRate)
+                || chunk.channelCount != previousChannelCount_) {
                 resetReason = ResetReason::sampleRateChange;
                 needsReset = true;
             }
@@ -88,7 +92,9 @@ bool HannSpectrumAnalyzer::process(
 
     for (std::size_t frame = 0; frame < chunk.frameCount; ++frame) {
         leftRing_[writeIndex_] = std::isfinite(chunk.left[frame]) ? chunk.left[frame] : 0.0F;
-        rightRing_[writeIndex_] = std::isfinite(chunk.right[frame]) ? chunk.right[frame] : 0.0F;
+        rightRing_[writeIndex_] = chunk.channelCount == 2 && std::isfinite(chunk.right[frame])
+            ? chunk.right[frame]
+            : 0.0F;
         writeIndex_ = (writeIndex_ + 1) % fftSize;
         validSampleCount_ = std::min(validSampleCount_ + 1, fftSize);
         ++samplesSinceTransform_;
@@ -96,7 +102,8 @@ bool HannSpectrumAnalyzer::process(
         const bool firstWindowReady = !hasProducedSinceReset_ && validSampleCount_ == fftSize;
         const bool nextHopReady = hasProducedSinceReset_ && samplesSinceTransform_ >= hopSize_;
         if (firstWindowReady || nextHopReady) {
-            runTransform(chunk.generation, chunkFrameStart + frame + 1, destination);
+            runTransform(
+                chunk.generation, chunkFrameStart + frame + 1, chunk.channelCount, destination);
             produced = true;
         }
     }
@@ -105,6 +112,7 @@ bool HannSpectrumAnalyzer::process(
     previousGeneration_ = chunk.generation;
     previousChunkSequence_ = chunk.sequence;
     previousCapturedFrameEnd_ = chunk.capturedFrameEnd;
+    previousChannelCount_ = chunk.channelCount;
     return produced;
 }
 
@@ -115,6 +123,7 @@ void HannSpectrumAnalyzer::reset(VisualizationFrame* const destinationToInvalida
     previousGeneration_ = 0;
     previousChunkSequence_ = 0;
     previousCapturedFrameEnd_ = 0;
+    previousChannelCount_ = 0;
 }
 
 void HannSpectrumAnalyzer::resetTemporalState(
@@ -145,23 +154,30 @@ void HannSpectrumAnalyzer::configureSampleRate(const double sampleRate) noexcept
 }
 
 void HannSpectrumAnalyzer::runTransform(const std::uint64_t generation,
-    const std::uint64_t capturedFrameEnd, VisualizationFrame& destination) noexcept
+    const std::uint64_t capturedFrameEnd, const std::uint32_t channelCount,
+    VisualizationFrame& destination) noexcept
 {
     prepareChannelTransform(leftRing_, leftWorkspace_);
-    prepareChannelTransform(rightRing_, rightWorkspace_);
-
     fft_.performFrequencyOnlyForwardTransform(leftWorkspace_.data(), true);
-    fft_.performFrequencyOnlyForwardTransform(rightWorkspace_.data(), true);
+
+    if (channelCount == 2) {
+        prepareChannelTransform(rightRing_, rightWorkspace_);
+        fft_.performFrequencyOnlyForwardTransform(rightWorkspace_.data(), true);
+    }
 
     for (std::size_t bin = 0; bin < spectrumBinCount; ++bin) {
         const auto scale = (bin == 0 || bin == fftSize / 2) ? edgeBinScale_ : interiorBinScale_;
-        const auto magnitude = std::max(leftWorkspace_[bin], rightWorkspace_[bin]) * scale;
+        const auto magnitude
+            = (channelCount == 2 ? std::max(leftWorkspace_[bin], rightWorkspace_[bin])
+                                 : leftWorkspace_[bin])
+            * scale;
         destination.spectrumDecibels[bin] = magnitudeToDecibels(magnitude);
     }
 
     destination.generation = generation;
     destination.spectrumSequence = nextSpectrumSequence_++;
     destination.capturedFrameEnd = capturedFrameEnd;
+    destination.channelCount = channelCount;
     destination.sampleRate = sampleRate_;
     destination.spectrumValid = true;
 

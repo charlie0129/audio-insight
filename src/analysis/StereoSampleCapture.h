@@ -19,6 +19,7 @@ struct CapturedStereoChunkView {
     std::uint64_t capturedFrameEnd = 0;
     double sampleRate = 0.0;
     bool followsDiscontinuity = false;
+    std::uint32_t channelCount = 2;
 };
 
 /**
@@ -107,7 +108,8 @@ public:
         not by host transport state.
     */
     [[nodiscard]] PublishResult publishBlock(const float* left, const float* right,
-        std::size_t frameCount, double sampleRate, std::uint64_t generation) noexcept;
+        std::size_t frameCount, double sampleRate, std::uint64_t generation,
+        std::uint32_t channelCount = 2) noexcept;
 
     /** Acquires the oldest currently ready chunk without waiting. */
     [[nodiscard]] bool tryAcquireOldest(ReadHandle& destination) noexcept;
@@ -140,11 +142,13 @@ private:
         std::uint64_t sequence = 0;
         std::uint64_t capturedFrameEnd = 0;
         double sampleRate = 0.0;
+        std::uint32_t channelCount = 2;
     };
 
     [[nodiscard]] Slot* claimSlot(bool& reclaimedReady, std::size_t& slotIndex) noexcept;
     void publishChunk(const float* left, const float* right, std::size_t frameCount,
-        double sampleRate, std::uint64_t generation, PublishResult& result) noexcept;
+        double sampleRate, std::uint64_t generation, std::uint32_t channelCount,
+        PublishResult& result) noexcept;
     void releaseReadSlot(std::size_t slotIndex) noexcept;
     void updateReadyHighWaterMark() noexcept;
 
@@ -159,6 +163,7 @@ private:
     bool consumerHasPreviousSequence_ = false;
     std::uint64_t consumerPreviousGeneration_ = 0;
     std::uint64_t consumerPreviousSequence_ = 0;
+    std::uint32_t consumerPreviousChannelCount_ = 0;
 
     std::atomic<std::uint64_t> attemptedChunks_ { 0 };
     std::atomic<std::uint64_t> publishedChunks_ { 0 };

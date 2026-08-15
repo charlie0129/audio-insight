@@ -52,7 +52,7 @@ StereoSampleCapture::StereoSampleCapture() noexcept = default;
 
 StereoSampleCapture::PublishResult StereoSampleCapture::publishBlock(const float* const left,
     const float* const right, const std::size_t frameCount, const double sampleRate,
-    const std::uint64_t generation) noexcept
+    const std::uint64_t generation, const std::uint32_t channelCount) noexcept
 {
     PublishResult result;
     std::size_t offset = 0;
@@ -61,7 +61,7 @@ StereoSampleCapture::PublishResult StereoSampleCapture::publishBlock(const float
         const auto chunkFrames = std::min(framesPerSlot, frameCount - offset);
         publishChunk(left != nullptr ? left + offset : nullptr,
             right != nullptr ? right + offset : nullptr, chunkFrames, sampleRate, generation,
-            result);
+            channelCount, result);
         offset += chunkFrames;
     }
 
@@ -116,7 +116,7 @@ StereoSampleCapture::Slot* StereoSampleCapture::claimSlot(
 
 void StereoSampleCapture::publishChunk(const float* const left, const float* const right,
     const std::size_t frameCount, const double sampleRate, const std::uint64_t generation,
-    PublishResult& result) noexcept
+    const std::uint32_t channelCount, PublishResult& result) noexcept
 {
     const auto sequence = nextSequence_++;
     capturedFrameCursor_ += frameCount;
@@ -156,6 +156,7 @@ void StereoSampleCapture::publishChunk(const float* const left, const float* con
     slot->sequence = sequence;
     slot->capturedFrameEnd = capturedFrameCursor_;
     slot->sampleRate = sampleRate;
+    slot->channelCount = channelCount;
     slot->publishedSequence.store(sequence, std::memory_order_relaxed);
     slot->state.store(SlotState::ready, std::memory_order_release);
 
@@ -194,8 +195,10 @@ bool StereoSampleCapture::tryAcquireOldest(ReadHandle& destination) noexcept
         }
 
         bool followsDiscontinuity = false;
-        if (consumerHasPreviousSequence_ && slot.generation == consumerPreviousGeneration_)
-            followsDiscontinuity = slot.sequence != consumerPreviousSequence_ + 1;
+        if (consumerHasPreviousSequence_ && slot.generation == consumerPreviousGeneration_) {
+            followsDiscontinuity = slot.sequence != consumerPreviousSequence_ + 1
+                || slot.channelCount != consumerPreviousChannelCount_;
+        }
 
         if (followsDiscontinuity)
             consumerDiscontinuities_.fetch_add(1, std::memory_order_relaxed);
@@ -203,10 +206,11 @@ bool StereoSampleCapture::tryAcquireOldest(ReadHandle& destination) noexcept
         consumerHasPreviousSequence_ = true;
         consumerPreviousGeneration_ = slot.generation;
         consumerPreviousSequence_ = slot.sequence;
+        consumerPreviousChannelCount_ = slot.channelCount;
 
         destination = ReadHandle(*this, oldestIndex,
             { slot.left.data(), slot.right.data(), slot.frameCount, slot.generation, slot.sequence,
-                slot.capturedFrameEnd, slot.sampleRate, followsDiscontinuity });
+                slot.capturedFrameEnd, slot.sampleRate, followsDiscontinuity, slot.channelCount });
         return true;
     }
 
@@ -245,6 +249,7 @@ void StereoSampleCapture::discardPending() noexcept
     consumerHasPreviousSequence_ = false;
     consumerPreviousGeneration_ = 0;
     consumerPreviousSequence_ = 0;
+    consumerPreviousChannelCount_ = 0;
 }
 
 void StereoSampleCapture::releaseReadSlot(const std::size_t slotIndex) noexcept

@@ -192,6 +192,8 @@ target_sources(AudioInsight
         src/analysis/AnalysisCoordinator.h
         src/analysis/HannSpectrumAnalyzer.cpp
         src/analysis/HannSpectrumAnalyzer.h
+        src/analysis/PeakRmsBallistics.cpp
+        src/analysis/PeakRmsBallistics.h
         src/analysis/SharedAnalysisScheduler.cpp
         src/analysis/SharedAnalysisScheduler.h
         src/analysis/StereoMeterAccumulator.cpp
@@ -259,6 +261,8 @@ source_group(TREE "${CMAKE_CURRENT_SOURCE_DIR}" FILES
     src/analysis/AnalysisCoordinator.h
     src/analysis/HannSpectrumAnalyzer.cpp
     src/analysis/HannSpectrumAnalyzer.h
+    src/analysis/PeakRmsBallistics.cpp
+    src/analysis/PeakRmsBallistics.h
     src/analysis/SharedAnalysisScheduler.cpp
     src/analysis/SharedAnalysisScheduler.h
     src/analysis/StereoMeterAccumulator.cpp
@@ -309,6 +313,8 @@ if(BUILD_TESTING)
             src/analysis/AnalysisCoordinator.h
             src/analysis/HannSpectrumAnalyzer.cpp
             src/analysis/HannSpectrumAnalyzer.h
+            src/analysis/PeakRmsBallistics.cpp
+            src/analysis/PeakRmsBallistics.h
             src/analysis/SharedAnalysisScheduler.cpp
             src/analysis/SharedAnalysisScheduler.h
             src/analysis/StereoMeterAccumulator.cpp
@@ -354,6 +360,7 @@ if(BUILD_TESTING)
             tests/EditorUtilityStateTests.cpp
             tests/FrameLatencyHistoryTests.cpp
             tests/MetalVisualizationTests.cpp
+            tests/PeakRmsBallisticsTests.cpp
             tests/PerformanceMetricsModelTests.cpp
             tests/PerformanceMetricsPanelTests.cpp
             tests/PluginProcessorTests.cpp
@@ -404,6 +411,8 @@ if(BUILD_TESTING)
         src/analysis/AnalysisCoordinator.h
         src/analysis/HannSpectrumAnalyzer.cpp
         src/analysis/HannSpectrumAnalyzer.h
+        src/analysis/PeakRmsBallistics.cpp
+        src/analysis/PeakRmsBallistics.h
         src/analysis/SharedAnalysisScheduler.cpp
         src/analysis/SharedAnalysisScheduler.h
         src/analysis/StereoMeterAccumulator.cpp
@@ -449,6 +458,7 @@ if(BUILD_TESTING)
         tests/EditorUtilityStateTests.cpp
         tests/FrameLatencyHistoryTests.cpp
         tests/MetalVisualizationTests.cpp
+        tests/PeakRmsBallisticsTests.cpp
         tests/PerformanceMetricsModelTests.cpp
         tests/PerformanceMetricsPanelTests.cpp
         tests/PluginProcessorTests.cpp

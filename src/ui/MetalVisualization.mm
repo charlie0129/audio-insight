@@ -41,6 +41,7 @@ class MetalRenderBackend;
 - (void)setDisplayLinkPaused:(BOOL)shouldBePaused;
 - (void)setDisplayLinkMaximumFramesPerSecond:(NSInteger)maximumFramesPerSecond;
 - (BOOL)hasDisplayLink;
+- (BOOL)performPeakRmsClearAccessibilityAction;
 
 @end
 
@@ -311,6 +312,193 @@ SpectrumDecibelTicks makeSpectrumDecibelTicks(
     return result;
 }
 
+float mapPeakRmsDecibelsToUnit(const float decibels) noexcept
+{
+    const auto value = std::isfinite(decibels) ? decibels : peakRmsMinimumDecibels;
+    return (std::clamp(value, peakRmsMinimumDecibels, peakRmsMaximumDecibels)
+               - peakRmsMinimumDecibels)
+        / (peakRmsMaximumDecibels - peakRmsMinimumDecibels);
+}
+
+PeakRmsReadout classifyPeakRmsReadout(const float decibels) noexcept
+{
+    PeakRmsReadout result;
+
+    if (!std::isfinite(decibels) || decibels <= minimumDisplayDecibels)
+        return result;
+
+    result.kind = PeakRmsReadout::Kind::decibelTenths;
+    const auto bounded = std::clamp(
+        decibels, -119.9F, static_cast<float>(maximumFiniteFloatPeakRmsReadoutTenths) * 0.1F);
+    result.decibelTenths = std::clamp(static_cast<int>(std::lround(bounded * 10.0F)), -1'199,
+        maximumFiniteFloatPeakRmsReadoutTenths);
+
+    if (decibels >= 0.0F)
+        result.levelRange = PeakRmsLevelRange::red;
+    else if (decibels >= -6.0F)
+        result.levelRange = PeakRmsLevelRange::amber;
+
+    return result;
+}
+
+float fitPeakRmsTextScale(
+    const float availableWidth, const float unscaledTextWidth, const float preferredScale) noexcept
+{
+    if (!std::isfinite(availableWidth) || !std::isfinite(unscaledTextWidth)
+        || !std::isfinite(preferredScale) || availableWidth <= 0.0F || unscaledTextWidth <= 0.0F
+        || preferredScale <= 0.0F) {
+        return 0.0F;
+    }
+
+    return std::min(preferredScale, availableWidth / unscaledTextWidth);
+}
+
+PeakRmsTickLabelSelection selectPeakRmsTickLabels(
+    const float axisLength, const float labelHeight, const float minimumGap) noexcept
+{
+    PeakRmsTickLabelSelection result;
+
+    if (!std::isfinite(axisLength) || axisLength <= 0.0F || !std::isfinite(labelHeight)
+        || labelHeight <= 0.0F || labelHeight > axisLength) {
+        return result;
+    }
+
+    const auto gap = std::max(0.0F, std::isfinite(minimumGap) ? minimumGap : 0.0F);
+    std::array<float, peakRmsMajorDecibelTicks.size()> starts { };
+    std::array<float, peakRmsMajorDecibelTicks.size()> ends { };
+    constexpr std::array<std::size_t, peakRmsMajorDecibelTicks.size()> priority {
+        0,
+        7,
+        6,
+        5,
+        4,
+        3,
+        2,
+        1,
+    };
+
+    for (const auto candidate : priority) {
+        const auto centre
+            = mapPeakRmsDecibelsToUnit(static_cast<float>(peakRmsMajorDecibelTicks[candidate]))
+            * axisLength;
+        const auto start
+            = std::clamp(centre - (labelHeight * 0.5F), 0.0F, axisLength - labelHeight);
+        const auto end = start + labelHeight;
+        auto overlaps = false;
+
+        for (std::size_t index = 0; index < result.visible.size(); ++index) {
+            if (!result.visible[index])
+                continue;
+
+            if (start < ends[index] + gap && end + gap > starts[index]) {
+                overlaps = true;
+                break;
+            }
+        }
+
+        if (!overlaps) {
+            result.visible[candidate] = true;
+            starts[candidate] = start;
+            ends[candidate] = end;
+        }
+    }
+
+    return result;
+}
+
+PeakRmsPanelLayout calculatePeakRmsPanelLayout(const float panelWidth, const float panelHeight,
+    const float requestedHeaderHeight, const std::uint32_t requestedChannelCount,
+    const float requestedTextHeight, const float requestedMaximumTickLabelWidth,
+    const float requestedMaximumReadoutWidth) noexcept
+{
+    PeakRmsPanelLayout result;
+
+    if (!std::isfinite(panelWidth) || !std::isfinite(panelHeight) || panelWidth <= 0.0F
+        || panelHeight <= 0.0F) {
+        return result;
+    }
+
+    const auto headerHeight = std::clamp(
+        std::isfinite(requestedHeaderHeight) ? requestedHeaderHeight : 0.0F, 0.0F, panelHeight);
+    const auto textHeight
+        = std::clamp(std::isfinite(requestedTextHeight) ? requestedTextHeight : 10.0F, 6.0F, 24.0F);
+    const auto maximumTickLabelWidth = std::max(0.0F,
+        std::isfinite(requestedMaximumTickLabelWidth) ? requestedMaximumTickLabelWidth : 0.0F);
+    const auto maximumReadoutWidth = std::max(
+        0.0F, std::isfinite(requestedMaximumReadoutWidth) ? requestedMaximumReadoutWidth : 0.0F);
+    result.channelCount
+        = requestedChannelCount == 1 || requestedChannelCount == 2 ? requestedChannelCount : 0;
+
+    if (panelWidth >= 68.0F && headerHeight >= 14.0F) {
+        constexpr auto visualWidth = 45.0F;
+        const auto visualBottom = panelHeight - headerHeight + 3.0F;
+        result.clearVisualBounds = { std::max(4.0F, panelWidth - visualWidth - 5.0F), visualBottom,
+            panelWidth - 5.0F, panelHeight - 3.0F };
+        const auto hitHeight = std::min(panelHeight, std::max(24.0F, headerHeight));
+        result.clearHitBounds = {
+            std::max(0.0F, result.clearVisualBounds.left - 7.0F),
+            panelHeight - hitHeight,
+            panelWidth,
+            panelHeight,
+        };
+    }
+
+    constexpr auto contentInset = 6.0F;
+    const auto contentLeft = std::min(contentInset, panelWidth * 0.5F);
+    const auto contentRight = std::max(contentLeft, panelWidth - contentInset);
+    const auto contentBottom = std::min(contentInset, panelHeight);
+    const auto contentTop = std::max(contentBottom, panelHeight - headerHeight - contentInset);
+    const auto contentWidth = contentRight - contentLeft;
+    const auto contentHeight = contentTop - contentBottom;
+
+    if (contentWidth <= 0.0F || contentHeight <= 0.0F)
+        return result;
+
+    const auto desiredScaleLane = maximumTickLabelWidth + 7.0F;
+    result.showTickLabels = desiredScaleLane > 7.0F && contentWidth >= desiredScaleLane + 28.0F;
+    const auto scaleLane = result.showTickLabels ? desiredScaleLane : 4.0F;
+    const auto availableLeft = std::min(contentRight, contentLeft + scaleLane);
+    const auto availableWidth = std::max(0.0F, contentRight - availableLeft);
+    const auto groupMaximum = result.channelCount == 1 ? 54.0F : 98.0F;
+    const auto groupWidth = std::min(availableWidth, groupMaximum);
+    const auto groupLeft = availableLeft + ((availableWidth - groupWidth) * 0.5F);
+    const auto groupRight = groupLeft + groupWidth;
+    const auto layoutChannelCount = std::max<std::size_t>(1, result.channelCount);
+    const auto columnWidth = groupWidth / static_cast<float>(layoutChannelCount);
+
+    result.channelLabelBottom = contentBottom;
+    result.overBottom = std::max(contentBottom, contentTop - textHeight);
+    const auto scaleBottom = contentBottom + textHeight + 3.0F;
+    const auto scaleTopWithoutReadout = result.overBottom - 3.0F;
+    const auto scaleTopWithReadout = scaleTopWithoutReadout - textHeight - 2.0F;
+    result.showReadouts = result.channelCount != 0 && columnWidth >= maximumReadoutWidth + 2.0F
+        && scaleTopWithReadout - scaleBottom >= 42.0F;
+    result.scaleBottom = std::min(scaleBottom, contentTop);
+    result.scaleTop = std::max(
+        result.scaleBottom, result.showReadouts ? scaleTopWithReadout : scaleTopWithoutReadout);
+    result.readoutBottom = result.scaleTop + 2.0F;
+    result.tickLabelRight = groupLeft - 5.0F;
+    result.tickLineLeft = std::max(contentLeft, groupLeft - 4.0F);
+    result.tickLineRight = groupRight;
+
+    if (result.channelCount == 0 || groupWidth <= 0.0F || result.scaleTop <= result.scaleBottom)
+        return result;
+
+    for (std::size_t channel = 0; channel < result.channelCount; ++channel) {
+        const auto columnLeft = groupLeft + (static_cast<float>(channel) * columnWidth);
+        const auto columnRight = columnLeft + columnWidth;
+        result.channelColumns[channel]
+            = { columnLeft, result.scaleBottom, columnRight, result.scaleTop };
+        const auto trackWidth = std::min(
+            columnWidth, std::clamp(columnWidth * 0.56F, std::min(10.0F, columnWidth), 32.0F));
+        const auto trackLeft = columnLeft + ((columnWidth - trackWidth) * 0.5F);
+        result.channelTracks[channel]
+            = { trackLeft, result.scaleBottom, trackLeft + trackWidth, result.scaleTop };
+    }
+
+    return result;
+}
+
 namespace {
 using Clock = std::chrono::steady_clock;
 
@@ -319,21 +507,36 @@ constexpr std::size_t maximumVertexCount = MetalVisualizationGeometryLimits::ver
 constexpr std::size_t printableAsciiFirst = 32;
 constexpr std::size_t printableAsciiLast = 126;
 constexpr std::size_t printableAsciiCount = printableAsciiLast - printableAsciiFirst + 1;
+constexpr std::size_t infinityGlyphAtlasIndex = printableAsciiCount;
+constexpr std::size_t glyphAtlasGlyphCount = printableAsciiCount + 1;
 constexpr std::size_t glyphAtlasColumns = 16;
 constexpr std::size_t glyphAtlasRows
-    = (printableAsciiCount + glyphAtlasColumns - 1) / glyphAtlasColumns;
+    = (glyphAtlasGlyphCount + glyphAtlasColumns - 1) / glyphAtlasColumns;
 constexpr std::size_t maximumCachedTextGlyphs = 24;
-constexpr std::size_t cachedFixedTextRunCount = 6;
+constexpr std::size_t cachedFixedTextRunCount = 11;
 
 constexpr std::array<std::string_view, cachedFixedTextRunCount> cachedFixedTextStrings { "Spectrum",
-    "Peak / RMS", "Spectrogram", "Stereo / Correlation", "Loudness", "Not yet implemented" };
+    "Peak / RMS", "Spectrogram", "Stereo / Correlation", "Loudness", "Not yet implemented", "CLEAR",
+    "L", "R", "M", "OVER" };
 
 constexpr std::array<std::string_view, frequencyAxisTickCandidateCount>
     cachedFrequencyAxisTextStrings { "20 Hz", "50 Hz", "100 Hz", "200 Hz", "500 Hz", "1 kHz",
         "2 kHz", "5 kHz", "10 kHz", "20 kHz" };
 
+constexpr std::array<std::string_view, peakRmsMajorDecibelTicks.size()>
+    cachedPeakRmsTickTextStrings { "-60", "-48", "-36", "-24", "-12", "-6", "0", "+3" };
+
 constexpr std::array<std::size_t, dashboardPanelCount> panelTitleTextRunIndices { 0, 1, 2, 3, 4 };
 constexpr std::size_t placeholderTextRunIndex = 5;
+constexpr std::size_t clearTextRunIndex = 6;
+constexpr std::size_t leftChannelTextRunIndex = 7;
+constexpr std::size_t rightChannelTextRunIndex = 8;
+constexpr std::size_t monoChannelTextRunIndex = 9;
+constexpr std::size_t overTextRunIndex = 10;
+constexpr int minimumPeakRmsReadoutTenths = -1'199;
+constexpr int maximumPeakRmsReadoutTenths = maximumFiniteFloatPeakRmsReadoutTenths;
+constexpr std::size_t cachedPeakRmsReadoutCount
+    = static_cast<std::size_t>(maximumPeakRmsReadoutTenths - minimumPeakRmsReadoutTenths + 1);
 
 // The fixed capacity covers five filled/bordered/header-divided tiles, both
 // numeric frequency axes, every possible decibel tick, the maximum FFT trace,
@@ -349,7 +552,19 @@ constexpr std::size_t fixedTextGlyphCount = [] {
     return glyphCount
         + (placeholderPanelCount * cachedFixedTextStrings[placeholderTextRunIndex].size());
 }();
+constexpr std::size_t peakRmsTextGlyphCount = [] {
+    std::size_t glyphCount = cachedFixedTextStrings[clearTextRunIndex].size();
+    glyphCount += 2;
+    glyphCount += 2 * cachedFixedTextStrings[overTextRunIndex].size();
+    glyphCount += 2 * maximumPeakRmsReadoutGlyphs;
+
+    for (const auto text : cachedPeakRmsTickTextStrings)
+        glyphCount += text.size();
+
+    return glyphCount;
+}();
 static_assert(fixedTextGlyphCount == MetalVisualizationGeometryLimits::maximumFixedTextGlyphs);
+static_assert(peakRmsTextGlyphCount == MetalVisualizationGeometryLimits::maximumPeakRmsTextGlyphs);
 static_assert(MetalVisualizationGeometryLimits::maximumGeneratedVertices <= maximumVertexCount);
 static_assert([] {
     for (const auto text : cachedFixedTextStrings) {
@@ -362,13 +577,16 @@ static_assert([] {
             return false;
     }
 
+    for (const auto text : cachedPeakRmsTickTextStrings) {
+        if (text.size() > maximumCachedTextGlyphs)
+            return false;
+    }
+
     return true;
 }());
 
 constexpr float minimumSpectrumFrequency = 20.0F;
 constexpr float maximumSpectrumFrequency = 20'000.0F;
-constexpr float minimumMeterDecibels = -60.0F;
-constexpr float maximumMeterDecibels = 3.0F;
 constexpr float minimumAllowedSpectrumFloor = -180.0F;
 constexpr float maximumAllowedSpectrumFloor = -36.0F;
 constexpr float minimumAllowedSpectrumCeiling = -24.0F;
@@ -413,6 +631,14 @@ struct CachedMonospacedTextRun {
     std::uint8_t glyphCount = 0;
 };
 
+std::uint8_t atlasIndexForAscii(const char character) noexcept
+{
+    const auto value = static_cast<unsigned char>(character);
+    return static_cast<std::uint8_t>(value >= printableAsciiFirst && value <= printableAsciiLast
+            ? value - printableAsciiFirst
+            : static_cast<unsigned char>('?' - printableAsciiFirst));
+}
+
 const std::array<CachedMonospacedTextRun, 20'001>& cachedFrequencyEndpointTextRuns() noexcept
 {
     // This density-independent table is built once during the first glyph-atlas
@@ -428,19 +654,74 @@ const std::array<CachedMonospacedTextRun, 20'001>& cachedFrequencyEndpointTextRu
             auto& run = result[frequency];
             run.glyphCount = static_cast<std::uint8_t>(labelLength);
 
-            for (std::size_t index = 0; index < labelLength; ++index) {
-                const auto character = static_cast<unsigned char>(label[index]);
-                run.atlasIndices[index] = static_cast<std::uint8_t>(
-                    character >= printableAsciiFirst && character <= printableAsciiLast
-                        ? character - printableAsciiFirst
-                        : static_cast<unsigned char>('?' - printableAsciiFirst));
-            }
+            for (std::size_t index = 0; index < labelLength; ++index)
+                run.atlasIndices[index] = atlasIndexForAscii(label[index]);
         }
 
         return result;
     }();
 
     return runs;
+}
+
+const std::array<CachedMonospacedTextRun, cachedPeakRmsReadoutCount>&
+cachedPeakRmsReadoutTextRuns() noexcept
+{
+    // Every finite one-decimal readout is prepared before rendering begins.
+    // The display callback only classifies, rounds, and indexes this table.
+    static const auto runs = [] {
+        std::array<CachedMonospacedTextRun, cachedPeakRmsReadoutCount> result { };
+
+        for (std::size_t index = 0; index < result.size(); ++index) {
+            const auto tenths = minimumPeakRmsReadoutTenths + static_cast<int>(index);
+            const auto absoluteTenths = std::abs(tenths);
+            std::array<char, maximumPeakRmsReadoutGlyphs> text { };
+            auto* cursor = text.data();
+            auto* const end = text.data() + text.size();
+
+            if (tenths < 0)
+                *cursor++ = '-';
+            else if (tenths > 0)
+                *cursor++ = '+';
+
+            const auto conversion = std::to_chars(cursor, end, absoluteTenths / 10);
+            jassert(conversion.ec == std::errc { });
+
+            if (conversion.ec != std::errc { })
+                continue;
+
+            cursor = conversion.ptr;
+            jassert(end - cursor >= 2);
+
+            if (end - cursor < 2)
+                continue;
+
+            *cursor++ = '.';
+            *cursor++ = static_cast<char>('0' + (absoluteTenths % 10));
+            auto& run = result[index];
+            run.glyphCount = static_cast<std::uint8_t>(cursor - text.data());
+
+            for (std::size_t glyph = 0; glyph < run.glyphCount; ++glyph)
+                run.atlasIndices[glyph] = atlasIndexForAscii(text[glyph]);
+        }
+
+        return result;
+    }();
+
+    return runs;
+}
+
+const CachedMonospacedTextRun& cachedMinusInfinityTextRun() noexcept
+{
+    static const auto run = [] {
+        CachedMonospacedTextRun result;
+        result.glyphCount = 2;
+        result.atlasIndices[0] = atlasIndexForAscii('-');
+        result.atlasIndices[1] = static_cast<std::uint8_t>(infinityGlyphAtlasIndex);
+        return result;
+    }();
+
+    return run;
 }
 
 static_assert(std::atomic<std::uint64_t>::is_always_lock_free);
@@ -713,16 +994,6 @@ RenderRect toRenderRect(const DashboardLogicalBounds& bounds, const float logica
 {
     return { static_cast<float>(bounds.x), logicalHeight - static_cast<float>(bounds.bottom()),
         static_cast<float>(bounds.right()), logicalHeight - static_cast<float>(bounds.y) };
-}
-
-RenderRect insetRenderRect(
-    const RenderRect& bounds, const float horizontal, const float bottom, const float top) noexcept
-{
-    const auto insetX = std::min(horizontal, bounds.width() * 0.5F);
-    const auto insetBottom = std::min(bottom, bounds.height());
-    const auto insetTop = std::min(top, std::max(0.0F, bounds.height() - insetBottom));
-    return { bounds.left + insetX, bounds.bottom + insetBottom, bounds.right - insetX,
-        bounds.top - insetTop };
 }
 
 RenderRect insetRenderRect(const RenderRect& bounds, const float left, const float bottom,
@@ -1224,6 +1495,47 @@ public:
         refreshEffectiveActivity();
     }
 
+    bool tryClearPeakRmsAt(const NSPoint point) noexcept
+    {
+        assertMessageThread();
+
+        if (view == nil || !std::isfinite(point.x) || !std::isfinite(point.y))
+            return false;
+
+        const auto boundsSize = view.bounds.size;
+        const auto dashboardLayout = DashboardLayout::calculateTileLayout(
+            { 0.0, 0.0, static_cast<double>(boundsSize.width),
+                static_cast<double>(boundsSize.height) },
+            getDashboardLayoutSplits());
+        const auto panel = toRenderRect(
+            dashboardLayout[DashboardPanel::peakRms], static_cast<float>(boundsSize.height));
+        const auto panelHeaderHeight
+            = std::min(panel.height(), std::clamp(panel.height() * 0.13F, 18.0F, 26.0F));
+        constexpr auto meterTextScale = 0.78F;
+        const auto readoutWidth
+            = (((static_cast<float>(maximumPeakRmsReadoutGlyphs) - 1.0F) * cachedGlyphAdvance)
+                  + cachedGlyphCellWidth)
+            * meterTextScale;
+        const auto layout = calculatePeakRmsPanelLayout(panel.width(), panel.height(),
+            panelHeaderHeight, targetFrame.channelCount, cachedGlyphCellHeight * meterTextScale,
+            maximumCachedPeakRmsTickTextWidth * meterTextScale, readoutWidth);
+        const auto localX = static_cast<float>(point.x) - panel.left;
+        const auto localY = static_cast<float>(point.y) - panel.bottom;
+
+        if (!layout.clearHitBounds.contains(localX, localY))
+            return false;
+
+        source.resetPeakRms();
+        return true;
+    }
+
+    bool performPeakRmsClearAction() noexcept
+    {
+        assertMessageThread();
+        source.resetPeakRms();
+        return true;
+    }
+
     void displayLinkUpdate(CAMetalDisplayLinkUpdate* update)
     {
         assertMessageThread();
@@ -1529,11 +1841,13 @@ private:
     std::array<CachedTextRun, cachedFixedTextRunCount> cachedFixedTextRuns { };
     std::array<CachedTextRun, frequencyAxisTickCandidateCount> cachedFrequencyAxisTextRuns { };
     std::array<CachedTextRun, cachedDecibelTickCount> cachedDecibelTextRuns { };
-    std::array<GlyphAtlasEntry, printableAsciiCount> cachedGlyphAtlasEntries { };
+    std::array<CachedTextRun, peakRmsMajorDecibelTicks.size()> cachedPeakRmsTickTextRuns { };
+    std::array<GlyphAtlasEntry, glyphAtlasGlyphCount> cachedGlyphAtlasEntries { };
     float cachedGlyphAdvance = 0.0F;
     float cachedGlyphCellWidth = 0.0F;
     float cachedGlyphCellHeight = 0.0F;
     float maximumCachedDecibelTextWidth = 0.0F;
+    float maximumCachedPeakRmsTickTextWidth = 0.0F;
     double glyphAtlasBackingScale = 0.0;
     juce::String initializationError;
     bool metalReady = false;
@@ -1549,10 +1863,8 @@ private:
 
     VisualizationFrame targetFrame;
     std::array<float, spectrumBinCount> displayedSpectrum { };
-    std::array<float, 2> displayedPeak { minimumDisplayDecibels, minimumDisplayDecibels };
-    std::array<float, 2> displayedRms { minimumDisplayDecibels, minimumDisplayDecibels };
     std::uint64_t lastSpectrumSequence = 0;
-    std::uint64_t lastCapturedFrameEnd = 0;
+    std::uint64_t lastMeterSequence = 0;
     std::uint64_t lastGeneration = 0;
     bool hasDisplayFrame = false;
 
@@ -1750,7 +2062,7 @@ private:
             return false;
         }
 
-        std::array<GlyphAtlasEntry, printableAsciiCount> atlasEntries { };
+        std::array<GlyphAtlasEntry, glyphAtlasGlyphCount> atlasEntries { };
         [NSGraphicsContext saveGraphicsState];
         [NSGraphicsContext setCurrentContext:graphicsContext];
         graphicsContext.shouldAntialias = YES;
@@ -1758,7 +2070,7 @@ private:
         [[NSColor blackColor] setFill];
         NSRectFill(NSMakeRect(0.0, 0.0, atlasWidth, atlasHeight));
 
-        for (std::size_t index = 0; index < printableAsciiCount; ++index) {
+        for (std::size_t index = 0; index < glyphAtlasGlyphCount; ++index) {
             const auto column = index % glyphAtlasColumns;
             const auto row = index / glyphAtlasColumns;
             const auto cellLeft
@@ -1767,7 +2079,9 @@ private:
                 = static_cast<CGFloat>(row * static_cast<std::size_t>(cellHeight));
             const auto cellRight = cellLeft + static_cast<CGFloat>(cellWidth);
             const auto cellTop = cellBottom + static_cast<CGFloat>(cellHeight);
-            const unichar characterValue = static_cast<unichar>(index + printableAsciiFirst);
+            const unichar characterValue = index == infinityGlyphAtlasIndex
+                ? static_cast<unichar>(0x221e)
+                : static_cast<unichar>(index + printableAsciiFirst);
             auto* character = [NSString stringWithCharacters:&characterValue length:1];
             [character drawAtPoint:NSMakePoint(cellLeft + static_cast<CGFloat>(paddingPixels),
                                        cellBottom + static_cast<CGFloat>(paddingPixels))
@@ -1867,20 +2181,33 @@ private:
                 = std::max(newMaximumCachedDecibelTextWidth, run.width);
         }
 
+        std::array<CachedTextRun, peakRmsMajorDecibelTicks.size()> newCachedPeakRmsTickTextRuns { };
+        auto newMaximumCachedPeakRmsTickTextWidth = 0.0F;
+        for (std::size_t index = 0; index < newCachedPeakRmsTickTextRuns.size(); ++index) {
+            auto& run = newCachedPeakRmsTickTextRuns[index];
+            run = makeCachedTextRun(cachedPeakRmsTickTextStrings[index]);
+            newMaximumCachedPeakRmsTickTextWidth
+                = std::max(newMaximumCachedPeakRmsTickTextWidth, run.width);
+        }
+
         // Force construction of the immutable, density-independent endpoint
-        // table here. Later display callbacks only index already-formatted runs.
+        // and meter-readout tables here. Later display callbacks only index
+        // already-formatted runs.
         juce::ignoreUnused(cachedFrequencyEndpointTextRuns());
+        juce::ignoreUnused(cachedPeakRmsReadoutTextRuns(), cachedMinusInfinityTextRun());
 
         [glyphAtlasTexture release];
         glyphAtlasTexture = newTexture;
         cachedFixedTextRuns = newCachedFixedTextRuns;
         cachedFrequencyAxisTextRuns = newCachedFrequencyAxisTextRuns;
         cachedDecibelTextRuns = newCachedDecibelTextRuns;
+        cachedPeakRmsTickTextRuns = newCachedPeakRmsTickTextRuns;
         cachedGlyphAtlasEntries = atlasEntries;
         cachedGlyphAdvance = advancePoints;
         cachedGlyphCellWidth = cellWidthPoints;
         cachedGlyphCellHeight = cellHeightPoints;
         maximumCachedDecibelTextWidth = newMaximumCachedDecibelTextWidth;
+        maximumCachedPeakRmsTickTextWidth = newMaximumCachedPeakRmsTickTextWidth;
         glyphAtlasBackingScale = backingScale;
         return true;
     }
@@ -1955,11 +2282,9 @@ private:
     {
         targetFrame = { };
         displayedSpectrum.fill(minimumDisplayDecibels);
-        displayedPeak.fill(minimumDisplayDecibels);
-        displayedRms.fill(minimumDisplayDecibels);
         lastGeneration = 0;
         lastSpectrumSequence = 0;
-        lastCapturedFrameEnd = 0;
+        lastMeterSequence = 0;
         hasDisplayFrame = false;
         previousSmoothingTime = { };
         resetTelemetryTimingAtCallbackBoundary();
@@ -2149,7 +2474,7 @@ private:
         const auto generationChanged = incoming.generation != lastGeneration;
         const auto isNew = !hasDisplayFrame || generationChanged
             || incoming.spectrumSequence != lastSpectrumSequence
-            || incoming.capturedFrameEnd != lastCapturedFrameEnd;
+            || incoming.meterSequence != lastMeterSequence;
 
         if (!isNew)
             return;
@@ -2157,7 +2482,7 @@ private:
         targetFrame = incoming;
         lastGeneration = incoming.generation;
         lastSpectrumSequence = incoming.spectrumSequence;
-        lastCapturedFrameEnd = incoming.capturedFrameEnd;
+        lastMeterSequence = incoming.meterSequence;
         telemetry.framesWithNewSnapshot.fetch_add(1, std::memory_order_relaxed);
         telemetry.lastSpectrumSequence.store(lastSpectrumSequence, std::memory_order_relaxed);
 
@@ -2167,13 +2492,6 @@ private:
             for (std::size_t index = 0; index < displayedSpectrum.size(); ++index)
                 displayedSpectrum[index] = sanitiseDecibels(targetFrame.spectrumDecibels[index],
                     settings.floorDecibels, settings.ceilingDecibels);
-
-            for (std::size_t channel = 0; channel < 2; ++channel) {
-                displayedPeak[channel] = sanitiseDecibels(
-                    targetFrame.peakDecibels[channel], minimumMeterDecibels, maximumMeterDecibels);
-                displayedRms[channel] = sanitiseDecibels(
-                    targetFrame.rmsDecibels[channel], minimumMeterDecibels, maximumMeterDecibels);
-            }
 
             hasDisplayFrame = true;
         }
@@ -2196,26 +2514,12 @@ private:
         const auto spectrumFall = settings.smoothing <= 0.0F
             ? 1.0F
             : smoothingCoefficient(elapsed, 0.015 + (0.435 * smoothingShape));
-        const auto meterRise = smoothingCoefficient(elapsed, 0.025);
-        const auto meterFall = smoothingCoefficient(elapsed, 0.100);
-
         for (std::size_t index = 0; index < displayedSpectrum.size(); ++index) {
             const auto target = sanitiseDecibels(targetFrame.spectrumDecibels[index],
                 settings.floorDecibels, settings.ceilingDecibels);
             const auto coefficient
                 = target >= displayedSpectrum[index] ? spectrumRise : spectrumFall;
             displayedSpectrum[index] += coefficient * (target - displayedSpectrum[index]);
-        }
-
-        for (std::size_t channel = 0; channel < 2; ++channel) {
-            const auto peakTarget = sanitiseDecibels(
-                targetFrame.peakDecibels[channel], minimumMeterDecibels, maximumMeterDecibels);
-            const auto rmsTarget = sanitiseDecibels(
-                targetFrame.rmsDecibels[channel], minimumMeterDecibels, maximumMeterDecibels);
-            const auto peakCoefficient = peakTarget >= displayedPeak[channel] ? 1.0F : meterFall;
-            const auto rmsCoefficient = rmsTarget >= displayedRms[channel] ? meterRise : meterFall;
-            displayedPeak[channel] += peakCoefficient * (peakTarget - displayedPeak[channel]);
-            displayedRms[channel] += rmsCoefficient * (rmsTarget - displayedRms[channel]);
         }
     }
 
@@ -2542,51 +2846,104 @@ private:
         batches.peakRms.start = cursor;
 
         const auto meterPanel = toRenderRect(dashboardLayout[DashboardPanel::peakRms], height);
-        const auto meterPlot
-            = insetRenderRect(meterPanel, 12.0F, 10.0F, headerHeight(meterPanel) + 8.0F);
-        const auto meterGroupWidth
-            = std::min(meterPlot.width(), std::clamp(meterPanel.width() * 0.38F, 44.0F, 76.0F));
-        const auto meterLeft = meterPlot.left + (meterPlot.width() - meterGroupWidth) * 0.5F;
-        const auto meterBottom = meterPlot.bottom;
-        const auto meterTop = meterPlot.top;
-        const auto channelGap
-            = std::min(meterGroupWidth * 0.14F, std::clamp(meterGroupWidth * 0.08F, 4.0F, 7.0F));
-        const auto channelWidth = std::max(0.0F, (meterGroupWidth - channelGap) * 0.5F);
+        constexpr auto meterTextScale = 0.78F;
+        const auto meterTextHeight = cachedGlyphCellHeight * meterTextScale;
+        const auto maximumMeterReadoutWidth
+            = (((static_cast<float>(maximumPeakRmsReadoutGlyphs) - 1.0F) * cachedGlyphAdvance)
+                  + cachedGlyphCellWidth)
+            * meterTextScale;
+        const auto meterChannelCount = hasDisplayFrame && targetFrame.meterValid
+                && (targetFrame.channelCount == 1 || targetFrame.channelCount == 2)
+            ? targetFrame.channelCount
+            : 0;
+        const auto meterLayout = calculatePeakRmsPanelLayout(meterPanel.width(),
+            meterPanel.height(), headerHeight(meterPanel), meterChannelCount, meterTextHeight,
+            maximumCachedPeakRmsTickTextWidth * meterTextScale, maximumMeterReadoutWidth);
+        const auto toMeterPanelRect = [&](const PeakRmsLogicalRect& bounds) noexcept {
+            return RenderRect { meterPanel.left + bounds.left, meterPanel.bottom + bounds.bottom,
+                meterPanel.left + bounds.right, meterPanel.bottom + bounds.top };
+        };
         constexpr auto meterTrackColour = simd_float4 { 0.08F, 0.11F, 0.15F, 1.0F };
-        constexpr auto rmsColour = simd_float4 { 0.10F, 0.48F, 0.62F, 0.82F };
-        constexpr auto peakNormalColour = simd_float4 { 0.18F, 0.90F, 0.85F, 1.0F };
-        constexpr auto peakWarningColour = simd_float4 { 1.0F, 0.72F, 0.20F, 1.0F };
-        constexpr auto peakOverColour = simd_float4 { 1.0F, 0.20F, 0.12F, 1.0F };
+        constexpr auto meterGridColour = simd_float4 { 0.17F, 0.22F, 0.29F, 0.58F };
+        constexpr auto meterZeroGridColour = simd_float4 { 0.45F, 0.21F, 0.16F, 0.82F };
+        constexpr auto clearButtonColour = simd_float4 { 0.055F, 0.075F, 0.105F, 1.0F };
+        constexpr auto clearButtonBorderColour = simd_float4 { 0.20F, 0.27F, 0.36F, 0.90F };
+        const auto peakColour = [](const PeakRmsLevelRange range) noexcept {
+            switch (range) {
+            case PeakRmsLevelRange::amber:
+                return simd_float4 { 1.0F, 0.72F, 0.20F, 1.0F };
+            case PeakRmsLevelRange::red:
+                return simd_float4 { 1.0F, 0.20F, 0.12F, 1.0F };
+            case PeakRmsLevelRange::cyan:
+                return simd_float4 { 0.18F, 0.90F, 0.85F, 1.0F };
+            }
 
-        const auto meterDecibelsToY = [&](float decibels) noexcept {
-            const auto normalised
-                = (sanitiseDecibels(decibels, minimumMeterDecibels, maximumMeterDecibels)
-                      - minimumMeterDecibels)
-                / (maximumMeterDecibels - minimumMeterDecibels);
-            return meterBottom + normalised * (meterTop - meterBottom);
+            return simd_float4 { 0.18F, 0.90F, 0.85F, 1.0F };
+        };
+        const auto rmsColour = [](const PeakRmsLevelRange range) noexcept {
+            switch (range) {
+            case PeakRmsLevelRange::amber:
+                return simd_float4 { 0.55F, 0.36F, 0.09F, 0.82F };
+            case PeakRmsLevelRange::red:
+                return simd_float4 { 0.56F, 0.11F, 0.08F, 0.82F };
+            case PeakRmsLevelRange::cyan:
+                return simd_float4 { 0.10F, 0.48F, 0.62F, 0.82F };
+            }
+
+            return simd_float4 { 0.10F, 0.48F, 0.62F, 0.82F };
         };
 
-        if (meterPlot.width() > 0.0F && meterPlot.height() > 0.0F && channelWidth > 0.0F) {
-            for (std::size_t channel = 0; channel < 2; ++channel) {
-                const auto left
-                    = meterLeft + static_cast<float>(channel) * (channelWidth + channelGap);
-                const auto right = left + channelWidth;
-                appendQuad(left, meterBottom, right, meterTop, meterTrackColour);
+        if (meterLayout.clearVisualBounds.width() > 0.0F) {
+            const auto clearBounds = toMeterPanelRect(meterLayout.clearVisualBounds);
+            appendQuad(clearBounds.left, clearBounds.bottom, clearBounds.right, clearBounds.top,
+                clearButtonColour);
+            appendBorder(clearBounds, 1.0F, clearButtonBorderColour);
+        }
 
-                if (!hasDisplayFrame)
-                    continue;
+        const auto meterScaleHeight = meterLayout.scaleTop - meterLayout.scaleBottom;
+        if (meterScaleHeight > 0.0F && meterLayout.tickLineRight > meterLayout.tickLineLeft) {
+            for (const auto decibels : peakRmsMajorDecibelTicks) {
+                const auto y = meterPanel.bottom + meterLayout.scaleBottom
+                    + (mapPeakRmsDecibelsToUnit(static_cast<float>(decibels)) * meterScaleHeight);
+                const auto colour = decibels == 0 ? meterZeroGridColour : meterGridColour;
+                appendQuad(meterPanel.left + meterLayout.tickLineLeft, y - 0.5F,
+                    meterPanel.left + meterLayout.tickLineRight, y + 0.5F, colour);
+            }
+        }
 
-                const auto rmsTop = meterDecibelsToY(displayedRms[channel]);
-                appendQuad(left + 1.0F, meterBottom + 1.0F, right - 1.0F, rmsTop, rmsColour);
+        for (std::size_t channel = 0; channel < meterLayout.channelCount; ++channel) {
+            const auto track = toMeterPanelRect(meterLayout.channelTracks[channel]);
+            appendQuad(track.left, track.bottom, track.right, track.top, meterTrackColour);
 
-                const auto peakY = meterDecibelsToY(displayedPeak[channel]);
-                const auto peakWidth = channelWidth * 0.52F;
-                const auto peakLeft = left + (channelWidth - peakWidth) * 0.5F;
-                const auto displayedPeakColour = displayedPeak[channel] >= 0.0F
-                    ? peakOverColour
-                    : (displayedPeak[channel] >= -6.0F ? peakWarningColour : peakNormalColour);
+            const auto rmsReadout = classifyPeakRmsReadout(targetFrame.rmsDecibels[channel]);
+            if (rmsReadout.kind == PeakRmsReadout::Kind::decibelTenths
+                && targetFrame.rmsDecibels[channel] > peakRmsMinimumDecibels) {
+                const auto rmsTop = track.bottom
+                    + (mapPeakRmsDecibelsToUnit(targetFrame.rmsDecibels[channel]) * track.height());
+                appendQuad(track.left + 1.0F, track.bottom + 1.0F, track.right - 1.0F, rmsTop,
+                    rmsColour(rmsReadout.levelRange));
+            }
+
+            const auto peakReadout = classifyPeakRmsReadout(targetFrame.peakDecibels[channel]);
+            if (peakReadout.kind == PeakRmsReadout::Kind::decibelTenths && track.height() >= 2.0F) {
+                const auto peakY = std::clamp(track.bottom
+                        + (mapPeakRmsDecibelsToUnit(targetFrame.peakDecibels[channel])
+                            * track.height()),
+                    track.bottom + 1.0F, track.top - 1.0F);
+                const auto peakWidth = track.width() * 0.48F;
+                const auto peakLeft = track.left + ((track.width() - peakWidth) * 0.5F);
                 appendQuad(peakLeft, peakY - 1.0F, peakLeft + peakWidth, peakY + 1.0F,
-                    displayedPeakColour);
+                    peakColour(peakReadout.levelRange));
+            }
+
+            const auto heldReadout = classifyPeakRmsReadout(targetFrame.heldPeakDecibels[channel]);
+            if (heldReadout.kind == PeakRmsReadout::Kind::decibelTenths && track.height() >= 1.0F) {
+                const auto holdY = std::clamp(track.bottom
+                        + (mapPeakRmsDecibelsToUnit(targetFrame.heldPeakDecibels[channel])
+                            * track.height()),
+                    track.bottom + 0.5F, track.top - 0.5F);
+                appendQuad(track.left - 2.0F, holdY - 0.5F, track.right + 2.0F, holdY + 0.5F,
+                    peakColour(heldReadout.levelRange));
             }
         }
 
@@ -2601,7 +2958,10 @@ private:
             const auto bounds = toRenderRect(dashboardLayout[panel], height);
             const auto panelHeaderHeight = headerHeight(bounds);
             const auto& titleRun = cachedFixedTextRuns[panelTitleTextRunIndices[index]];
-            const auto titleAvailableWidth = std::max(0.0F, bounds.width() - 14.0F);
+            const auto titleAvailableWidth
+                = panel == DashboardPanel::peakRms && meterLayout.clearVisualBounds.width() > 0.0F
+                ? std::max(0.0F, meterLayout.clearVisualBounds.left - 12.0F)
+                : std::max(0.0F, bounds.width() - 14.0F);
             const auto titleScale = titleRun.width > 0.0F
                 ? std::min(1.0F, titleAvailableWidth / titleRun.width)
                 : 1.0F;
@@ -2612,7 +2972,90 @@ private:
             batches.text[index].start = cursor;
             appendTextRun(titleRun, titleX, titleY, titleScale, titleColour);
 
-            if (panel == DashboardPanel::spectrum) {
+            if (panel == DashboardPanel::peakRms) {
+                constexpr auto meterAxisTextColour = simd_float4 { 0.54F, 0.62F, 0.72F, 0.90F };
+                constexpr auto meterChannelTextColour = simd_float4 { 0.67F, 0.75F, 0.84F, 0.94F };
+                constexpr auto clearTextColour = simd_float4 { 0.58F, 0.69F, 0.80F, 0.96F };
+                constexpr auto overTextColour = simd_float4 { 1.0F, 0.28F, 0.18F, 1.0F };
+
+                if (meterLayout.clearVisualBounds.width() > 0.0F) {
+                    const auto clearBounds = toMeterPanelRect(meterLayout.clearVisualBounds);
+                    const auto& clearRun = cachedFixedTextRuns[clearTextRunIndex];
+                    const auto clearScale = std::min(0.78F,
+                        std::min(clearBounds.width() / clearRun.width,
+                            clearBounds.height() / clearRun.height));
+                    appendTextRun(clearRun,
+                        clearBounds.left
+                            + ((clearBounds.width() - (clearRun.width * clearScale)) * 0.5F),
+                        clearBounds.bottom
+                            + ((clearBounds.height() - (clearRun.height * clearScale)) * 0.5F),
+                        clearScale, clearTextColour);
+                }
+
+                if (meterLayout.showTickLabels && meterScaleHeight > 0.0F) {
+                    const auto visibleLabels
+                        = selectPeakRmsTickLabels(meterScaleHeight, meterTextHeight);
+
+                    for (std::size_t tick = 0; tick < peakRmsMajorDecibelTicks.size(); ++tick) {
+                        if (!visibleLabels.visible[tick])
+                            continue;
+
+                        const auto& run = cachedPeakRmsTickTextRuns[tick];
+                        const auto labelWidth = run.width * meterTextScale;
+                        const auto labelHeight = run.height * meterTextScale;
+                        const auto centreY = meterPanel.bottom + meterLayout.scaleBottom
+                            + (mapPeakRmsDecibelsToUnit(
+                                   static_cast<float>(peakRmsMajorDecibelTicks[tick]))
+                                * meterScaleHeight);
+                        const auto labelY = std::clamp(centreY - (labelHeight * 0.5F),
+                            meterPanel.bottom + meterLayout.scaleBottom,
+                            meterPanel.bottom + meterLayout.scaleTop - labelHeight);
+                        appendTextRun(run,
+                            meterPanel.left + meterLayout.tickLabelRight - labelWidth, labelY,
+                            meterTextScale, meterAxisTextColour);
+                    }
+                }
+
+                for (std::size_t channel = 0; channel < meterLayout.channelCount; ++channel) {
+                    const auto column = toMeterPanelRect(meterLayout.channelColumns[channel]);
+                    const auto channelRunIndex = meterLayout.channelCount == 1
+                        ? monoChannelTextRunIndex
+                        : (channel == 0 ? leftChannelTextRunIndex : rightChannelTextRunIndex);
+                    const auto& channelRun = cachedFixedTextRuns[channelRunIndex];
+                    const auto channelLabelWidth = channelRun.width * meterTextScale;
+                    appendTextRun(channelRun,
+                        column.left + ((column.width() - channelLabelWidth) * 0.5F),
+                        meterPanel.bottom + meterLayout.channelLabelBottom, meterTextScale,
+                        meterChannelTextColour);
+
+                    if (meterLayout.showReadouts) {
+                        const auto readout
+                            = classifyPeakRmsReadout(targetFrame.peakDecibels[channel]);
+                        const auto& readoutRun = readout.kind == PeakRmsReadout::Kind::minusInfinity
+                            ? cachedMinusInfinityTextRun()
+                            : cachedPeakRmsReadoutTextRuns()[static_cast<std::size_t>(
+                                  readout.decibelTenths - minimumPeakRmsReadoutTenths)];
+                        const auto readoutWidth
+                            = monospacedTextRunWidth(readoutRun) * meterTextScale;
+                        appendMonospacedTextRun(readoutRun,
+                            column.left + ((column.width() - readoutWidth) * 0.5F),
+                            meterPanel.bottom + meterLayout.readoutBottom, meterTextScale,
+                            peakColour(readout.levelRange));
+                    }
+
+                    if (targetFrame.over[channel]) {
+                        const auto& overRun = cachedFixedTextRuns[overTextRunIndex];
+                        const auto overScale = fitPeakRmsTextScale(
+                            std::max(0.0F, column.width() - 2.0F), overRun.width, meterTextScale);
+                        const auto overWidth = overRun.width * overScale;
+                        const auto overHeight = overRun.height * overScale;
+                        appendTextRun(overRun, column.left + ((column.width() - overWidth) * 0.5F),
+                            meterPanel.bottom + meterLayout.overBottom
+                                + std::max(0.0F, (meterTextHeight - overHeight) * 0.5F),
+                            overScale, overTextColour);
+                    }
+                }
+            } else if (panel == DashboardPanel::spectrum) {
                 for (std::size_t tickIndex = 0; tickIndex < spectrumFrequencyTicks.count;
                     ++tickIndex) {
                     const auto& tick = spectrumFrequencyTicks.ticks[tickIndex];
@@ -2723,6 +3166,17 @@ private:
     renderBackend = backend;
     self.delegate = nil;
     self.paused = YES;
+    self.accessibilityElement = YES;
+    self.accessibilityRole = NSAccessibilityGroupRole;
+    self.accessibilityLabel = @"Audio Insight analyzer dashboard";
+    self.accessibilityHelp
+        = @"Contains Spectrum and Peak/RMS visualizations plus unfinished analyzer panels.";
+    auto* clearAction = [[NSAccessibilityCustomAction alloc]
+        initWithName:@"Clear Peak/RMS holds and OVER"
+              target:self
+            selector:@selector(performPeakRmsClearAccessibilityAction)];
+    self.accessibilityCustomActions = @[ clearAction ];
+    [clearAction release];
 
     if ([self.layer isKindOfClass:[CAMetalLayer class]]) {
         metalDisplayLink =
@@ -2748,8 +3202,26 @@ private:
     }
 
     [[NSNotificationCenter defaultCenter] removeObserver:self];
+    self.accessibilityCustomActions = @[];
     observedWindow = nil;
     renderBackend = nullptr;
+}
+
+- (void)mouseDown:(NSEvent*)event
+{
+    if (renderBackend != nullptr) {
+        const auto point = [self convertPoint:event.locationInWindow fromView:nil];
+
+        if (renderBackend->tryClearPeakRmsAt(point))
+            return;
+    }
+
+    [super mouseDown:event];
+}
+
+- (BOOL)performPeakRmsClearAccessibilityAction
+{
+    return renderBackend != nullptr && renderBackend->performPeakRmsClearAction();
 }
 
 - (void)setDisplayLinkPaused:(BOOL)shouldBePaused

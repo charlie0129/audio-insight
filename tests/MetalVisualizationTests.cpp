@@ -17,6 +17,7 @@ static_assert(detail::MetalVisualizationGeometryLimits::maximumGeneratedVertices
     <= detail::MetalVisualizationGeometryLimits::vertexCapacity);
 static_assert(detail::maximumFrequencyAxisLabelGlyphs >= 10);
 static_assert(detail::MetalVisualizationGeometryLimits::maximumDecibelLabelGlyphs >= 7);
+static_assert(detail::maximumPeakRmsReadoutGlyphs >= 6);
 
 class StubVisualizationDataSource final : public VisualizationDataSource {
 public:
@@ -25,6 +26,10 @@ public:
     }
 
     void setVisualizationActive(bool) noexcept override
+    {
+    }
+
+    void resetPeakRms() noexcept override
     {
     }
 
@@ -227,10 +232,159 @@ public:
             detail::makeSpectrumDecibelTicks(-90.0F, -90.0F, 300.0F).count, std::size_t { 0 });
         expectEquals(detail::makeSpectrumDecibelTicks(-90.0F, 0.0F, 0.0F).count, std::size_t { 0 });
 
-        beginTest("Axis geometry remains within the fixed Metal vertex buffer");
+        beginTest("Peak/RMS ticks use the accepted fixed scale and bounded label selection");
+
+        constexpr std::array expectedMeterTicks { -60, -48, -36, -24, -12, -6, 0, 3 };
+        expect(detail::peakRmsMajorDecibelTicks == expectedMeterTicks);
+        expectEquals(detail::mapPeakRmsDecibelsToUnit(-60.0F), 0.0F);
+        expectWithinAbsoluteError(
+            detail::mapPeakRmsDecibelsToUnit(-6.0F), 54.0F / 63.0F, 0.000001F);
+        expectWithinAbsoluteError(detail::mapPeakRmsDecibelsToUnit(0.0F), 60.0F / 63.0F, 0.000001F);
+        expectEquals(detail::mapPeakRmsDecibelsToUnit(3.0F), 1.0F);
+        expectEquals(detail::mapPeakRmsDecibelsToUnit(-120.0F), 0.0F);
+        expectEquals(detail::mapPeakRmsDecibelsToUnit(12.0F), 1.0F);
+        expectEquals(
+            detail::mapPeakRmsDecibelsToUnit(std::numeric_limits<float>::quiet_NaN()), 0.0F);
+
+        const auto roomyMeterLabels = detail::selectPeakRmsTickLabels(512.0F, 10.0F);
+        expect(std::all_of(roomyMeterLabels.visible.begin(), roomyMeterLabels.visible.end(),
+            [](const auto visible) { return visible; }));
+
+        const auto compactMeterLabels = detail::selectPeakRmsTickLabels(100.0F, 10.0F);
+        expect(compactMeterLabels.visible.front());
+        expect(compactMeterLabels.visible.back());
+        expect(
+            std::count(compactMeterLabels.visible.begin(), compactMeterLabels.visible.end(), true)
+            < static_cast<int>(compactMeterLabels.visible.size()));
+        auto previousMeterLabelEnd = -2.0F;
+        for (std::size_t index = 0; index < compactMeterLabels.visible.size(); ++index) {
+            if (!compactMeterLabels.visible[index])
+                continue;
+
+            const auto centre = detail::mapPeakRmsDecibelsToUnit(
+                                    static_cast<float>(detail::peakRmsMajorDecibelTicks[index]))
+                * 100.0F;
+            const auto start = std::clamp(centre - 5.0F, 0.0F, 90.0F);
+            expect(start >= previousMeterLabelEnd + 2.0F - 0.0001F);
+            previousMeterLabelEnd = start + 10.0F;
+        }
+        const auto invalidMeterLabels = detail::selectPeakRmsTickLabels(0.0F, 10.0F);
+        expect(std::none_of(invalidMeterLabels.visible.begin(), invalidMeterLabels.visible.end(),
+            [](const auto visible) { return visible; }));
+
+        beginTest("Peak/RMS readouts preserve measurement floor and colour thresholds");
+
+        const auto silentReadout = detail::classifyPeakRmsReadout(minimumDisplayDecibels);
+        expect(silentReadout.kind == detail::PeakRmsReadout::Kind::minusInfinity);
+        expect(detail::classifyPeakRmsReadout(-121.0F).kind
+            == detail::PeakRmsReadout::Kind::minusInfinity);
+        expect(detail::classifyPeakRmsReadout(std::numeric_limits<float>::infinity()).kind
+            == detail::PeakRmsReadout::Kind::minusInfinity);
+
+        const auto belowVisibleFloor = detail::classifyPeakRmsReadout(-119.9F);
+        expect(belowVisibleFloor.kind == detail::PeakRmsReadout::Kind::decibelTenths);
+        expectEquals(belowVisibleFloor.decibelTenths, -1'199);
+        expect(belowVisibleFloor.levelRange == detail::PeakRmsLevelRange::cyan);
+
+        const auto roundedReadout = detail::classifyPeakRmsReadout(-12.34F);
+        expectEquals(roundedReadout.decibelTenths, -123);
+        expect(roundedReadout.levelRange == detail::PeakRmsLevelRange::cyan);
+        expect(
+            detail::classifyPeakRmsReadout(-6.001F).levelRange == detail::PeakRmsLevelRange::cyan);
+        expect(
+            detail::classifyPeakRmsReadout(-6.0F).levelRange == detail::PeakRmsLevelRange::amber);
+        expect(
+            detail::classifyPeakRmsReadout(-0.001F).levelRange == detail::PeakRmsLevelRange::amber);
+        expect(detail::classifyPeakRmsReadout(0.0F).levelRange == detail::PeakRmsLevelRange::red);
+        const auto doubledFloatReadout = detail::classifyPeakRmsReadout(20.0F * std::log10(2.0F));
+        expectEquals(doubledFloatReadout.decibelTenths, 60);
+        expect(doubledFloatReadout.levelRange == detail::PeakRmsLevelRange::red);
+        const auto twelveDecibelReadout = detail::classifyPeakRmsReadout(12.0F);
+        expectEquals(twelveDecibelReadout.decibelTenths, 120);
+        expect(twelveDecibelReadout.levelRange == detail::PeakRmsLevelRange::red);
+        const auto maximumFloatDecibels = 20.0F * std::log10(std::numeric_limits<float>::max());
+        expectEquals(detail::classifyPeakRmsReadout(maximumFloatDecibels).decibelTenths,
+            detail::maximumFiniteFloatPeakRmsReadoutTenths);
+        expectEquals(
+            detail::classifyPeakRmsReadout(std::numeric_limits<float>::max()).decibelTenths,
+            detail::maximumFiniteFloatPeakRmsReadoutTenths);
+
+        beginTest("Peak/RMS layout is mono-aware, responsive, and shares CLEAR hit geometry");
+
+        const auto stereoMeterLayout
+            = detail::calculatePeakRmsPanelLayout(240.0F, 280.0F, 24.0F, 2, 10.0F, 24.0F, 42.0F);
+        expectEquals(stereoMeterLayout.channelCount, std::size_t { 2 });
+        expect(stereoMeterLayout.showTickLabels);
+        expect(stereoMeterLayout.showReadouts);
+        expect(stereoMeterLayout.channelTracks[0].right < stereoMeterLayout.channelTracks[1].left);
+        expectWithinAbsoluteError(stereoMeterLayout.channelTracks[0].width(),
+            stereoMeterLayout.channelTracks[1].width(), 0.0001F);
+        expect(stereoMeterLayout.scaleTop > stereoMeterLayout.scaleBottom);
+        expect(stereoMeterLayout.clearHitBounds.width()
+            >= stereoMeterLayout.clearVisualBounds.width());
+        expect(stereoMeterLayout.clearHitBounds.height() >= 24.0F);
+        expect(stereoMeterLayout.clearHitBounds.contains(
+            (stereoMeterLayout.clearVisualBounds.left + stereoMeterLayout.clearVisualBounds.right)
+                * 0.5F,
+            (stereoMeterLayout.clearVisualBounds.bottom + stereoMeterLayout.clearVisualBounds.top)
+                * 0.5F));
+
+        const auto monoMeterLayout
+            = detail::calculatePeakRmsPanelLayout(240.0F, 280.0F, 24.0F, 1, 10.0F, 24.0F, 42.0F);
+        expectEquals(monoMeterLayout.channelCount, std::size_t { 1 });
+        expect(monoMeterLayout.channelTracks[0].width() > 0.0F);
+        expectEquals(monoMeterLayout.channelTracks[1].width(), 0.0F);
+        const auto monoTrackCentre
+            = (monoMeterLayout.channelTracks[0].left + monoMeterLayout.channelTracks[0].right)
+            * 0.5F;
+        const auto monoGroupCentre
+            = ((monoMeterLayout.tickLineLeft + 4.0F) + monoMeterLayout.tickLineRight) * 0.5F;
+        expectWithinAbsoluteError(monoTrackCentre, monoGroupCentre, 0.0001F);
+
+        const auto narrowMeterLayout
+            = detail::calculatePeakRmsPanelLayout(90.0F, 100.0F, 18.0F, 2, 10.0F, 24.0F, 42.0F);
+        expectEquals(narrowMeterLayout.channelCount, std::size_t { 2 });
+        expect(!narrowMeterLayout.showReadouts);
+        constexpr auto unscaledOverWidth = 32.0F;
+        constexpr auto preferredMeterTextScale = 0.78F;
+        for (std::size_t channel = 0; channel < narrowMeterLayout.channelCount; ++channel) {
+            const auto& track = narrowMeterLayout.channelTracks[channel];
+            const auto& column = narrowMeterLayout.channelColumns[channel];
+            expect(track.left >= 0.0F);
+            expect(track.right <= 90.0F);
+            expect(track.bottom >= 0.0F);
+            expect(track.top <= 100.0F);
+
+            const auto overScale = detail::fitPeakRmsTextScale(
+                column.width() - 2.0F, unscaledOverWidth, preferredMeterTextScale);
+            const auto fittedOverWidth = unscaledOverWidth * overScale;
+            const auto fittedOverLeft = column.left + ((column.width() - fittedOverWidth) * 0.5F);
+            expect(overScale > 0.0F && overScale <= preferredMeterTextScale);
+            expect(fittedOverLeft >= column.left);
+            expect(fittedOverLeft + fittedOverWidth <= column.right + 0.0001F);
+        }
+        expect(
+            narrowMeterLayout.channelColumns[0].right <= narrowMeterLayout.channelColumns[1].left);
+        expectEquals(detail::fitPeakRmsTextScale(0.0F, 32.0F, 0.78F), 0.0F);
+
+        const auto invalidMeterLayout
+            = detail::calculatePeakRmsPanelLayout(240.0F, 280.0F, 24.0F, 3, 10.0F, 24.0F, 42.0F);
+        expectEquals(invalidMeterLayout.channelCount, std::size_t { 0 });
+        expectEquals(invalidMeterLayout.channelTracks[0].width(), 0.0F);
+        expectEquals(
+            detail::calculatePeakRmsPanelLayout(0.0F, 280.0F, 24.0F, 2, 10.0F, 24.0F, 42.0F)
+                .channelCount,
+            std::size_t { 0 });
+        expect(!detail::PeakRmsLogicalRect { }.contains(0.0F, 0.0F));
+        const auto hiddenClearLayout
+            = detail::calculatePeakRmsPanelLayout(60.0F, 100.0F, 18.0F, 2, 10.0F, 24.0F, 42.0F);
+        expectEquals(hiddenClearLayout.clearHitBounds.width(), 0.0F);
+        expect(!hiddenClearLayout.clearHitBounds.contains(0.0F, 0.0F));
+
+        beginTest("Axis and meter geometry remain within the fixed Metal vertex buffer");
 
         expectEquals(detail::MetalVisualizationGeometryLimits::maximumGeneratedVertices,
-            std::size_t { 8'034 });
+            std::size_t { 8'406 });
         expect(detail::MetalVisualizationGeometryLimits::maximumGeneratedVertices
             <= detail::MetalVisualizationGeometryLimits::vertexCapacity);
 

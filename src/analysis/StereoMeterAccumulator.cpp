@@ -14,13 +14,22 @@ namespace {
     const auto scale = std::max({ 1.0, std::abs(left), std::abs(right) });
     return std::abs(left - right) > std::numeric_limits<double>::epsilon() * scale * 4.0;
 }
+
+[[nodiscard]] std::uint64_t saturatingAdd(
+    const std::uint64_t left, const std::uint64_t right) noexcept
+{
+    return right > std::numeric_limits<std::uint64_t>::max() - left
+        ? std::numeric_limits<std::uint64_t>::max()
+        : left + right;
+}
 } // namespace
 
 StereoMeterAccumulator::StereoMeterAccumulator() noexcept = default;
 
 StereoMeterAccumulator::PublishResult StereoMeterAccumulator::publishBlock(const float* const left,
     const float* const right, const std::size_t frameCount, const double sampleRate,
-    const std::uint64_t generation) noexcept
+    const std::uint64_t generation, const std::uint32_t channelCount,
+    const bool followsDiscontinuity) noexcept
 {
     PublishResult result;
     if (frameCount == 0)
@@ -30,17 +39,17 @@ StereoMeterAccumulator::PublishResult StereoMeterAccumulator::publishBlock(const
     capturedFrameCursor_ += frameCount;
     attemptedBlocks_.fetch_add(1, std::memory_order_relaxed);
 
-    const auto aggregate = measure(
-        left, right, frameCount, sampleRate, generation, result.sequence, capturedFrameCursor_);
+    const auto reading = measureEndpoint(left, right, frameCount, sampleRate, generation,
+        result.sequence, capturedFrameCursor_, channelCount, followsDiscontinuity);
 
-    if (publishToFreeSlot(aggregate)) {
+    if (publishToFreeSlot(reading)) {
         result.published = true;
         publishedBlocks_.fetch_add(1, std::memory_order_relaxed);
         updateReadyHighWaterMark();
         return result;
     }
 
-    if (coalesceIntoNewestReady(aggregate)) {
+    if (coalesceIntoNewestReady(reading)) {
         result.published = true;
         result.coalesced = true;
         publishedBlocks_.fetch_add(1, std::memory_order_relaxed);
@@ -50,7 +59,7 @@ StereoMeterAccumulator::PublishResult StereoMeterAccumulator::publishBlock(const
 
     // A consumer may have claimed the newest slot between our bounded scans.
     // Take one final bounded pass over newly freed storage, then drop safely.
-    if (publishToFreeSlot(aggregate)) {
+    if (publishToFreeSlot(reading)) {
         result.published = true;
         publishedBlocks_.fetch_add(1, std::memory_order_relaxed);
         updateReadyHighWaterMark();
@@ -64,7 +73,7 @@ StereoMeterAccumulator::PublishResult StereoMeterAccumulator::publishBlock(const
 
 bool StereoMeterAccumulator::consumeLatest(StereoMeterReading& destination) noexcept
 {
-    std::array<Aggregate, slotCount * 2> acquired { };
+    std::array<StereoMeterReading, slotCount * 2> acquired { };
     std::size_t acquiredCount = 0;
 
     // Repeat a fixed number of complete scans. This catches slots published into
@@ -77,7 +86,7 @@ bool StereoMeterAccumulator::consumeLatest(StereoMeterReading& destination) noex
                 continue;
             }
 
-            acquired[acquiredCount++] = slot.aggregate;
+            acquired[acquiredCount++] = slot.reading;
             slot.state.store(SlotState::free, std::memory_order_release);
         }
     }
@@ -86,85 +95,54 @@ bool StereoMeterAccumulator::consumeLatest(StereoMeterReading& destination) noex
         return false;
 
     const auto acquiredEnd = acquired.begin() + static_cast<std::ptrdiff_t>(acquiredCount);
-    const auto newestGeneration = std::max_element(
-        acquired.begin(), acquiredEnd, [](const Aggregate& left, const Aggregate& right) {
-            return left.generation < right.generation;
-        })->generation;
+    std::sort(acquired.begin(), acquiredEnd,
+        [](const StereoMeterReading& left, const StereoMeterReading& right) {
+            return left.lastSequence < right.lastSequence;
+        });
 
-    std::sort(acquired.begin(), acquiredEnd, [](const Aggregate& left, const Aggregate& right) {
-        if (left.generation != right.generation)
-            return left.generation < right.generation;
-        return left.firstSequence < right.firstSequence;
-    });
-
-    Aggregate combined;
-    bool hasCombined = false;
-    bool followsDiscontinuity = false;
-
+    StereoMeterReading combined;
+    auto hasCombined = false;
     for (auto iterator = acquired.begin(); iterator != acquiredEnd; ++iterator) {
-        const auto& value = *iterator;
-        if (value.generation != newestGeneration)
-            continue;
-
+        auto value = *iterator;
         if (!hasCombined) {
             combined = value;
             hasCombined = true;
-            followsDiscontinuity = value.containsSequenceGap;
             continue;
         }
 
-        const auto isContiguous = combined.lastSequence != std::numeric_limits<std::uint64_t>::max()
+        const auto contiguous = combined.lastSequence != std::numeric_limits<std::uint64_t>::max()
             && value.firstSequence == combined.lastSequence + 1;
-        if (!isContiguous || value.containsSequenceGap
-            || sampleRatesDiffer(combined.sampleRate, value.sampleRate)) {
-            // RMS integration and peak hold restart at a missing interval. Keep
-            // the newest contiguous segment rather than blending across a gap.
+        if (contiguous && formatsMatch(combined, value) && !value.followsDiscontinuity) {
+            prependRepresentedMetadata(value, combined);
             combined = value;
-            followsDiscontinuity = true;
-            continue;
+        } else {
+            value.followsDiscontinuity = true;
+            combined = value;
         }
-
-        merge(combined, value);
     }
 
-    const auto sequenceSpan = combined.lastSequence >= combined.firstSequence
-        ? (combined.lastSequence - combined.firstSequence) + 1
-        : 0;
-    followsDiscontinuity = followsDiscontinuity || combined.containsSequenceGap
-        || sequenceSpan != combined.representedBlocks;
+    if (consumerHasPreviousSequence_) {
+        const auto contiguous
+            = consumerPreviousSequence_ != std::numeric_limits<std::uint64_t>::max()
+            && combined.firstSequence == consumerPreviousSequence_ + 1;
+        const auto sameFormat = consumerPreviousValid_ && combined.valid
+            && consumerPreviousGeneration_ == combined.generation
+            && consumerPreviousChannelCount_ == combined.channelCount
+            && !sampleRatesDiffer(consumerPreviousSampleRate_, combined.sampleRate);
+        combined.followsDiscontinuity = combined.followsDiscontinuity || !contiguous || !sameFormat;
+    }
 
-    if (consumerHasPreviousSequence_ && combined.generation == consumerPreviousGeneration_)
-        followsDiscontinuity
-            = followsDiscontinuity || combined.firstSequence != consumerPreviousSequence_ + 1;
-
-    if (followsDiscontinuity)
+    if (combined.followsDiscontinuity)
         consumerDiscontinuities_.fetch_add(1, std::memory_order_relaxed);
 
     consumerHasPreviousSequence_ = true;
+    consumerPreviousValid_ = combined.valid;
     consumerPreviousGeneration_ = combined.generation;
     consumerPreviousSequence_ = combined.lastSequence;
+    consumerPreviousChannelCount_ = combined.channelCount;
+    consumerPreviousSampleRate_ = combined.sampleRate;
 
-    StereoMeterReading reading;
-    reading.generation = combined.generation;
-    reading.firstSequence = combined.firstSequence;
-    reading.lastSequence = combined.lastSequence;
-    reading.capturedFrameEnd = combined.capturedFrameEnd;
-    reading.representedBlocks = combined.representedBlocks;
-    reading.representedFrames = combined.frameCount;
-    reading.sampleRate = combined.sampleRate;
-    reading.followsDiscontinuity = followsDiscontinuity;
-
-    for (std::size_t channel = 0; channel < 2; ++channel) {
-        reading.peakLinear[channel] = combined.peak[channel];
-        reading.rmsLinear[channel] = combined.frameCount > 0
-            ? static_cast<float>(std::sqrt(
-                  combined.sumSquares[channel] / static_cast<double>(combined.frameCount)))
-            : 0.0F;
-        reading.peakDecibels[channel] = linearToDecibels(reading.peakLinear[channel]);
-        reading.rmsDecibels[channel] = linearToDecibels(reading.rmsLinear[channel]);
-    }
-
-    destination = reading;
+    destination = combined;
     return true;
 }
 
@@ -176,7 +154,33 @@ bool StereoMeterAccumulator::consumeInto(VisualizationFrame& destination) noexce
 
     destination.peakDecibels = reading.peakDecibels;
     destination.rmsDecibels = reading.rmsDecibels;
+    destination.heldPeakDecibels = reading.heldPeakDecibels;
+    destination.over = reading.over;
+    destination.channelCount = reading.channelCount;
+    destination.sampleRate = reading.sampleRate;
+    destination.meterSequence = reading.lastSequence;
+    destination.meterValid = reading.valid;
     return true;
+}
+
+std::uint64_t StereoMeterAccumulator::requestUserReset() noexcept
+{
+    return requestedUserResetEpoch_.fetch_add(1, std::memory_order_acq_rel) + 1;
+}
+
+std::uint64_t StereoMeterAccumulator::requestLiveClear() noexcept
+{
+    return requestedLiveClearEpoch_.fetch_add(1, std::memory_order_acq_rel) + 1;
+}
+
+std::uint64_t StereoMeterAccumulator::requestedUserResetEpoch() const noexcept
+{
+    return requestedUserResetEpoch_.load(std::memory_order_acquire);
+}
+
+std::uint64_t StereoMeterAccumulator::requestedLiveClearEpoch() const noexcept
+{
+    return requestedLiveClearEpoch_.load(std::memory_order_acquire);
 }
 
 StereoMeterAccumulator::Telemetry StereoMeterAccumulator::telemetry() const noexcept
@@ -207,75 +211,80 @@ void StereoMeterAccumulator::discardPending() noexcept
     }
 
     consumerHasPreviousSequence_ = false;
+    consumerPreviousValid_ = false;
     consumerPreviousGeneration_ = 0;
     consumerPreviousSequence_ = 0;
+    consumerPreviousChannelCount_ = 0;
+    consumerPreviousSampleRate_ = 0.0;
 }
 
-StereoMeterAccumulator::Aggregate StereoMeterAccumulator::measure(const float* const left,
+StereoMeterReading StereoMeterAccumulator::measureEndpoint(const float* const left,
     const float* const right, const std::size_t frameCount, const double sampleRate,
     const std::uint64_t generation, const std::uint64_t sequence,
-    const std::uint64_t capturedFrameEnd) noexcept
+    const std::uint64_t capturedFrameEnd, const std::uint32_t channelCount,
+    const bool followsDiscontinuity) noexcept
 {
-    Aggregate result;
-    result.frameCount = frameCount;
-    result.representedBlocks = 1;
-    result.generation = generation;
-    result.firstSequence = sequence;
-    result.lastSequence = sequence;
-    result.capturedFrameEnd = capturedFrameEnd;
-    result.sampleRate = sampleRate;
+    const auto previous = ballistics_.current();
+    const auto formatChanged = previous.valid
+        && (previous.generation != generation || previous.channelCount != channelCount
+            || sampleRatesDiffer(previous.sampleRate, sampleRate));
 
-    for (std::size_t frame = 0; frame < frameCount; ++frame) {
-        const std::array<float, 2> samples {
-            left != nullptr && std::isfinite(left[frame]) ? left[frame] : 0.0F,
-            right != nullptr && std::isfinite(right[frame]) ? right[frame] : 0.0F
-        };
-
-        for (std::size_t channel = 0; channel < 2; ++channel) {
-            const auto magnitude = std::abs(samples[channel]);
-            result.peak[channel] = std::max(result.peak[channel], magnitude);
-            result.sumSquares[channel]
-                += static_cast<double>(samples[channel]) * static_cast<double>(samples[channel]);
-        }
+    const auto requestedUserReset = requestedUserResetEpoch_.load(std::memory_order_acquire);
+    if (requestedUserReset != appliedUserResetEpoch_) {
+        ballistics_.userReset();
+        appliedUserResetEpoch_ = requestedUserReset;
     }
 
-    return result;
-}
-
-void StereoMeterAccumulator::merge(Aggregate& destination, const Aggregate& source) noexcept
-{
-    if (destination.generation != source.generation) {
-        if (source.generation > destination.generation)
-            destination = source;
-        return;
+    const auto requestedLiveClear = requestedLiveClearEpoch_.load(std::memory_order_acquire);
+    if (requestedLiveClear != appliedLiveClearEpoch_) {
+        ballistics_.clearLiveMeasurements();
+        appliedLiveClearEpoch_ = requestedLiveClear;
     }
 
-    destination.containsSequenceGap = destination.containsSequenceGap || source.containsSequenceGap;
-    destination.firstSequence = std::min(destination.firstSequence, source.firstSequence);
-    destination.lastSequence = std::max(destination.lastSequence, source.lastSequence);
-    destination.capturedFrameEnd = std::max(destination.capturedFrameEnd, source.capturedFrameEnd);
-    destination.representedBlocks += source.representedBlocks;
-    destination.frameCount += source.frameCount;
-    const auto sourceIsNewer = source.lastSequence >= destination.lastSequence;
-    if (sourceIsNewer)
-        destination.sampleRate = source.sampleRate;
+    const auto endpoint = ballistics_.processBlock(
+        left, right, frameCount, sampleRate, generation, channelCount, followsDiscontinuity);
 
-    for (std::size_t channel = 0; channel < 2; ++channel) {
-        destination.peak[channel] = std::max(destination.peak[channel], source.peak[channel]);
-        destination.sumSquares[channel] += source.sumSquares[channel];
-    }
+    StereoMeterReading reading;
+    reading.peakLinear = endpoint.liveSamplePeakLinear;
+    reading.rmsLinear = endpoint.rmsLinear;
+    reading.heldPeakLinear = endpoint.heldSamplePeakLinear;
+    reading.peakDecibels = endpoint.liveSamplePeakDecibels;
+    reading.rmsDecibels = endpoint.rmsDecibels;
+    reading.heldPeakDecibels = endpoint.heldSamplePeakDecibels;
+    reading.over = endpoint.over;
+    reading.generation = generation;
+    reading.firstSequence = sequence;
+    reading.lastSequence = sequence;
+    reading.capturedFrameEnd = capturedFrameEnd;
+    reading.representedBlocks = 1;
+    reading.representedFrames = frameCount;
+    reading.appliedUserResetEpoch = appliedUserResetEpoch_;
+    reading.appliedLiveClearEpoch = appliedLiveClearEpoch_;
+    reading.channelCount = endpoint.channelCount;
+    reading.sampleRate = endpoint.sampleRate;
+    reading.followsDiscontinuity = followsDiscontinuity || formatChanged;
+    reading.valid = endpoint.valid;
+    return reading;
 }
 
-float StereoMeterAccumulator::linearToDecibels(const float value) noexcept
+void StereoMeterAccumulator::prependRepresentedMetadata(
+    StereoMeterReading& newer, const StereoMeterReading& older) noexcept
 {
-    constexpr auto floorLinear = 1.0e-6F; // -120 dBFS
-    if (!std::isfinite(value) || value <= floorLinear)
-        return minimumDisplayDecibels;
-
-    return 20.0F * std::log10(value);
+    newer.firstSequence = older.firstSequence;
+    newer.representedBlocks = saturatingAdd(older.representedBlocks, newer.representedBlocks);
+    newer.representedFrames = saturatingAdd(older.representedFrames, newer.representedFrames);
+    newer.followsDiscontinuity = newer.followsDiscontinuity || older.followsDiscontinuity;
 }
 
-bool StereoMeterAccumulator::publishToFreeSlot(const Aggregate& aggregate) noexcept
+bool StereoMeterAccumulator::formatsMatch(
+    const StereoMeterReading& left, const StereoMeterReading& right) noexcept
+{
+    return left.valid && right.valid && left.generation == right.generation
+        && left.channelCount == right.channelCount
+        && !sampleRatesDiffer(left.sampleRate, right.sampleRate);
+}
+
+bool StereoMeterAccumulator::publishToFreeSlot(const StereoMeterReading& reading) noexcept
 {
     for (auto& slot : slots_) {
         auto expected = SlotState::free;
@@ -284,7 +293,7 @@ bool StereoMeterAccumulator::publishToFreeSlot(const Aggregate& aggregate) noexc
             continue;
         }
 
-        slot.aggregate = aggregate;
+        slot.reading = reading;
         slot.state.store(SlotState::ready, std::memory_order_release);
         return true;
     }
@@ -292,7 +301,7 @@ bool StereoMeterAccumulator::publishToFreeSlot(const Aggregate& aggregate) noexc
     return false;
 }
 
-bool StereoMeterAccumulator::coalesceIntoNewestReady(const Aggregate& aggregate) noexcept
+bool StereoMeterAccumulator::coalesceIntoNewestReady(const StereoMeterReading& reading) noexcept
 {
     std::size_t newestIndex = slots_.size();
     std::uint64_t newestSequence = 0;
@@ -301,9 +310,9 @@ bool StereoMeterAccumulator::coalesceIntoNewestReady(const Aggregate& aggregate)
         if (slots_[index].state.load(std::memory_order_acquire) != SlotState::ready)
             continue;
 
-        if (newestIndex == slots_.size() || slots_[index].aggregate.lastSequence > newestSequence) {
+        if (newestIndex == slots_.size() || slots_[index].reading.lastSequence > newestSequence) {
             newestIndex = index;
-            newestSequence = slots_[index].aggregate.lastSequence;
+            newestSequence = slots_[index].reading.lastSequence;
         }
     }
 
@@ -317,18 +326,16 @@ bool StereoMeterAccumulator::coalesceIntoNewestReady(const Aggregate& aggregate)
         return false;
     }
 
-    const auto sameGeneration = slot.aggregate.generation == aggregate.generation;
-    const auto contiguous = slot.aggregate.lastSequence != std::numeric_limits<std::uint64_t>::max()
-        && slot.aggregate.lastSequence + 1 == aggregate.firstSequence;
-    const auto sameSampleRate = !sampleRatesDiffer(slot.aggregate.sampleRate, aggregate.sampleRate);
-    if (sameGeneration && contiguous && sameSampleRate) {
-        merge(slot.aggregate, aggregate);
+    auto replacement = reading;
+    const auto contiguous = slot.reading.lastSequence != std::numeric_limits<std::uint64_t>::max()
+        && reading.firstSequence == slot.reading.lastSequence + 1;
+    if (contiguous && formatsMatch(slot.reading, reading) && !reading.followsDiscontinuity) {
+        prependRepresentedMetadata(replacement, slot.reading);
     } else {
-        // Across lifecycle/sequence discontinuities, begin a fresh RMS interval.
-        slot.aggregate = aggregate;
-        slot.aggregate.containsSequenceGap = sameGeneration && (!contiguous || !sameSampleRate);
+        replacement.followsDiscontinuity = true;
     }
 
+    slot.reading = replacement;
     slot.state.store(SlotState::ready, std::memory_order_release);
     return true;
 }

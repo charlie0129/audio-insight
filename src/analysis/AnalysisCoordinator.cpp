@@ -3,7 +3,6 @@
 #include "AnalysisCoordinator.h"
 
 #include "HannSpectrumAnalyzer.h"
-
 #include <algorithm>
 #include <array>
 #include <atomic>
@@ -169,11 +168,24 @@ private:
 
 struct AnalysisCoordinator::State final : SharedAnalysisScheduler::JobClient {
     void captureAudioBlock(const float* const left, const float* const right,
-        const std::size_t frameCount, const double sampleRate,
-        const std::uint64_t generation) noexcept
+        const std::size_t frameCount, const double sampleRate, const std::uint64_t generation,
+        const std::uint32_t channelCount) noexcept
     {
-        static_cast<void>(samples.publishBlock(left, right, frameCount, sampleRate, generation));
-        static_cast<void>(meters.publishBlock(left, right, frameCount, sampleRate, generation));
+        std::size_t offset = 0;
+        while (offset < frameCount) {
+            const auto chunkFrames
+                = std::min(StereoSampleCapture::framesPerSlot, frameCount - offset);
+            const auto* const chunkLeft = left != nullptr ? left + offset : nullptr;
+            const auto* const chunkRight = right != nullptr ? right + offset : nullptr;
+            const auto samplePublication = samples.publishBlock(
+                chunkLeft, chunkRight, chunkFrames, sampleRate, generation, channelCount);
+            const auto followsCaptureDiscontinuity = samplePublication.reclaimedReadyChunks != 0
+                || samplePublication.droppedIncomingChunks != 0;
+            static_cast<void>(meters.publishBlock(chunkLeft, chunkRight, chunkFrames, sampleRate,
+                generation, channelCount, followsCaptureDiscontinuity));
+            offset += chunkFrames;
+        }
+
         captureRevision.fetch_add(1, std::memory_order_release);
     }
 
@@ -189,6 +201,9 @@ struct AnalysisCoordinator::State final : SharedAnalysisScheduler::JobClient {
         meterCapturedFrameEnd.store(0, std::memory_order_relaxed);
         hasPublishedAudioFrame.store(false, std::memory_order_relaxed);
         staleClearPending.store(false, std::memory_order_relaxed);
+        peakRmsResetPendingEpoch.store(0, std::memory_order_relaxed);
+        requiredUserResetEpoch = 0;
+        requiredLiveClearEpoch = 0;
         lastAnalyzedCaptureRevision.store(
             captureRevision.load(std::memory_order_acquire), std::memory_order_release);
 
@@ -198,6 +213,12 @@ struct AnalysisCoordinator::State final : SharedAnalysisScheduler::JobClient {
         // initial snapshot are complete. A defensive generation check in
         // execute() can therefore never expose a partially initialised state.
         currentGeneration.store(generation, std::memory_order_release);
+    }
+
+    void discardPendingCapture() noexcept
+    {
+        samples.discardPending();
+        meters.discardPending();
     }
 
     [[nodiscard]] std::uint64_t latestCaptureRevision() const noexcept
@@ -229,6 +250,41 @@ struct AnalysisCoordinator::State final : SharedAnalysisScheduler::JobClient {
     void cancelStaleClear() noexcept
     {
         staleClearPending.store(false, std::memory_order_release);
+    }
+
+    void requestPeakRmsReset() noexcept
+    {
+        const auto epoch = meters.requestUserReset();
+        peakRmsResetPendingEpoch.store(epoch, std::memory_order_release);
+        peakRmsUserResets.fetch_add(1, std::memory_order_relaxed);
+    }
+
+    void applyPeakRmsReading(const StereoMeterReading& reading) noexcept
+    {
+        if (workingFrame.spectrumValid
+            && (workingFrame.channelCount != reading.channelCount
+                || sampleRatesDiffer(workingFrame.sampleRate, reading.sampleRate))) {
+            spectrum.reset(&workingFrame);
+        }
+
+        workingFrame.peakDecibels = reading.peakDecibels;
+        workingFrame.rmsDecibels = reading.rmsDecibels;
+        workingFrame.heldPeakDecibels = reading.heldPeakDecibels;
+        workingFrame.over = reading.over;
+        workingFrame.channelCount = reading.channelCount;
+        workingFrame.meterValid = reading.valid;
+
+        if (reading.appliedLiveClearEpoch < requiredLiveClearEpoch) {
+            workingFrame.peakDecibels.fill(minimumDisplayDecibels);
+            workingFrame.rmsDecibels.fill(minimumDisplayDecibels);
+        }
+
+        if (reading.appliedUserResetEpoch < requiredUserResetEpoch) {
+            workingFrame.heldPeakDecibels.fill(minimumDisplayDecibels);
+            workingFrame.over.fill(false);
+        }
+
+        workingFrame.meterSequence = nextMeterSequence++;
     }
 
     void execute(const SharedAnalysisScheduler::JobContext& context) override
@@ -265,12 +321,14 @@ struct AnalysisCoordinator::State final : SharedAnalysisScheduler::JobClient {
         }
 
         bool frameChanged = false;
+        bool consumedValidAudio = false;
         StereoSampleCapture::ReadHandle handle;
         std::size_t retainedFrames = 0;
         std::uint64_t retainedFrameEnd = 0;
         std::uint64_t previousChunkSequence = 0;
         std::uint64_t previousChunkFrameEnd = 0;
         double retainedSampleRate = 0.0;
+        std::uint32_t retainedChannelCount = 0;
         bool hasPreviousChunk = false;
         bool inputFollowsDiscontinuity = false;
         std::uint64_t discardedFrames = 0;
@@ -298,7 +356,7 @@ struct AnalysisCoordinator::State final : SharedAnalysisScheduler::JobClient {
                 && chunk.sequence == previousChunkSequence + 1 && hasValidRange
                 && chunkFrameStart == previousChunkFrameEnd
                 && !sampleRatesDiffer(retainedSampleRate, chunk.sampleRate)
-                && !chunk.followsDiscontinuity;
+                && retainedChannelCount == chunk.channelCount && !chunk.followsDiscontinuity;
 
             if (hasPreviousChunk && !isContiguous) {
                 retainedFrames = 0;
@@ -343,6 +401,7 @@ struct AnalysisCoordinator::State final : SharedAnalysisScheduler::JobClient {
 
             retainedFrameEnd = chunk.capturedFrameEnd;
             retainedSampleRate = chunk.sampleRate;
+            retainedChannelCount = chunk.channelCount;
             previousChunkSequence = chunk.sequence;
             previousChunkFrameEnd = chunk.capturedFrameEnd;
             hasPreviousChunk = true;
@@ -366,6 +425,7 @@ struct AnalysisCoordinator::State final : SharedAnalysisScheduler::JobClient {
                 retainedFrameEnd,
                 retainedSampleRate,
                 inputFollowsDiscontinuity,
+                retainedChannelCount,
             };
             const auto spectrumWasValid = workingFrame.spectrumValid;
             const auto producedSpectrum = spectrum.process(coalescedInput, workingFrame);
@@ -381,13 +441,28 @@ struct AnalysisCoordinator::State final : SharedAnalysisScheduler::JobClient {
 
         StereoMeterReading meterReading;
         if (meters.consumeLatest(meterReading) && meterReading.generation == generation) {
-            workingFrame.peakDecibels = meterReading.peakDecibels;
-            workingFrame.rmsDecibels = meterReading.rmsDecibels;
+            applyPeakRmsReading(meterReading);
             newestCapturedFrameEnd
                 = std::max(newestCapturedFrameEnd, meterReading.capturedFrameEnd);
             workingFrame.sampleRate = meterReading.sampleRate;
             meterCapturedFrameEnd.store(meterReading.capturedFrameEnd, std::memory_order_relaxed);
             frameChanged = true;
+            consumedValidAudio = meterReading.valid;
+        }
+
+        const auto pendingResetEpoch
+            = peakRmsResetPendingEpoch.exchange(0, std::memory_order_acq_rel);
+        if (pendingResetEpoch != 0) {
+            requiredUserResetEpoch = std::max(requiredUserResetEpoch, pendingResetEpoch);
+
+            const auto resetWasAlreadyApplied = meterReading.valid
+                && meterReading.appliedUserResetEpoch >= requiredUserResetEpoch;
+            if (workingFrame.meterValid && !resetWasAlreadyApplied) {
+                workingFrame.heldPeakDecibels.fill(minimumDisplayDecibels);
+                workingFrame.over.fill(false);
+                workingFrame.meterSequence = nextMeterSequence++;
+                frameChanged = true;
+            }
         }
 
         if (context.stopRequested()
@@ -403,8 +478,10 @@ struct AnalysisCoordinator::State final : SharedAnalysisScheduler::JobClient {
 
         if (shouldClearStaleFrame) {
             spectrum.reset(&workingFrame);
+            requiredLiveClearEpoch = std::max(requiredLiveClearEpoch, meters.requestLiveClear());
             workingFrame.peakDecibels.fill(minimumDisplayDecibels);
             workingFrame.rmsDecibels.fill(minimumDisplayDecibels);
+            workingFrame.meterSequence = nextMeterSequence++;
             workingFrame.spectrumSequence
                 = workingFrame.spectrumSequence == std::numeric_limits<std::uint64_t>::max()
                 ? 1
@@ -412,7 +489,7 @@ struct AnalysisCoordinator::State final : SharedAnalysisScheduler::JobClient {
             hasPublishedAudioFrame.store(false, std::memory_order_release);
             staleFramesPublished.fetch_add(1, std::memory_order_relaxed);
             frameChanged = true;
-        } else if (frameChanged) {
+        } else if (consumedValidAudio) {
             hasPublishedAudioFrame.store(true, std::memory_order_release);
         }
 
@@ -456,6 +533,7 @@ struct AnalysisCoordinator::State final : SharedAnalysisScheduler::JobClient {
         result.emptyAnalysisRequestsAvoided
             = emptyAnalysisRequestsAvoided.load(std::memory_order_relaxed);
         result.staleFramesPublished = staleFramesPublished.load(std::memory_order_relaxed);
+        result.peakRmsUserResets = peakRmsUserResets.load(std::memory_order_relaxed);
         return result;
     }
 
@@ -468,11 +546,15 @@ struct AnalysisCoordinator::State final : SharedAnalysisScheduler::JobClient {
     VisualizationFrame workingFrame;
     std::uint64_t newestCapturedFrameEnd = 0;
     std::uint64_t nextCoalescedInputSequence = 1;
+    std::uint64_t nextMeterSequence = 1;
+    std::uint64_t requiredUserResetEpoch = 0;
+    std::uint64_t requiredLiveClearEpoch = 0;
     std::atomic<std::uint64_t> currentGeneration { 0 };
     std::atomic<std::uint64_t> captureRevision { 0 };
     std::atomic<std::uint64_t> lastAnalyzedCaptureRevision { 0 };
     std::atomic<bool> hasPublishedAudioFrame { false };
     std::atomic<bool> staleClearPending { false };
+    std::atomic<std::uint64_t> peakRmsResetPendingEpoch { 0 };
     std::atomic<std::uint64_t> staleClearRevision { 0 };
     std::atomic<std::uint64_t> jobsStarted { 0 };
     std::atomic<std::uint64_t> jobsCompleted { 0 };
@@ -488,6 +570,7 @@ struct AnalysisCoordinator::State final : SharedAnalysisScheduler::JobClient {
     std::atomic<std::uint64_t> meterCapturedFrameEnd { 0 };
     std::atomic<std::uint64_t> emptyAnalysisRequestsAvoided { 0 };
     std::atomic<std::uint64_t> staleFramesPublished { 0 };
+    std::atomic<std::uint64_t> peakRmsUserResets { 0 };
 };
 
 AnalysisCoordinator::AnalysisCoordinator()
@@ -510,13 +593,43 @@ AnalysisCoordinator::~AnalysisCoordinator()
 }
 
 void AnalysisCoordinator::captureAudioBlock(const float* const left, const float* const right,
-    const std::size_t frameCount, const double sampleRate) noexcept
+    const std::size_t frameCount, const double sampleRate,
+    const std::uint32_t channelCount) noexcept
 {
     const auto generation = captureGeneration_.load(std::memory_order_acquire);
     if (generation == 0 || frameCount == 0)
         return;
 
-    state_->captureAudioBlock(left, right, frameCount, sampleRate, generation);
+    state_->captureAudioBlock(left, right, frameCount, sampleRate, generation, channelCount);
+}
+
+void AnalysisCoordinator::setCaptureFormat(
+    const double sampleRate, const std::uint32_t channelCount) noexcept
+{
+    try {
+        const std::lock_guard lifecycleLock(lifecycleMutex_);
+        if (!std::isfinite(sampleRate) || sampleRate <= 0.0
+            || (channelCount != 1 && channelCount != 2)) {
+            return;
+        }
+
+        const auto formatChanged = !hasConfiguredFormat_
+            || sampleRatesDiffer(configuredSampleRate_, sampleRate)
+            || configuredChannelCount_ != channelCount;
+        if (!formatChanged)
+            return;
+
+        configuredSampleRate_ = sampleRate;
+        configuredChannelCount_ = channelCount;
+        hasConfiguredFormat_ = true;
+
+        if (captureGeneration_.load(std::memory_order_acquire) == 0 || client_ == nullptr)
+            return;
+
+        static_cast<void>(restartActiveGenerationLocked(true));
+    } catch (...) {
+        captureGeneration_.store(0, std::memory_order_release);
+    }
 }
 
 void AnalysisCoordinator::requestAnalysis() noexcept
@@ -616,23 +729,50 @@ void AnalysisCoordinator::setVisualizationActive(const bool shouldBeActive) noex
             return;
         }
 
-        const auto generation = client_->cancelAndAdvanceGeneration();
-        if (!client_->waitUntilIdle())
-            return;
-
-        state_->beginGeneration(generation);
-        const auto now
-            = std::chrono::duration_cast<std::chrono::nanoseconds>(Clock::now().time_since_epoch())
-                  .count();
-        const auto captureRevision = state_->latestCaptureRevision();
-        lastRequestedCaptureRevision_ = captureRevision;
-        lastObservedCaptureRevision_ = captureRevision;
-        lastObservedCaptureNanoseconds_ = now;
-        staleClearRequested_ = false;
-        nextAnalysisRequestNanoseconds_.store(0, std::memory_order_relaxed);
-        captureGeneration_.store(generation, std::memory_order_release);
+        static_cast<void>(restartActiveGenerationLocked(false));
     } catch (...) {
         captureGeneration_.store(0, std::memory_order_release);
+    }
+}
+
+bool AnalysisCoordinator::restartActiveGenerationLocked(const bool discardPendingCapture)
+{
+    captureGeneration_.store(0, std::memory_order_release);
+    staleClearRequested_ = false;
+    state_->cancelStaleClear();
+
+    const auto generation = client_->cancelAndAdvanceGeneration();
+    if (!client_->waitUntilIdle())
+        return false;
+
+    if (discardPendingCapture)
+        state_->discardPendingCapture();
+
+    state_->beginGeneration(generation);
+    const auto now
+        = std::chrono::duration_cast<std::chrono::nanoseconds>(Clock::now().time_since_epoch())
+              .count();
+    const auto captureRevision = state_->latestCaptureRevision();
+    lastRequestedCaptureRevision_ = captureRevision;
+    lastObservedCaptureRevision_ = captureRevision;
+    lastObservedCaptureNanoseconds_ = now;
+    staleClearRequested_ = false;
+    nextAnalysisRequestNanoseconds_.store(0, std::memory_order_relaxed);
+    captureGeneration_.store(generation, std::memory_order_release);
+    return true;
+}
+
+void AnalysisCoordinator::resetPeakRms() noexcept
+{
+    try {
+        const std::lock_guard lifecycleLock(lifecycleMutex_);
+        if (captureGeneration_.load(std::memory_order_acquire) == 0 || client_ == nullptr)
+            return;
+
+        state_->requestPeakRmsReset();
+        static_cast<void>(client_->request());
+    } catch (...) {
+        // A reset is diagnostic/presentation state and must never affect audio.
     }
 }
 

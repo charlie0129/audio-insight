@@ -44,6 +44,83 @@ inline constexpr std::size_t cachedDecibelTickCount
           (maximumCachedDecibelTick - minimumCachedDecibelTick) / cachedDecibelTickInterval)
     + 1;
 
+inline constexpr float peakRmsMinimumDecibels = -60.0F;
+inline constexpr float peakRmsMaximumDecibels = 3.0F;
+inline constexpr std::array<int, 8> peakRmsMajorDecibelTicks {
+    -60,
+    -48,
+    -36,
+    -24,
+    -12,
+    -6,
+    0,
+    3,
+};
+inline constexpr std::size_t maximumPeakRmsReadoutGlyphs = 6;
+// 20 * log10(maximum finite float) rounds to approximately +770.6 dB.
+inline constexpr int maximumFiniteFloatPeakRmsReadoutTenths = 7'706;
+
+enum class PeakRmsLevelRange : std::uint8_t {
+    cyan,
+    amber,
+    red,
+};
+
+struct PeakRmsReadout final {
+    enum class Kind : std::uint8_t {
+        minusInfinity,
+        decibelTenths,
+    };
+
+    Kind kind = Kind::minusInfinity;
+    int decibelTenths = -1'199;
+    PeakRmsLevelRange levelRange = PeakRmsLevelRange::cyan;
+};
+
+struct PeakRmsLogicalRect final {
+    float left = 0.0F;
+    float bottom = 0.0F;
+    float right = 0.0F;
+    float top = 0.0F;
+
+    [[nodiscard]] constexpr float width() const noexcept
+    {
+        return right > left ? right - left : 0.0F;
+    }
+
+    [[nodiscard]] constexpr float height() const noexcept
+    {
+        return top > bottom ? top - bottom : 0.0F;
+    }
+
+    [[nodiscard]] constexpr bool contains(float x, float y) const noexcept
+    {
+        return right > left && top > bottom && x >= left && x <= right && y >= bottom && y <= top;
+    }
+};
+
+struct PeakRmsPanelLayout final {
+    std::array<PeakRmsLogicalRect, 2> channelColumns { };
+    std::array<PeakRmsLogicalRect, 2> channelTracks { };
+    PeakRmsLogicalRect clearVisualBounds;
+    PeakRmsLogicalRect clearHitBounds;
+    float scaleBottom = 0.0F;
+    float scaleTop = 0.0F;
+    float tickLabelRight = 0.0F;
+    float tickLineLeft = 0.0F;
+    float tickLineRight = 0.0F;
+    float channelLabelBottom = 0.0F;
+    float readoutBottom = 0.0F;
+    float overBottom = 0.0F;
+    std::size_t channelCount = 0;
+    bool showTickLabels = false;
+    bool showReadouts = false;
+};
+
+struct PeakRmsTickLabelSelection final {
+    std::array<bool, peakRmsMajorDecibelTicks.size()> visible { };
+};
+
 /** The shared Spectrum/Spectrogram frequency-coordinate transform. */
 struct FrequencyAxisMapping final {
     float minimumFrequencyHz = 20.0F;
@@ -102,21 +179,52 @@ struct SpectrumDecibelTicks final {
 [[nodiscard]] SpectrumDecibelTicks makeSpectrumDecibelTicks(
     float floorDecibels, float ceilingDecibels, float axisLength) noexcept;
 
+/** Maps the accepted fixed Peak/RMS dB scale to [0, 1]. */
+[[nodiscard]] float mapPeakRmsDecibelsToUnit(float decibels) noexcept;
+
+/** Classifies one live peak for colour and a pre-cached one-decimal readout. */
+[[nodiscard]] PeakRmsReadout classifyPeakRmsReadout(float decibels) noexcept;
+
+/** Fits a cached meter label into one layout column without enlarging it. */
+[[nodiscard]] float fitPeakRmsTextScale(
+    float availableWidth, float unscaledTextWidth, float preferredScale) noexcept;
+
+/** Selects non-overlapping labels without removing any major tick geometry. */
+[[nodiscard]] PeakRmsTickLabelSelection selectPeakRmsTickLabels(
+    float axisLength, float labelHeight, float minimumGap = 2.0F) noexcept;
+
+/**
+    Computes the bounded local-point geometry for the Peak/RMS panel.
+
+    The result uses a bottom-left origin and never depends on drawable pixels,
+    so the same layout drives rendering, hit testing, Retina, and regular-density
+    displays.
+*/
+[[nodiscard]] PeakRmsPanelLayout calculatePeakRmsPanelLayout(float panelWidth, float panelHeight,
+    float headerHeight, std::uint32_t channelCount, float textHeight, float maximumTickLabelWidth,
+    float maximumReadoutWidth) noexcept;
+
 /** Compile-time proof inputs for the one bounded shared vertex buffer. */
 struct MetalVisualizationGeometryLimits final {
-    static constexpr std::size_t vertexCapacity = 8'192;
+    static constexpr std::size_t vertexCapacity = 8'448;
     static constexpr std::size_t maximumShellVertices = dashboardPanelCount * 36;
     static constexpr std::size_t maximumGridVertices
         = ((2 * maximumFrequencyAxisTickCount) + cachedDecibelTickCount) * 6;
     static constexpr std::size_t maximumSpectrumVertices = 2 * spectrumBinCount;
-    static constexpr std::size_t maximumMeterVertices = 2 * 3 * 6;
+    // Eight scale ticks, one five-quad CLEAR target, and four quads (track,
+    // RMS, live sample peak, held sample peak) for each of two channels.
+    static constexpr std::size_t maximumMeterVertices
+        = (peakRmsMajorDecibelTicks.size() + 5 + (2 * 4)) * 6;
     static constexpr std::size_t maximumFixedTextGlyphs = 114;
     static constexpr std::size_t maximumDecibelLabelGlyphs = 7;
+    // CLEAR, two channel labels, two OVER labels, two six-glyph readouts,
+    // and every fixed scale label.
+    static constexpr std::size_t maximumPeakRmsTextGlyphs = 5 + 2 + 8 + 12 + 20;
     static constexpr std::size_t maximumNumericAxisTextGlyphs
         = (2 * maximumFrequencyAxisTickCount * maximumFrequencyAxisLabelGlyphs)
         + (cachedDecibelTickCount * maximumDecibelLabelGlyphs);
     static constexpr std::size_t maximumTextVertices
-        = (maximumFixedTextGlyphs + maximumNumericAxisTextGlyphs) * 6;
+        = (maximumFixedTextGlyphs + maximumNumericAxisTextGlyphs + maximumPeakRmsTextGlyphs) * 6;
     static constexpr std::size_t maximumGeneratedVertices = maximumShellVertices
         + maximumGridVertices + maximumSpectrumVertices + maximumMeterVertices
         + maximumTextVertices;

@@ -72,6 +72,8 @@ PluginProcessor::PluginProcessor()
 
 void PluginProcessor::prepareToPlay(const double sampleRate, int)
 {
+    analysisCoordinator.setCaptureFormat(
+        sampleRate, static_cast<std::uint32_t>(getTotalNumInputChannels()));
     currentSampleRate = sampleRate;
 }
 
@@ -92,9 +94,10 @@ void PluginProcessor::processBlock(juce::AudioBuffer<float>& audio, juce::MidiBu
 
     if (inputChannels > 0 && audio.getNumSamples() > 0 && currentSampleRate > 0.0) {
         const auto* const left = audio.getReadPointer(0);
-        const auto* const right = inputChannels > 1 ? audio.getReadPointer(1) : left;
-        analysisCoordinator.captureAudioBlock(
-            left, right, static_cast<std::size_t>(audio.getNumSamples()), currentSampleRate);
+        const auto* const right = inputChannels > 1 ? audio.getReadPointer(1) : nullptr;
+        analysisCoordinator.captureAudioBlock(left, right,
+            static_cast<std::size_t>(audio.getNumSamples()), currentSampleRate,
+            static_cast<std::uint32_t>(inputChannels));
     }
 
     // The processor is intentionally transparent. JUCE supplies the input and
@@ -289,6 +292,11 @@ void PluginProcessor::requestAnalysis() noexcept
 void PluginProcessor::setVisualizationActive(const bool shouldBeActive) noexcept
 {
     analysisCoordinator.setVisualizationActive(shouldBeActive);
+}
+
+void PluginProcessor::resetPeakRms() noexcept
+{
+    analysisCoordinator.resetPeakRms();
 }
 
 bool PluginProcessor::copyLatestVisualizationFrame(VisualizationFrame& destination) const noexcept

@@ -101,6 +101,26 @@ public:
             processor.setVisualizationActive(false);
         });
 
+        testCase("prepareToPlay restarts active analysis only for a changed host format", [this] {
+            PluginProcessor processor;
+            processor.prepareToPlay(48'000.0, 128);
+            processor.setVisualizationActive(true);
+
+            VisualizationFrame initial;
+            expect(processor.copyLatestVisualizationFrame(initial));
+            expect(initial.generation != 0);
+
+            processor.prepareToPlay(96'000.0, 128);
+            VisualizationFrame changed;
+            expect(processor.copyLatestVisualizationFrame(changed));
+            expect(changed.generation > initial.generation);
+            expect(!changed.spectrumValid && !changed.meterValid);
+
+            processor.prepareToPlay(96'000.0, 128);
+            expect(!processor.copyLatestVisualizationFrame(changed));
+            processor.setVisualizationActive(false);
+        });
+
         testCase("Parameter state round-trips", [this] {
             PluginProcessor source;
             auto* floor = source.getParameters().getParameter("spectrumFloor");

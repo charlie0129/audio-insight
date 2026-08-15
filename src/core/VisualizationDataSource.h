@@ -16,6 +16,10 @@ public:
     // Called from editor lifecycle code, never from the audio callback.
     virtual void setVisualizationActive(bool shouldBeActive) noexcept = 0;
 
+    // Called only from non-real-time UI code. Clears Peak/RMS holds and OVER
+    // latches while preserving the current live measurements.
+    virtual void resetPeakRms() noexcept = 0;
+
     // Copies the most recent complete immutable frame without waiting.
     [[nodiscard]] virtual bool copyLatestVisualizationFrame(
         VisualizationFrame& destination) const noexcept = 0;

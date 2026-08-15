@@ -16,12 +16,17 @@ struct VisualizationFrame {
     std::array<float, spectrumBinCount> spectrumDecibels { };
     std::array<float, 2> peakDecibels { minimumDisplayDecibels, minimumDisplayDecibels };
     std::array<float, 2> rmsDecibels { minimumDisplayDecibels, minimumDisplayDecibels };
+    std::array<float, 2> heldPeakDecibels { minimumDisplayDecibels, minimumDisplayDecibels };
+    std::array<bool, 2> over { false, false };
 
     std::uint64_t generation = 0;
     std::uint64_t spectrumSequence = 0;
+    std::uint64_t meterSequence = 0;
     std::uint64_t capturedFrameEnd = 0;
     std::uint64_t droppedChunks = 0;
+    std::uint32_t channelCount = 0;
     double sampleRate = 0.0;
     bool spectrumValid = false;
+    bool meterValid = false;
 };
 } // namespace audio_insight

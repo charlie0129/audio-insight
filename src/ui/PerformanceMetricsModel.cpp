@@ -421,6 +421,8 @@ void appendRawSections(
         "Empty analysis requests avoided", analysis.emptyAnalysisRequestsAvoided));
     freshness.rows.emplace_back(rawUnsigned("analysis.staleFramesPublished",
         "Stale-clear frames published", analysis.staleFramesPublished));
+    freshness.rows.emplace_back(rawUnsigned(
+        "analysis.peakRmsUserResets", "Peak/RMS user resets", analysis.peakRmsUserResets));
     sections.emplace_back(std::move(freshness));
 }
 
@@ -641,6 +643,9 @@ void buildRates(const PerformanceMetricsSnapshot& current,
     appendRate(rates, "analysis.staleFramesPublished", "Stale-clear frames published", "frames/s",
         current.analysis.staleFramesPublished, previous.analysis.staleFramesPublished,
         elapsedSeconds, baselineIsValid);
+    appendRate(rates, "analysis.peakRmsUserResets", "Peak/RMS user resets", "resets/s",
+        current.analysis.peakRmsUserResets, previous.analysis.peakRmsUserResets, elapsedSeconds,
+        baselineIsValid);
 }
 
 void appendIntervalSample(
