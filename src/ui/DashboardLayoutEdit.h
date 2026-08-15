@@ -24,6 +24,8 @@ public:
 
     void begin() noexcept;
     void moveSplitter(DashboardSplitter splitter, int requestedGridIndex) noexcept;
+    /** Replaces one complete valid working snapshot without order-dependent clamping. */
+    [[nodiscard]] bool setWorkingSplits(const DashboardLayoutSplits& splits) noexcept;
     void resetWorkingLayout() noexcept;
 
     /** Commits an active edit and returns whether an edit was completed. */

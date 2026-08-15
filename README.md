@@ -69,6 +69,24 @@ installation, use the corresponding directories under `~/Library` instead:
 
 Restart or rescan the audio host after copying the bundle.
 
+## Using the analyzer dashboard
+
+Choose **Edit layout** to resize the fixed five-tile dashboard. Drag the row
+splitter, the splitter between Spectrum and Peak/RMS, or either lower-row
+splitter; all four snap to the dashboard grid and keep adjacent panels within
+their supported sizes. Tab and Shift-Tab move between splitters, arrow keys move
+the selected splitter one grid step, and Home or End moves it to a legal
+extreme.
+
+**Reset layout** loads the compiled defaults into the current edit without
+saving them. **Cancel** or Escape restores the layout from before editing, while
+**Done** saves the working layout. The saved layout is a per-user preference
+shared by AUv2 and VST3 instances; it is not stored in an individual DAW
+project.
+
+Spectrum **Smooth** is in **Settings**. Fresh instances default to approximately
+`0.35`; set it to `0` for immediate display with no renderer interpolation.
+
 ## Performance metrics
 
 The editor's **Metrics** toggle opens a per-instance observability panel beside

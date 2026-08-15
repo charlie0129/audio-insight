@@ -41,6 +41,15 @@ void DashboardLayoutEdit::moveSplitter(
     working = DashboardLayout::moveSplitter(working, splitter, requestedGridIndex);
 }
 
+bool DashboardLayoutEdit::setWorkingSplits(const DashboardLayoutSplits& splits) noexcept
+{
+    if (!editing || !DashboardLayout::isValid(splits))
+        return false;
+
+    working = splits;
+    return true;
+}
+
 void DashboardLayoutEdit::resetWorkingLayout() noexcept
 {
     if (editing)

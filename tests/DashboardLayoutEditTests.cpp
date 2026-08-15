@@ -79,6 +79,21 @@ public:
             expect(edit.committedSplits() == DashboardLayout::defaultSplits);
         }
 
+        beginTest("A complete renderer snapshot replaces working splits atomically");
+        {
+            DashboardLayoutEdit edit;
+            const DashboardLayoutSplits target { 26, 40, 34, 42 };
+
+            expect(!edit.setWorkingSplits(target));
+            edit.begin();
+            expect(edit.setWorkingSplits(target));
+            expect(edit.displayedSplits() == target);
+            expect(!edit.setWorkingSplits({ 22, 36, 35, 36 }));
+            expect(edit.displayedSplits() == target);
+            expect(edit.finish());
+            expect(edit.committedSplits() == target);
+        }
+
         beginTest("Done completes and must persist even when values are unchanged");
         {
             DashboardLayoutEdit edit;

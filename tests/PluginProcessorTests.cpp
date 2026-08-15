@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 
+#include "plugin/PluginEditor.h"
 #include "plugin/PluginProcessor.h"
 #include "ui/MetalVisualization.h"
 #include "ui/SpectrumSmoothingMapping.h"
@@ -22,6 +23,36 @@ juce::Component* findDescendantWithId(juce::Component& component, const juce::St
 
     return nullptr;
 }
+
+class EditorLayoutTemporaryDirectory final {
+public:
+    EditorLayoutTemporaryDirectory()
+        : directory(juce::File::getSpecialLocation(juce::File::tempDirectory)
+                  .getNonexistentChildFile("audio-insight-plugin-editor-layout-tests", { }, false))
+    {
+        created = directory.createDirectory().wasOk();
+    }
+
+    ~EditorLayoutTemporaryDirectory()
+    {
+        if (created)
+            directory.deleteRecursively(false);
+    }
+
+    [[nodiscard]] bool wasCreated() const noexcept
+    {
+        return created;
+    }
+
+    [[nodiscard]] juce::File child(const juce::String& name) const
+    {
+        return directory.getChildFile(name);
+    }
+
+private:
+    juce::File directory;
+    bool created = false;
+};
 } // namespace
 
 class PluginProcessorTests final : public juce::UnitTest {
@@ -553,13 +584,23 @@ public:
 
         testCase("The custom editor starts detached and inactive", [this] {
             PluginProcessor processor;
+            EditorLayoutTemporaryDirectory temporary;
+            expect(temporary.wasCreated());
+            if (!temporary.wasCreated())
+                return;
+
+            const auto layoutFile = temporary.child("dashboard-layout.json");
+            const DashboardLayoutStore layoutStore(layoutFile);
+            constexpr DashboardLayoutSplits initialLayout { 20, 32, 24, 38 };
+            expect(layoutStore.commit(initialLayout));
             auto* metrics = processor.getParameters().getParameter("performanceMetrics");
             expect(metrics != nullptr);
 
             if (metrics != nullptr)
                 metrics->setValueNotifyingHost(1.0F);
 
-            std::unique_ptr<juce::AudioProcessorEditor> editor { processor.createEditor() };
+            std::unique_ptr<juce::AudioProcessorEditor> editor { new PluginEditor(
+                processor, processor, layoutStore) };
 
             expect(editor != nullptr);
 
@@ -579,23 +620,52 @@ public:
             auto* metricsPanel = editor->findChildWithID("performanceMetricsPanel");
             auto* settingsControl = editor->findChildWithID("analyzerSettingsToggle");
             auto* settingsPanel = editor->findChildWithID("analyzerSettingsPanel");
+            auto* editLayoutControl = editor->findChildWithID("dashboardLayoutEditToggle");
+            auto* doneLayoutControl = editor->findChildWithID("dashboardLayoutDone");
+            auto* cancelLayoutControl = editor->findChildWithID("dashboardLayoutCancel");
+            auto* resetLayoutControl = editor->findChildWithID("dashboardLayoutReset");
             auto* visualizationComponent = editor->findChildWithID("metalVisualization");
             expect(metricsControl != nullptr);
             expect(metricsPanel != nullptr);
             expect(settingsControl != nullptr);
             expect(settingsPanel != nullptr);
+            expect(editLayoutControl != nullptr);
+            expect(doneLayoutControl != nullptr);
+            expect(cancelLayoutControl != nullptr);
+            expect(resetLayoutControl != nullptr);
             expect(visualizationComponent != nullptr);
             expect(metricsPanel != nullptr && metricsPanel->isVisible());
             expect(settingsPanel != nullptr && !settingsPanel->isVisible());
 
             auto* metricsButton = dynamic_cast<juce::Button*>(metricsControl);
             auto* settingsButton = dynamic_cast<juce::Button*>(settingsControl);
+            auto* editLayoutButton = dynamic_cast<juce::Button*>(editLayoutControl);
+            auto* doneLayoutButton = dynamic_cast<juce::Button*>(doneLayoutControl);
+            auto* cancelLayoutButton = dynamic_cast<juce::Button*>(cancelLayoutControl);
+            auto* resetLayoutButton = dynamic_cast<juce::Button*>(resetLayoutControl);
             auto* visualization = dynamic_cast<MetalVisualization*>(visualizationComponent);
             expect(metricsButton != nullptr);
             expect(settingsButton != nullptr);
+            expect(editLayoutButton != nullptr);
+            expect(doneLayoutButton != nullptr);
+            expect(cancelLayoutButton != nullptr);
+            expect(resetLayoutButton != nullptr);
             expect(visualization != nullptr);
 
+            if (editLayoutButton != nullptr) {
+                expect(editLayoutButton->isVisible());
+                expect(!editLayoutButton->isEnabled());
+            }
+
+            if (doneLayoutButton != nullptr && cancelLayoutButton != nullptr
+                && resetLayoutButton != nullptr) {
+                expect(!doneLayoutButton->isVisible());
+                expect(!cancelLayoutButton->isVisible());
+                expect(!resetLayoutButton->isVisible());
+            }
+
             if (visualization != nullptr) {
+                expect(visualization->getDashboardLayoutSplits() == initialLayout);
                 const auto renderSettings = visualization->getSpectrumSettings();
                 expectWithinAbsoluteError(renderSettings.smoothing,
                     static_cast<float>(
@@ -657,6 +727,48 @@ public:
                 expect(!metricsPanel->isVisible());
                 if (metrics != nullptr)
                     expectWithinAbsoluteError(metrics->getValue(), 0.0F, 0.0001F);
+
+                if (editLayoutButton != nullptr && doneLayoutButton != nullptr
+                    && cancelLayoutButton != nullptr && resetLayoutButton != nullptr
+                    && visualization != nullptr) {
+                    expect(editLayoutButton->isEnabled());
+                    const auto originalSplits = visualization->getDashboardLayoutSplits();
+                    editLayoutButton->onClick();
+                    expect(visualization->isDashboardLayoutEditing());
+                    expect(!editLayoutButton->isVisible());
+                    expect(doneLayoutButton->isVisible());
+                    expect(cancelLayoutButton->isVisible());
+                    expect(resetLayoutButton->isVisible());
+
+                    visualization->setDashboardLayoutSplits({ 14, 24, 16, 36 });
+                    resetLayoutButton->onClick();
+                    expect(visualization->getDashboardLayoutSplits()
+                        == DashboardLayout::defaultSplits);
+
+                    visualization->setDashboardLayoutSplits({ 14, 24, 16, 36 });
+                    cancelLayoutButton->onClick();
+                    expect(!visualization->isDashboardLayoutEditing());
+                    expect(visualization->getDashboardLayoutSplits() == originalSplits);
+                    expect(editLayoutButton->isVisible());
+                    expect(!doneLayoutButton->isVisible());
+
+                    editor->setVisible(true);
+                    editLayoutButton->onClick();
+                    visualization->setDashboardLayoutSplits({ 26, 40, 34, 42 });
+                    editor->setVisible(false);
+                    expect(!visualization->isDashboardLayoutEditing());
+                    expect(visualization->getDashboardLayoutSplits() == originalSplits);
+                    editor->setVisible(true);
+
+                    editLayoutButton->onClick();
+                    constexpr DashboardLayoutSplits savedLayout { 26, 40, 34, 42 };
+                    visualization->setDashboardLayoutSplits(savedLayout);
+                    doneLayoutButton->onClick();
+                    expect(!visualization->isDashboardLayoutEditing());
+                    expect(visualization->getDashboardLayoutSplits() == savedLayout);
+                    expect(layoutStore.load() == savedLayout);
+                    expectEquals(doneLayoutButton->getButtonText(), juce::String("Done"));
+                }
             }
 
             const auto telemetry = processor.getAnalysisTelemetry();

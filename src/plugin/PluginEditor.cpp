@@ -185,8 +185,15 @@ private:
 };
 
 PluginEditor::PluginEditor(PluginProcessor& processorToUse, VisualizationDataSource& dataSource)
+    : PluginEditor(processorToUse, dataSource, DashboardLayoutStore { })
+{
+}
+
+PluginEditor::PluginEditor(PluginProcessor& processorToUse, VisualizationDataSource& dataSource,
+    DashboardLayoutStore layoutStoreToUse)
     : AudioProcessorEditor(processorToUse), ComponentMovementWatcher(this),
-      processor_(processorToUse), visualization(dataSource),
+      processor_(processorToUse), dashboardLayoutStore(std::move(layoutStoreToUse)),
+      dashboardLayoutEdit(dashboardLayoutStore.load()), visualization(dataSource),
       metricsPanel(
           [this] {
               return PerformanceMetricsSnapshot { visualization.getRenderTelemetry(),
@@ -211,6 +218,8 @@ PluginEditor::PluginEditor(PluginProcessor& processorToUse, VisualizationDataSou
     setResizeLimits(720, 420, 2560, 1600);
 
     visualization.setComponentID("metalVisualization");
+    visualization.setDashboardLayoutSplits(dashboardLayoutEdit.displayedSplits());
+    visualization.setDashboardLayoutEditCancelCallback([this] { cancelDashboardLayoutEdit(); });
     addAndMakeVisible(visualization);
     addChildComponent(metricsPanel);
     visualization.setEffectiveActivityCallback(
@@ -224,6 +233,36 @@ PluginEditor::PluginEditor(PluginProcessor& processorToUse, VisualizationDataSou
     settingsButton.setColour(juce::TextButton::textColourOnId, primaryText);
     settingsButton.onClick = [this] { setSettingsVisible(!utilityState.isSettingsOpen()); };
     addAndMakeVisible(settingsButton);
+
+    editLayoutButton.setComponentID("dashboardLayoutEditToggle");
+    editLayoutButton.setTooltip("Adjust the four dashboard width and height splitters");
+    editLayoutButton.setColour(juce::TextButton::buttonColourId, controlBackground.brighter(0.08F));
+    editLayoutButton.setColour(juce::TextButton::textColourOffId, secondaryText);
+    editLayoutButton.onClick = [this] { beginDashboardLayoutEdit(); };
+    addAndMakeVisible(editLayoutButton);
+
+    doneLayoutButton.setComponentID("dashboardLayoutDone");
+    doneLayoutButton.setTooltip("Commit and save this dashboard layout");
+    doneLayoutButton.setColour(juce::TextButton::buttonColourId, accent.darker(0.45F));
+    doneLayoutButton.setColour(juce::TextButton::textColourOffId, primaryText);
+    doneLayoutButton.onClick = [this] { finishDashboardLayoutEdit(); };
+    addChildComponent(doneLayoutButton);
+
+    cancelLayoutButton.setComponentID("dashboardLayoutCancel");
+    cancelLayoutButton.setTooltip("Discard this layout edit");
+    cancelLayoutButton.setColour(
+        juce::TextButton::buttonColourId, controlBackground.brighter(0.08F));
+    cancelLayoutButton.setColour(juce::TextButton::textColourOffId, secondaryText);
+    cancelLayoutButton.onClick = [this] { cancelDashboardLayoutEdit(); };
+    addChildComponent(cancelLayoutButton);
+
+    resetLayoutButton.setComponentID("dashboardLayoutReset");
+    resetLayoutButton.setTooltip("Load the compiled default layout into this edit");
+    resetLayoutButton.setColour(
+        juce::TextButton::buttonColourId, controlBackground.brighter(0.08F));
+    resetLayoutButton.setColour(juce::TextButton::textColourOffId, secondaryText);
+    resetLayoutButton.onClick = [this] { resetDashboardLayoutEdit(); };
+    addChildComponent(resetLayoutButton);
 
     metricsButton.setComponentID("performanceMetricsToggle");
     metricsButton.setTooltip("Show every renderer and analysis-pipeline metric for this instance");
@@ -267,8 +306,14 @@ PluginEditor::~PluginEditor()
     visualization.setRenderingActive(false);
 
     settingsButton.onClick = nullptr;
+    editLayoutButton.onClick = nullptr;
+    doneLayoutButton.onClick = nullptr;
+    cancelLayoutButton.onClick = nullptr;
+    resetLayoutButton.onClick = nullptr;
     metricsButton.onClick = nullptr;
     aboutButton.onClick = nullptr;
+    visualization.setDashboardLayoutEditCancelCallback({ });
+    visualization.setDashboardLayoutEditing(false);
     aboutOverlay->clearCloseAction();
 }
 
@@ -293,24 +338,30 @@ void PluginEditor::resized()
     auto bounds = getLocalBounds();
     auto controls = bounds.removeFromTop(controlStripHeight).reduced(12, 8);
 
-    auto aboutArea = controls.removeFromRight(72);
-    aboutButton.setBounds(aboutArea);
+    auto editControls = controls;
+    doneLayoutButton.setBounds(editControls.removeFromRight(58));
+    editControls.removeFromRight(8);
+    cancelLayoutButton.setBounds(editControls.removeFromRight(64));
+    editControls.removeFromRight(8);
+    resetLayoutButton.setBounds(editControls.removeFromRight(92));
 
+    aboutButton.setBounds(controls.removeFromRight(72));
     controls.removeFromRight(8);
-    auto metricsArea = controls.removeFromRight(68);
-    metricsButton.setBounds(metricsArea);
-
+    metricsButton.setBounds(controls.removeFromRight(68));
     controls.removeFromRight(8);
-    auto settingsArea = controls.removeFromRight(76);
-    settingsButton.setBounds(settingsArea);
+    settingsButton.setBounds(controls.removeFromRight(76));
+    controls.removeFromRight(8);
+    editLayoutButton.setBounds(controls.removeFromRight(88));
 
     const auto aboutIsVisible = aboutOverlay != nullptr && aboutOverlay->isVisible();
+    const auto editingLayout = dashboardLayoutEdit.isEditing();
     const auto settingsPresentation = utilityState.settingsPresentation(bounds.getWidth());
     const auto settingsIsVisible
-        = !aboutIsVisible && settingsPresentation != SettingsPresentation::closed;
+        = !aboutIsVisible && !editingLayout && settingsPresentation != SettingsPresentation::closed;
     const auto dashboardIsVisible
         = !aboutIsVisible && utilityState.shouldRenderDashboard(bounds.getWidth());
-    const auto metricsAreVisible = !aboutIsVisible && utilityState.isMetricsVisible();
+    const auto metricsAreVisible
+        = !aboutIsVisible && !editingLayout && utilityState.isMetricsVisible();
 
     settingsPanel.setVisible(settingsIsVisible);
     metricsPanel.setVisible(metricsAreVisible);
@@ -340,6 +391,11 @@ void PluginEditor::resized()
 
     visualization.setBounds(bounds);
     aboutOverlay->setBounds(getLocalBounds());
+    updateRenderingState();
+}
+
+void PluginEditor::visibilityChanged()
+{
     updateRenderingState();
 }
 
@@ -392,8 +448,25 @@ void PluginEditor::updateSpectrumSettings(const AnalyzerConfiguration& configura
 
 void PluginEditor::updateRenderingState()
 {
-    editorIsShowing = isShowing();
-    editorIsAttached = getPeer() != nullptr;
+    const auto isNowShowing = isShowing();
+    const auto isNowAttached = getPeer() != nullptr;
+    const auto componentIsNowVisible = isVisible();
+    const auto becameHiddenOrDetached = (editorIsShowing && !isNowShowing)
+        || (editorIsAttached && !isNowAttached)
+        || (editorComponentIsVisible && !componentIsNowVisible);
+    editorIsShowing = isNowShowing;
+    editorIsAttached = isNowAttached;
+    editorComponentIsVisible = componentIsNowVisible;
+
+    if (becameHiddenOrDetached && dashboardLayoutEdit.cancel()) {
+        visualization.setDashboardLayoutEditing(false);
+        visualization.setDashboardLayoutSplits(dashboardLayoutEdit.committedSplits());
+        doneLayoutButton.setButtonText("Done");
+        doneLayoutButton.setTooltip("Commit and save this dashboard layout");
+        updateMainControlVisibility();
+        resized();
+        return;
+    }
 
     const auto aboutIsVisible = aboutOverlay != nullptr && aboutOverlay->isVisible();
     const auto contentWidth = getWidth();
@@ -427,7 +500,30 @@ void PluginEditor::updateUtilityPresentation()
             "Show every renderer and analysis-pipeline metric for this instance");
     }
 
+    updateMainControlVisibility();
     resized();
+}
+
+void PluginEditor::updateMainControlVisibility()
+{
+    const auto editingLayout = dashboardLayoutEdit.isEditing();
+    const auto showNormalControls = mainControlsRequestedVisible && !editingLayout;
+    const auto showLayoutEditControls = mainControlsRequestedVisible && editingLayout;
+
+    settingsButton.setVisible(showNormalControls);
+    metricsButton.setVisible(showNormalControls);
+    aboutButton.setVisible(showNormalControls);
+    editLayoutButton.setVisible(showNormalControls);
+    doneLayoutButton.setVisible(showLayoutEditControls);
+    cancelLayoutButton.setVisible(showLayoutEditControls);
+    resetLayoutButton.setVisible(showLayoutEditControls);
+
+    const auto canBeginLayoutEdit
+        = !utilityState.isSettingsOpen() && !utilityState.isMetricsVisible();
+    editLayoutButton.setEnabled(canBeginLayoutEdit);
+    editLayoutButton.setTooltip(canBeginLayoutEdit
+            ? "Adjust the four dashboard width and height splitters"
+            : "Close Settings or Metrics before editing the dashboard layout");
 }
 
 void PluginEditor::synchronizeMetricsRequestedFromParameter()
@@ -478,9 +574,8 @@ void PluginEditor::setSettingsVisible(const bool shouldBeVisible)
 
 void PluginEditor::setMainControlsVisible(const bool shouldBeVisible)
 {
-    settingsButton.setVisible(shouldBeVisible);
-    metricsButton.setVisible(shouldBeVisible);
-    aboutButton.setVisible(shouldBeVisible);
+    mainControlsRequestedVisible = shouldBeVisible;
+    updateMainControlVisibility();
 }
 
 void PluginEditor::setAboutVisible(bool shouldBeVisible)
@@ -506,5 +601,80 @@ void PluginEditor::setAboutVisible(bool shouldBeVisible)
 
     resized();
     updateRenderingState();
+}
+
+void PluginEditor::beginDashboardLayoutEdit()
+{
+    if (dashboardLayoutEdit.isEditing() || utilityState.isSettingsOpen()
+        || utilityState.isMetricsVisible()) {
+        return;
+    }
+
+    dashboardLayoutEdit.begin();
+    doneLayoutButton.setButtonText("Done");
+    doneLayoutButton.setTooltip("Commit and save this dashboard layout");
+    visualization.setDashboardLayoutSplits(dashboardLayoutEdit.displayedSplits());
+    visualization.setDashboardLayoutEditing(true);
+    updateMainControlVisibility();
+    resized();
+}
+
+void PluginEditor::finishDashboardLayoutEdit()
+{
+    if (!dashboardLayoutEdit.isEditing())
+        return;
+
+    const auto splits = visualization.getDashboardLayoutSplits();
+    if (!dashboardLayoutEdit.setWorkingSplits(splits))
+        return;
+
+    if (!dashboardLayoutStore.commit(splits)) {
+        doneLayoutButton.setButtonText("Retry");
+        doneLayoutButton.setTooltip(
+            "The dashboard layout could not be saved; retry or cancel this edit");
+        return;
+    }
+
+    if (!dashboardLayoutEdit.finish())
+        return;
+
+    visualization.setDashboardLayoutEditing(false);
+    visualization.setDashboardLayoutSplits(dashboardLayoutEdit.committedSplits());
+    doneLayoutButton.setButtonText("Done");
+    doneLayoutButton.setTooltip("Commit and save this dashboard layout");
+    updateMainControlVisibility();
+    resized();
+
+    if (editLayoutButton.isShowing() && editLayoutButton.isEnabled())
+        editLayoutButton.grabKeyboardFocus();
+    else if (metricsButton.isShowing())
+        metricsButton.grabKeyboardFocus();
+}
+
+void PluginEditor::cancelDashboardLayoutEdit()
+{
+    if (!dashboardLayoutEdit.cancel())
+        return;
+
+    visualization.setDashboardLayoutEditing(false);
+    visualization.setDashboardLayoutSplits(dashboardLayoutEdit.committedSplits());
+    doneLayoutButton.setButtonText("Done");
+    doneLayoutButton.setTooltip("Commit and save this dashboard layout");
+    updateMainControlVisibility();
+    resized();
+
+    if (editLayoutButton.isShowing() && editLayoutButton.isEnabled())
+        editLayoutButton.grabKeyboardFocus();
+    else if (metricsButton.isShowing())
+        metricsButton.grabKeyboardFocus();
+}
+
+void PluginEditor::resetDashboardLayoutEdit()
+{
+    if (!dashboardLayoutEdit.isEditing())
+        return;
+
+    dashboardLayoutEdit.resetWorkingLayout();
+    visualization.setDashboardLayoutSplits(dashboardLayoutEdit.displayedSplits());
 }
 } // namespace audio_insight

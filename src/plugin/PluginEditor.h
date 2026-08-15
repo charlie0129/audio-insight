@@ -4,6 +4,8 @@
 
 #include "../core/VisualizationDataSource.h"
 #include "../ui/AnalyzerSettingsPanel.h"
+#include "../ui/DashboardLayoutEdit.h"
+#include "../ui/DashboardLayoutStore.h"
 #include "../ui/EditorUtilityState.h"
 #include "../ui/MetalVisualization.h"
 #include "../ui/PerformanceMetricsPanel.h"
@@ -27,10 +29,13 @@ class PluginEditor final : public juce::AudioProcessorEditor,
                            private juce::Timer {
 public:
     PluginEditor(PluginProcessor& processor, VisualizationDataSource& dataSource);
+    PluginEditor(PluginProcessor& processor, VisualizationDataSource& dataSource,
+        DashboardLayoutStore layoutStore);
     ~PluginEditor() override;
 
     void paint(juce::Graphics& graphics) override;
     void resized() override;
+    void visibilityChanged() override;
 
 private:
     class AboutOverlay;
@@ -45,18 +50,29 @@ private:
     void updateSpectrumSettings(const AnalyzerConfiguration& configuration) noexcept;
     void updateRenderingState();
     void updateUtilityPresentation();
+    void updateMainControlVisibility();
     void synchronizeMetricsRequestedFromParameter();
     void setMetricsParameterRequested(bool requested);
     void setSettingsVisible(bool shouldBeVisible);
     void setMainControlsVisible(bool shouldBeVisible);
     void setAboutVisible(bool shouldBeVisible);
+    void beginDashboardLayoutEdit();
+    void finishDashboardLayoutEdit();
+    void cancelDashboardLayoutEdit();
+    void resetDashboardLayoutEdit();
 
     PluginProcessor& processor_;
+    DashboardLayoutStore dashboardLayoutStore;
+    DashboardLayoutEdit dashboardLayoutEdit;
     MetalVisualization visualization;
     PerformanceMetricsPanel metricsPanel;
     EditorUtilityState utilityState;
     AnalyzerSettingsPanel settingsPanel;
 
+    juce::TextButton editLayoutButton { "Edit layout" };
+    juce::TextButton doneLayoutButton { "Done" };
+    juce::TextButton cancelLayoutButton { "Cancel" };
+    juce::TextButton resetLayoutButton { "Reset layout" };
     juce::TextButton settingsButton { "Settings" };
     juce::TextButton metricsButton { "Metrics" };
     juce::TextButton aboutButton { "About" };
@@ -69,6 +85,8 @@ private:
 
     bool editorIsShowing = false;
     bool editorIsAttached = false;
+    bool editorComponentIsVisible = false;
+    bool mainControlsRequestedVisible = true;
     std::atomic<bool> shuttingDown { false };
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR(PluginEditor)
