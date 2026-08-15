@@ -204,6 +204,12 @@ target_sources(AudioInsight
         src/plugin/PluginEditor.h
         src/plugin/PluginProcessor.cpp
         src/plugin/PluginProcessor.h
+        src/ui/DashboardLayout.cpp
+        src/ui/DashboardLayout.h
+        src/ui/DashboardLayoutEdit.cpp
+        src/ui/DashboardLayoutEdit.h
+        src/ui/DashboardLayoutStore.cpp
+        src/ui/DashboardLayoutStore.h
         src/ui/FrameLatencyHistory.cpp
         src/ui/FrameLatencyHistory.h
         src/ui/MetalVisualization.h
@@ -258,6 +264,12 @@ source_group(TREE "${CMAKE_CURRENT_SOURCE_DIR}" FILES
     src/plugin/PluginEditor.h
     src/plugin/PluginProcessor.cpp
     src/plugin/PluginProcessor.h
+    src/ui/DashboardLayout.cpp
+    src/ui/DashboardLayout.h
+    src/ui/DashboardLayoutEdit.cpp
+    src/ui/DashboardLayoutEdit.h
+    src/ui/DashboardLayoutStore.cpp
+    src/ui/DashboardLayoutStore.h
     src/ui/FrameLatencyHistory.cpp
     src/ui/FrameLatencyHistory.h
     src/ui/MetalVisualization.h
@@ -295,6 +307,12 @@ if(BUILD_TESTING)
             src/plugin/PluginEditor.h
             src/plugin/PluginProcessor.cpp
             src/plugin/PluginProcessor.h
+            src/ui/DashboardLayout.cpp
+            src/ui/DashboardLayout.h
+            src/ui/DashboardLayoutEdit.cpp
+            src/ui/DashboardLayoutEdit.h
+            src/ui/DashboardLayoutStore.cpp
+            src/ui/DashboardLayoutStore.h
             src/ui/FrameLatencyHistory.cpp
             src/ui/FrameLatencyHistory.h
             src/ui/MetalVisualization.h
@@ -307,6 +325,9 @@ if(BUILD_TESTING)
             src/ui/PresentedFrameHistory.h
             tests/AnalysisCoordinatorTests.cpp
             tests/AnalysisCoreTests.cpp
+            tests/DashboardLayoutTests.cpp
+            tests/DashboardLayoutEditTests.cpp
+            tests/DashboardLayoutStoreTests.cpp
             tests/FrameLatencyHistoryTests.cpp
             tests/MetalVisualizationTests.cpp
             tests/PerformanceMetricsModelTests.cpp
@@ -371,6 +392,12 @@ if(BUILD_TESTING)
         src/plugin/PluginEditor.h
         src/plugin/PluginProcessor.cpp
         src/plugin/PluginProcessor.h
+        src/ui/DashboardLayout.cpp
+        src/ui/DashboardLayout.h
+        src/ui/DashboardLayoutEdit.cpp
+        src/ui/DashboardLayoutEdit.h
+        src/ui/DashboardLayoutStore.cpp
+        src/ui/DashboardLayoutStore.h
         src/ui/FrameLatencyHistory.cpp
         src/ui/FrameLatencyHistory.h
         src/ui/MetalVisualization.h
@@ -383,6 +410,9 @@ if(BUILD_TESTING)
         src/ui/PresentedFrameHistory.h
         tests/AnalysisCoordinatorTests.cpp
         tests/AnalysisCoreTests.cpp
+        tests/DashboardLayoutTests.cpp
+        tests/DashboardLayoutEditTests.cpp
+        tests/DashboardLayoutStoreTests.cpp
         tests/FrameLatencyHistoryTests.cpp
         tests/MetalVisualizationTests.cpp
         tests/PerformanceMetricsModelTests.cpp
