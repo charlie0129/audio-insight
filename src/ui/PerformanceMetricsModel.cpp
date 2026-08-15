@@ -70,6 +70,28 @@ PerformanceMetricRow rawDouble(std::string fieldName, std::string label, const d
         formatRawDouble(value), std::move(unit), PerformanceMetricKind::raw };
 }
 
+PerformanceMetricRow rawLoudness(
+    std::string fieldName, std::string label, const double value, const bool valid)
+{
+    auto display = std::string("not-ready");
+    auto raw = display;
+    if (valid) {
+        if (std::isinf(value) && std::signbit(value)) {
+            display = "-infinity";
+            raw = display;
+        } else if (std::isfinite(value)) {
+            display = formatFinite(value, 1);
+            raw = formatRawDouble(value);
+        } else {
+            display = "invalid";
+            raw = display;
+        }
+    }
+
+    return { std::move(fieldName), std::move(label), std::move(display), "LUFS", std::move(raw),
+        "LUFS", PerformanceMetricKind::raw };
+}
+
 PerformanceMetricRow rawDuration(
     std::string fieldName, std::string label, const std::uint64_t nanoseconds)
 {
@@ -337,6 +359,30 @@ void appendRawSections(
     stereoRender.rows.emplace_back(rawBoolean("metal.stereoMono", "Mono input", metal.stereoMono));
     sections.emplace_back(std::move(stereoRender));
 
+    PerformanceMetricGroup loudnessRender { "Renderer Loudness", { } };
+    loudnessRender.rows.emplace_back(rawUnsigned("metal.lastLoudnessSequence",
+        "Last accepted Loudness sequence", metal.lastLoudnessSequence));
+    loudnessRender.rows.emplace_back(rawUnsigned("metal.loudnessMeasurementCapturedFrameEnd",
+        "Measurement captured-frame endpoint", metal.loudnessMeasurementCapturedFrameEnd,
+        "frames"));
+    loudnessRender.rows.emplace_back(rawUnsigned("metal.loudnessIntegratedCapturedFrameEnd",
+        "Integrated captured-frame endpoint", metal.loudnessIntegratedCapturedFrameEnd, "frames"));
+    loudnessRender.rows.emplace_back(rawLoudness("metal.loudnessMomentaryLufs",
+        "Momentary Loudness", metal.loudnessMomentaryLufs, metal.loudnessMomentaryValid));
+    loudnessRender.rows.emplace_back(rawLoudness("metal.loudnessShortTermLufs",
+        "Short-term Loudness", metal.loudnessShortTermLufs, metal.loudnessShortTermValid));
+    loudnessRender.rows.emplace_back(rawLoudness("metal.loudnessIntegratedLufs",
+        "Integrated Loudness", metal.loudnessIntegratedLufs, metal.loudnessIntegratedValid));
+    loudnessRender.rows.emplace_back(rawDouble("metal.loudnessReferenceLufs",
+        "Presentation reference", metal.loudnessReferenceLufs, "LUFS", 1));
+    loudnessRender.rows.emplace_back(rawBoolean("metal.loudnessMomentaryValid",
+        "Momentary measurement valid", metal.loudnessMomentaryValid));
+    loudnessRender.rows.emplace_back(rawBoolean("metal.loudnessShortTermValid",
+        "Short-term measurement valid", metal.loudnessShortTermValid));
+    loudnessRender.rows.emplace_back(rawBoolean("metal.loudnessIntegratedValid",
+        "Integrated measurement valid", metal.loudnessIntegratedValid));
+    sections.emplace_back(std::move(loudnessRender));
+
     PerformanceMetricGroup timing { "Renderer timing", { } };
     timing.rows.emplace_back(rawDuration(
         "metal.lastCpuEncodeNanoseconds", "Last CPU encode", metal.lastCpuEncodeNanoseconds));
@@ -419,6 +465,104 @@ void appendRawSections(
     meters.rows.emplace_back(rawUnsigned(
         "analysis.meters.readySlots", "Ready slots", analysis.meters.readySlots, "slots"));
     sections.emplace_back(std::move(meters));
+
+    const auto& loudness = analysis.loudness;
+    const auto& loudnessMeasurement = analysis.loudnessMeasurement;
+    PerformanceMetricGroup loudnessAnalysis { "Loudness analysis and gating", { } };
+    loudnessAnalysis.rows.emplace_back(rawUnsigned(
+        "analysis.loudness.inputChunks", "Input chunks", loudness.inputChunks, "chunks"));
+    loudnessAnalysis.rows.emplace_back(rawUnsigned(
+        "analysis.loudness.inputFrames", "Input frames", loudness.inputFrames, "frames"));
+    loudnessAnalysis.rows.emplace_back(rawUnsigned("analysis.loudness.measurementCompletions",
+        "Measurement completions", loudness.measurementCompletions, "measurements"));
+    loudnessAnalysis.rows.emplace_back(rawUnsigned("analysis.loudness.integrationBlockCompletions",
+        "Integration block completions", loudness.integrationBlockCompletions, "blocks"));
+    loudnessAnalysis.rows.emplace_back(
+        rawUnsigned("analysis.loudness.fullResets", "Full resets", loudness.fullResets, "resets"));
+    loudnessAnalysis.rows.emplace_back(rawUnsigned(
+        "analysis.loudness.explicitResets", "Explicit resets", loudness.explicitResets, "resets"));
+    loudnessAnalysis.rows.emplace_back(rawUnsigned("analysis.loudness.generationResets",
+        "Capture-generation resets", loudness.generationResets, "resets"));
+    loudnessAnalysis.rows.emplace_back(rawUnsigned("analysis.loudness.discontinuityResets",
+        "Discontinuity resets", loudness.discontinuityResets, "resets"));
+    loudnessAnalysis.rows.emplace_back(rawUnsigned(
+        "analysis.loudness.formatResets", "Format resets", loudness.formatResets, "resets"));
+    loudnessAnalysis.rows.emplace_back(rawUnsigned("analysis.loudness.invalidInputResets",
+        "Invalid-input resets", loudness.invalidInputResets, "resets"));
+    loudnessAnalysis.rows.emplace_back(rawUnsigned("analysis.loudness.integrationResets",
+        "Integration-only resets", loudness.integrationResets, "resets"));
+    loudnessAnalysis.rows.emplace_back(rawUnsigned("analysis.loudness.liveMeasurementClears",
+        "Live-measurement clears", loudness.liveMeasurementClears, "clears"));
+    loudnessAnalysis.rows.emplace_back(rawUnsigned("analysis.loudness.integrationCapacityOverflows",
+        "Integration-capacity overflows", loudness.integrationCapacityOverflows, "overflows"));
+    loudnessAnalysis.rows.emplace_back(rawUnsigned("analysis.loudness.integrationBlocksSinceReset",
+        "Current integration blocks", loudness.integrationBlocksSinceReset, "blocks"));
+    loudnessAnalysis.rows.emplace_back(rawUnsigned("analysis.loudness.absoluteGatedBlocks",
+        "Current absolute-gated blocks", loudness.absoluteGatedBlocks, "blocks"));
+    loudnessAnalysis.rows.emplace_back(rawUnsigned("analysis.loudness.relativeGatedBlocks",
+        "Current relative-gated blocks", loudness.relativeGatedBlocks, "blocks"));
+    loudnessAnalysis.rows.emplace_back(
+        rawUnsigned("analysis.loudness.stateSequence", "State sequence", loudness.stateSequence));
+    loudnessAnalysis.rows.emplace_back(rawUnsigned("analysis.loudness.capturedFrameEnd",
+        "Latest captured-frame endpoint", loudness.capturedFrameEnd, "frames"));
+    loudnessAnalysis.rows.emplace_back(rawUnsigned("analysis.loudness.integrationBlockCapacity",
+        "Integration block capacity", loudness.integrationBlockCapacity, "blocks"));
+    loudnessAnalysis.rows.emplace_back(rawBoolean("analysis.loudness.integrationCapacityExceeded",
+        "Integration capacity exceeded", loudness.integrationCapacityExceeded));
+
+    loudnessAnalysis.rows.emplace_back(
+        rawLoudness("analysis.loudnessMeasurement.momentaryLufs", "Measured Momentary Loudness",
+            loudnessMeasurement.momentaryLufs, loudnessMeasurement.momentaryValid));
+    loudnessAnalysis.rows.emplace_back(
+        rawLoudness("analysis.loudnessMeasurement.shortTermLufs", "Measured Short-term Loudness",
+            loudnessMeasurement.shortTermLufs, loudnessMeasurement.shortTermValid));
+    loudnessAnalysis.rows.emplace_back(
+        rawLoudness("analysis.loudnessMeasurement.integratedLufs", "Measured Integrated Loudness",
+            loudnessMeasurement.integratedLufs, loudnessMeasurement.integratedValid));
+    loudnessAnalysis.rows.emplace_back(
+        rawLoudness("analysis.loudnessMeasurement.relativeGateLufs", "Relative gate",
+            loudnessMeasurement.relativeGateLufs, loudnessMeasurement.integratedValid));
+    loudnessAnalysis.rows.emplace_back(rawUnsigned("analysis.loudnessMeasurement.stateSequence",
+        "Measurement state sequence", loudnessMeasurement.stateSequence));
+    loudnessAnalysis.rows.emplace_back(rawUnsigned(
+        "analysis.loudnessMeasurement.measurementCompletionCount", "Measurement completion count",
+        loudnessMeasurement.measurementCompletionCount, "measurements"));
+    loudnessAnalysis.rows.emplace_back(
+        rawUnsigned("analysis.loudnessMeasurement.integrationBlockCount", "Integration block count",
+            loudnessMeasurement.integrationBlockCount, "blocks"));
+    loudnessAnalysis.rows.emplace_back(
+        rawUnsigned("analysis.loudnessMeasurement.absoluteGatedBlockCount",
+            "Absolute-gated block count", loudnessMeasurement.absoluteGatedBlockCount, "blocks"));
+    loudnessAnalysis.rows.emplace_back(
+        rawUnsigned("analysis.loudnessMeasurement.relativeGatedBlockCount",
+            "Relative-gated block count", loudnessMeasurement.relativeGatedBlockCount, "blocks"));
+    loudnessAnalysis.rows.emplace_back(
+        rawUnsigned("analysis.loudnessMeasurement.measurementCapturedFrameEnd",
+            "Measurement captured-frame endpoint", loudnessMeasurement.measurementCapturedFrameEnd,
+            "frames"));
+    loudnessAnalysis.rows.emplace_back(
+        rawUnsigned("analysis.loudnessMeasurement.integratedCapturedFrameEnd",
+            "Integrated captured-frame endpoint", loudnessMeasurement.integratedCapturedFrameEnd,
+            "frames"));
+    loudnessAnalysis.rows.emplace_back(
+        rawUnsigned("analysis.loudnessMeasurement.integrationBlockCapacity",
+            "Integration block capacity", loudnessMeasurement.integrationBlockCapacity, "blocks"));
+    loudnessAnalysis.rows.emplace_back(rawUnsigned("analysis.loudnessMeasurement.generation",
+        "Capture generation", loudnessMeasurement.generation));
+    loudnessAnalysis.rows.emplace_back(rawUnsigned("analysis.loudnessMeasurement.channelCount",
+        "Channel count", loudnessMeasurement.channelCount, "channels"));
+    loudnessAnalysis.rows.emplace_back(rawDouble("analysis.loudnessMeasurement.sampleRate",
+        "Sample rate", loudnessMeasurement.sampleRate, "Hz", 2));
+    loudnessAnalysis.rows.emplace_back(rawBoolean("analysis.loudnessMeasurement.momentaryValid",
+        "Momentary valid", loudnessMeasurement.momentaryValid));
+    loudnessAnalysis.rows.emplace_back(rawBoolean("analysis.loudnessMeasurement.shortTermValid",
+        "Short-term valid", loudnessMeasurement.shortTermValid));
+    loudnessAnalysis.rows.emplace_back(rawBoolean("analysis.loudnessMeasurement.integratedValid",
+        "Integrated valid", loudnessMeasurement.integratedValid));
+    loudnessAnalysis.rows.emplace_back(
+        rawBoolean("analysis.loudnessMeasurement.integrationCapacityExceeded",
+            "Integration capacity exceeded", loudnessMeasurement.integrationCapacityExceeded));
+    sections.emplace_back(std::move(loudnessAnalysis));
 
     PerformanceMetricGroup scheduler { "Analysis scheduler", { } };
     scheduler.rows.emplace_back(rawUnsigned(
@@ -764,6 +908,44 @@ void buildRates(const PerformanceMetricsSnapshot& current,
         meters.droppedBlocks, previousMeters.droppedBlocks, elapsedSeconds, baselineIsValid);
     appendRate(rates, "analysis.meters.consumerDiscontinuities", "Meter discontinuities",
         "events/s", meters.consumerDiscontinuities, previousMeters.consumerDiscontinuities,
+        elapsedSeconds, baselineIsValid);
+
+    const auto& loudness = current.analysis.loudness;
+    const auto& previousLoudness = previous.analysis.loudness;
+    appendRate(rates, "analysis.loudness.inputChunks", "Loudness input chunks", "chunks/s",
+        loudness.inputChunks, previousLoudness.inputChunks, elapsedSeconds, baselineIsValid);
+    appendRate(rates, "analysis.loudness.inputFrames", "Loudness input frames", "frames/s",
+        loudness.inputFrames, previousLoudness.inputFrames, elapsedSeconds, baselineIsValid);
+    appendRate(rates, "analysis.loudness.measurementCompletions",
+        "Loudness measurement completions", "measurements/s", loudness.measurementCompletions,
+        previousLoudness.measurementCompletions, elapsedSeconds, baselineIsValid);
+    appendRate(rates, "analysis.loudness.integrationBlockCompletions",
+        "Loudness integration block completions", "blocks/s", loudness.integrationBlockCompletions,
+        previousLoudness.integrationBlockCompletions, elapsedSeconds, baselineIsValid);
+    appendRate(rates, "analysis.loudness.fullResets", "Loudness full resets", "resets/s",
+        loudness.fullResets, previousLoudness.fullResets, elapsedSeconds, baselineIsValid);
+    appendRate(rates, "analysis.loudness.explicitResets", "Loudness explicit resets", "resets/s",
+        loudness.explicitResets, previousLoudness.explicitResets, elapsedSeconds, baselineIsValid);
+    appendRate(rates, "analysis.loudness.generationResets", "Loudness generation resets",
+        "resets/s", loudness.generationResets, previousLoudness.generationResets, elapsedSeconds,
+        baselineIsValid);
+    appendRate(rates, "analysis.loudness.discontinuityResets", "Loudness discontinuity resets",
+        "resets/s", loudness.discontinuityResets, previousLoudness.discontinuityResets,
+        elapsedSeconds, baselineIsValid);
+    appendRate(rates, "analysis.loudness.formatResets", "Loudness format resets", "resets/s",
+        loudness.formatResets, previousLoudness.formatResets, elapsedSeconds, baselineIsValid);
+    appendRate(rates, "analysis.loudness.invalidInputResets", "Loudness invalid-input resets",
+        "resets/s", loudness.invalidInputResets, previousLoudness.invalidInputResets,
+        elapsedSeconds, baselineIsValid);
+    appendRate(rates, "analysis.loudness.integrationResets", "Loudness integration-only resets",
+        "resets/s", loudness.integrationResets, previousLoudness.integrationResets, elapsedSeconds,
+        baselineIsValid);
+    appendRate(rates, "analysis.loudness.liveMeasurementClears", "Loudness live-measurement clears",
+        "clears/s", loudness.liveMeasurementClears, previousLoudness.liveMeasurementClears,
+        elapsedSeconds, baselineIsValid);
+    appendRate(rates, "analysis.loudness.integrationCapacityOverflows",
+        "Loudness integration-capacity overflows", "overflows/s",
+        loudness.integrationCapacityOverflows, previousLoudness.integrationCapacityOverflows,
         elapsedSeconds, baselineIsValid);
 
     appendRate(rates, "analysis.stereoFieldProcessedChunks", "Vectorscope chunks processed",

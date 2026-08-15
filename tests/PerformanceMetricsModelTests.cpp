@@ -44,13 +44,15 @@ consteval std::size_t aggregateFieldCount()
 // separately because the view model expands them into individual rows.
 static_assert(aggregateFieldCount<PresentedFrameIntervalSample>() == 2);
 static_assert(aggregateFieldCount<FrameLatencySample>() == 9);
-static_assert(aggregateFieldCount<MetalRenderTelemetry>() == 86);
+static_assert(aggregateFieldCount<MetalRenderTelemetry>() == 96);
 static_assert(aggregateFieldCount<StereoSampleCapture::Telemetry>() == 9);
 static_assert(aggregateFieldCount<StereoMeterAccumulator::Telemetry>() == 7);
 static_assert(aggregateFieldCount<SharedAnalysisScheduler::Counters>() == 3);
-static_assert(aggregateFieldCount<AnalysisTelemetry>() == 59);
+static_assert(aggregateFieldCount<LoudnessAnalyzer::Statistics>() == 20);
+static_assert(aggregateFieldCount<LoudnessMeasurement>() == 19);
+static_assert(aggregateFieldCount<AnalysisTelemetry>() == 61);
 
-constexpr std::array<std::string_view, 161> expectedRawFieldNames {
+constexpr std::array<std::string_view, 210> expectedRawFieldNames {
     "metal.epoch",
     "metal.displayLinkCallbacks",
     "metal.submittedFrames",
@@ -137,6 +139,16 @@ constexpr std::array<std::string_view, 161> expectedRawFieldNames {
     "metal.resetPending",
     "metal.stereoCorrelationValid",
     "metal.stereoMono",
+    "metal.lastLoudnessSequence",
+    "metal.loudnessMeasurementCapturedFrameEnd",
+    "metal.loudnessIntegratedCapturedFrameEnd",
+    "metal.loudnessMomentaryLufs",
+    "metal.loudnessShortTermLufs",
+    "metal.loudnessIntegratedLufs",
+    "metal.loudnessReferenceLufs",
+    "metal.loudnessMomentaryValid",
+    "metal.loudnessShortTermValid",
+    "metal.loudnessIntegratedValid",
     "analysis.capture.attemptedChunks",
     "analysis.capture.publishedChunks",
     "analysis.capture.reclaimedReadyChunks",
@@ -153,6 +165,45 @@ constexpr std::array<std::string_view, 161> expectedRawFieldNames {
     "analysis.meters.consumerDiscontinuities",
     "analysis.meters.readyHighWaterMark",
     "analysis.meters.readySlots",
+    "analysis.loudness.inputChunks",
+    "analysis.loudness.inputFrames",
+    "analysis.loudness.measurementCompletions",
+    "analysis.loudness.integrationBlockCompletions",
+    "analysis.loudness.fullResets",
+    "analysis.loudness.explicitResets",
+    "analysis.loudness.generationResets",
+    "analysis.loudness.discontinuityResets",
+    "analysis.loudness.formatResets",
+    "analysis.loudness.invalidInputResets",
+    "analysis.loudness.integrationResets",
+    "analysis.loudness.liveMeasurementClears",
+    "analysis.loudness.integrationCapacityOverflows",
+    "analysis.loudness.integrationBlocksSinceReset",
+    "analysis.loudness.absoluteGatedBlocks",
+    "analysis.loudness.relativeGatedBlocks",
+    "analysis.loudness.stateSequence",
+    "analysis.loudness.capturedFrameEnd",
+    "analysis.loudness.integrationBlockCapacity",
+    "analysis.loudness.integrationCapacityExceeded",
+    "analysis.loudnessMeasurement.momentaryLufs",
+    "analysis.loudnessMeasurement.shortTermLufs",
+    "analysis.loudnessMeasurement.integratedLufs",
+    "analysis.loudnessMeasurement.relativeGateLufs",
+    "analysis.loudnessMeasurement.stateSequence",
+    "analysis.loudnessMeasurement.measurementCompletionCount",
+    "analysis.loudnessMeasurement.integrationBlockCount",
+    "analysis.loudnessMeasurement.absoluteGatedBlockCount",
+    "analysis.loudnessMeasurement.relativeGatedBlockCount",
+    "analysis.loudnessMeasurement.measurementCapturedFrameEnd",
+    "analysis.loudnessMeasurement.integratedCapturedFrameEnd",
+    "analysis.loudnessMeasurement.integrationBlockCapacity",
+    "analysis.loudnessMeasurement.generation",
+    "analysis.loudnessMeasurement.channelCount",
+    "analysis.loudnessMeasurement.sampleRate",
+    "analysis.loudnessMeasurement.momentaryValid",
+    "analysis.loudnessMeasurement.shortTermValid",
+    "analysis.loudnessMeasurement.integratedValid",
+    "analysis.loudnessMeasurement.integrationCapacityExceeded",
     "analysis.stereoFieldProcessedChunks",
     "analysis.stereoFieldProcessedFrames",
     "analysis.stereoFieldSelectedPoints",
@@ -468,6 +519,152 @@ public:
                 expectEquals(correlationRow->value, std::string("-0.375"));
                 expectEquals(correlationRow->rawValue, std::string("-0.375"));
             }
+        });
+
+        testCase("Renderer Loudness telemetry has one exact group and readiness semantics", [this] {
+            PerformanceMetricsModel model;
+            PerformanceMetricsSnapshot snapshot;
+            snapshot.metal.epoch = 10;
+            snapshot.metal.lastLoudnessSequence = 7;
+            snapshot.metal.loudnessMeasurementCapturedFrameEnd = 48'000;
+            snapshot.metal.loudnessIntegratedCapturedFrameEnd = 43'200;
+            snapshot.metal.loudnessMomentaryLufs = -std::numeric_limits<double>::infinity();
+            snapshot.metal.loudnessShortTermLufs = -std::numeric_limits<double>::infinity();
+            snapshot.metal.loudnessIntegratedLufs = -14.26;
+            snapshot.metal.loudnessReferenceLufs = -23.0;
+            snapshot.metal.loudnessMomentaryValid = false;
+            snapshot.metal.loudnessShortTermValid = true;
+            snapshot.metal.loudnessIntegratedValid = true;
+            auto view = model.update(snapshot, 50.0);
+
+            std::size_t groupCount = 0;
+            std::set<std::string> fields;
+            for (const auto& section : view.sections) {
+                if (section.name != "Renderer Loudness")
+                    continue;
+
+                ++groupCount;
+                for (const auto& row : section.rows)
+                    fields.emplace(row.fieldName);
+            }
+
+            const std::set<std::string> expectedFields {
+                "metal.lastLoudnessSequence",
+                "metal.loudnessMeasurementCapturedFrameEnd",
+                "metal.loudnessIntegratedCapturedFrameEnd",
+                "metal.loudnessMomentaryLufs",
+                "metal.loudnessShortTermLufs",
+                "metal.loudnessIntegratedLufs",
+                "metal.loudnessReferenceLufs",
+                "metal.loudnessMomentaryValid",
+                "metal.loudnessShortTermValid",
+                "metal.loudnessIntegratedValid",
+            };
+            expectEquals(groupCount, std::size_t { 1 });
+            expect(fields == expectedFields);
+
+            const auto* momentary = findRawRow(view, "metal.loudnessMomentaryLufs");
+            const auto* shortTerm = findRawRow(view, "metal.loudnessShortTermLufs");
+            const auto* integrated = findRawRow(view, "metal.loudnessIntegratedLufs");
+            expect(momentary != nullptr && momentary->value == "not-ready");
+            expect(shortTerm != nullptr && shortTerm->value == "-infinity");
+            expect(integrated != nullptr && integrated->value == "-14.3");
+            expect(findRate(view, "metal.lastLoudnessSequence") == nullptr);
+
+            snapshot.metal.loudnessMomentaryLufs = std::numeric_limits<double>::quiet_NaN();
+            snapshot.metal.loudnessMomentaryValid = true;
+            view = model.update(snapshot, 51.0);
+            momentary = findRawRow(view, "metal.loudnessMomentaryLufs");
+            expect(momentary != nullptr && momentary->value == "invalid");
+            expect(view.report.find("metal.loudnessMomentaryLufs = invalid LUFS")
+                != std::string::npos);
+        });
+
+        testCase("Loudness analysis telemetry maps every field and rates only counters", [this] {
+            PerformanceMetricsModel model;
+            PerformanceMetricsSnapshot snapshot;
+            snapshot.metal.epoch = 11;
+            static_cast<void>(model.update(snapshot, 60.0));
+
+            snapshot.analysis.loudness.inputChunks = 20;
+            snapshot.analysis.loudness.inputFrames = 9'600;
+            snapshot.analysis.loudness.measurementCompletions = 2;
+            snapshot.analysis.loudness.integrationBlockCompletions = 2;
+            snapshot.analysis.loudness.fullResets = 1;
+            snapshot.analysis.loudness.explicitResets = 1;
+            snapshot.analysis.loudness.integrationResets = 1;
+            snapshot.analysis.loudness.liveMeasurementClears = 1;
+            snapshot.analysis.loudness.integrationCapacityOverflows = 1;
+            snapshot.analysis.loudness.integrationBlocksSinceReset = 2;
+            snapshot.analysis.loudness.absoluteGatedBlocks = 2;
+            snapshot.analysis.loudness.relativeGatedBlocks = 1;
+            snapshot.analysis.loudness.stateSequence = 4;
+            snapshot.analysis.loudness.capturedFrameEnd = 9'600;
+            snapshot.analysis.loudness.integrationBlockCapacity = 864'000;
+            snapshot.analysis.loudness.integrationCapacityExceeded = true;
+            snapshot.analysis.loudnessMeasurement.momentaryLufs = -20.0;
+            snapshot.analysis.loudnessMeasurement.shortTermLufs
+                = -std::numeric_limits<double>::infinity();
+            snapshot.analysis.loudnessMeasurement.integratedLufs = -21.25;
+            snapshot.analysis.loudnessMeasurement.relativeGateLufs = -31.25;
+            snapshot.analysis.loudnessMeasurement.stateSequence = 4;
+            snapshot.analysis.loudnessMeasurement.measurementCompletionCount = 2;
+            snapshot.analysis.loudnessMeasurement.integrationBlockCount = 2;
+            snapshot.analysis.loudnessMeasurement.absoluteGatedBlockCount = 2;
+            snapshot.analysis.loudnessMeasurement.relativeGatedBlockCount = 1;
+            snapshot.analysis.loudnessMeasurement.measurementCapturedFrameEnd = 9'600;
+            snapshot.analysis.loudnessMeasurement.integratedCapturedFrameEnd = 9'600;
+            snapshot.analysis.loudnessMeasurement.integrationBlockCapacity = 864'000;
+            snapshot.analysis.loudnessMeasurement.generation = 3;
+            snapshot.analysis.loudnessMeasurement.channelCount = 2;
+            snapshot.analysis.loudnessMeasurement.sampleRate = 48'000.0;
+            snapshot.analysis.loudnessMeasurement.momentaryValid = true;
+            snapshot.analysis.loudnessMeasurement.shortTermValid = true;
+            snapshot.analysis.loudnessMeasurement.integratedValid = false;
+            snapshot.analysis.loudnessMeasurement.integrationCapacityExceeded = true;
+            const auto view = model.update(snapshot, 62.0);
+
+            std::size_t groupCount = 0;
+            std::set<std::string> fields;
+            for (const auto& section : view.sections) {
+                if (section.name != "Loudness analysis and gating")
+                    continue;
+
+                ++groupCount;
+                for (const auto& row : section.rows)
+                    fields.emplace(row.fieldName);
+            }
+            expectEquals(groupCount, std::size_t { 1 });
+            expectEquals(fields.size(), std::size_t { 39 });
+            expect(fields.contains("analysis.loudness.inputFrames"));
+            expect(fields.contains("analysis.loudness.integrationBlocksSinceReset"));
+            expect(fields.contains("analysis.loudnessMeasurement.relativeGateLufs"));
+            expect(fields.contains("analysis.loudnessMeasurement.integratedValid"));
+            expect(fields.contains("analysis.loudnessMeasurement.integrationCapacityExceeded"));
+
+            const auto* frameRate = findRate(view, "analysis.loudness.inputFrames");
+            const auto* completionRate = findRate(view, "analysis.loudness.measurementCompletions");
+            expect(frameRate != nullptr && frameRate->available);
+            expect(completionRate != nullptr && completionRate->available);
+            if (frameRate != nullptr)
+                expectWithinAbsoluteError(frameRate->value, 4'800.0, 1.0e-12);
+            if (completionRate != nullptr)
+                expectWithinAbsoluteError(completionRate->value, 1.0, 1.0e-12);
+            const auto* overflowRate
+                = findRate(view, "analysis.loudness.integrationCapacityOverflows");
+            expect(overflowRate != nullptr && overflowRate->available);
+            if (overflowRate != nullptr)
+                expectWithinAbsoluteError(overflowRate->value, 0.5, 1.0e-12);
+            expect(findRate(view, "analysis.loudness.integrationBlocksSinceReset") == nullptr);
+            expect(findRate(view, "analysis.loudness.absoluteGatedBlocks") == nullptr);
+            expect(findRate(view, "analysis.loudnessMeasurement.integrationBlockCount") == nullptr);
+
+            const auto* silentShortTerm
+                = findRawRow(view, "analysis.loudnessMeasurement.shortTermLufs");
+            expect(silentShortTerm != nullptr && silentShortTerm->value == "-infinity");
+            const auto* overflowedIntegrated
+                = findRawRow(view, "analysis.loudnessMeasurement.integratedLufs");
+            expect(overflowedIntegrated != nullptr && overflowedIntegrated->value == "not-ready");
         });
 
         testCase("Stereo analysis telemetry has one complete group and useful rates", [this] {
