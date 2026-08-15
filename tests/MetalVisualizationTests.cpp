@@ -44,12 +44,20 @@ public:
         ++loudnessResetCount;
     }
 
+    void discardPendingSpectrogramColumns() noexcept override
+    {
+        ++spectrogramDiscardCount;
+        pendingSpectrogramColumns = 0;
+    }
+
     [[nodiscard]] bool copyLatestVisualizationFrame(VisualizationFrame&) const noexcept override
     {
         return false;
     }
 
     int loudnessResetCount = 0;
+    int spectrogramDiscardCount = 0;
+    int pendingSpectrogramColumns = 0;
 };
 
 class MetalVisualizationTests final : public juce::UnitTest {
@@ -117,10 +125,17 @@ public:
         expect(*ring.physicalColumnForScreenColumn(4, detail::SpectrogramRenderHistoryMode::scroll)
             == 0);
 
-        const auto adjacentColumn = ring.append(11, 2);
+        const auto replacementColumn = ring.append(10, 2);
+        expect(replacementColumn.accepted);
+        expect(replacementColumn.writeColumn == 0);
+        expect(replacementColumn.gapColumnCount == 0);
+        expect(ring.nextWriteColumn() == 1);
+        expect(ring.timelineSpan() == 1);
+
+        const auto adjacentColumn = ring.append(11, 3);
         expect(adjacentColumn.accepted);
         expect(adjacentColumn.gapColumnCount == 0);
-        const auto gappedColumn = ring.append(14, 4);
+        const auto gappedColumn = ring.append(14, 5);
         expect(gappedColumn.accepted);
         expect(gappedColumn.gapColumnCount == 2);
         expect(gappedColumn.writeColumn == 4);
@@ -141,14 +156,14 @@ public:
 
         const auto staleColumn = ring.append(14, 5);
         expect(!staleColumn.accepted);
-        const auto wrappedColumn = ring.append(15, 5);
+        const auto wrappedColumn = ring.append(15, 6);
         expect(wrappedColumn.accepted);
         expect(wrappedColumn.writeColumn == 0);
         expect(ring.nextWriteColumn() == 1);
         expect(*ring.physicalColumnForScreenColumn(4, detail::SpectrogramRenderHistoryMode::scroll)
             == 0);
 
-        const auto hugeGap = ring.append(30, 20);
+        const auto hugeGap = ring.append(30, 21);
         expect(hugeGap.accepted);
         expect(hugeGap.discardedPreviousSpan);
         expect(hugeGap.gapColumnCount == 14);
@@ -1022,6 +1037,18 @@ public:
         expectWithinAbsoluteError(defaultedSpectrogramSettings.colorResponse, 0.0F, 0.0001F);
         expectWithinAbsoluteError(defaultedSpectrogramSettings.colorFloorDecibels, -120.0F, 0.001F);
         expectWithinAbsoluteError(defaultedSpectrogramSettings.colorCeilingDecibels, 0.0F, 0.001F);
+
+        const auto discardsBeforePresentationChange = dataSource.spectrogramDiscardCount;
+        dataSource.pendingSpectrogramColumns = 3;
+        visualization.setSpectrogramSettings({ detail::SpectrogramRenderPalette::grayscale, 0.5F,
+            -110.0F, -2.0F, 10, detail::SpectrogramRenderHistoryMode::overwrite, 60 });
+        expectEquals(dataSource.spectrogramDiscardCount, discardsBeforePresentationChange);
+        expectEquals(dataSource.pendingSpectrogramColumns, 3);
+
+        visualization.setSpectrogramSettings({ detail::SpectrogramRenderPalette::grayscale, 0.5F,
+            -110.0F, -2.0F, 20, detail::SpectrogramRenderHistoryMode::overwrite, 60 });
+        expectEquals(dataSource.spectrogramDiscardCount, discardsBeforePresentationChange + 1);
+        expectEquals(dataSource.pendingSpectrogramColumns, 0);
 
         beginTest("Loudness reference settings clamp and snap to half-LU steps");
 

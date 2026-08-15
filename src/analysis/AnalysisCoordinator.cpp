@@ -343,6 +343,11 @@ struct AnalysisCoordinator::State final : SharedAnalysisScheduler::JobClient,
         return spectrogramColumns.copyNext(destination);
     }
 
+    void discardPendingSpectrogramColumns() noexcept
+    {
+        spectrogramColumns.discardPending();
+    }
+
     void consumeSpectrumTransform(const SpectrumTransformView& transform) noexcept override
     {
         spectrogramTransformsOffered.fetch_add(1, std::memory_order_relaxed);
@@ -1453,6 +1458,11 @@ bool AnalysisCoordinator::copyLatestVisualizationFrame(
 bool AnalysisCoordinator::copyNextSpectrogramColumn(SpectrogramColumn& destination) const noexcept
 {
     return state_->copyNextSpectrogramColumn(destination);
+}
+
+void AnalysisCoordinator::discardPendingSpectrogramColumns() noexcept
+{
+    state_->discardPendingSpectrogramColumns();
 }
 
 bool AnalysisCoordinator::isVisualizationActive() const noexcept

@@ -43,5 +43,11 @@ public:
         static_cast<void>(destination);
         return false;
     }
+
+    // Called only from non-real-time UI code so a renderer-owned history reset
+    // cannot be repopulated by columns queued before the reset boundary.
+    virtual void discardPendingSpectrogramColumns() noexcept
+    {
+    }
 };
 } // namespace audio_insight

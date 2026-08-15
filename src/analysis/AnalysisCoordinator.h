@@ -134,6 +134,7 @@ public:
         VisualizationFrame& destination) const noexcept override;
     [[nodiscard]] bool copyNextSpectrogramColumn(
         SpectrogramColumn& destination) const noexcept override;
+    void discardPendingSpectrogramColumns() noexcept override;
 
     [[nodiscard]] bool isVisualizationActive() const noexcept;
     [[nodiscard]] AnalysisTelemetry telemetry() const noexcept;

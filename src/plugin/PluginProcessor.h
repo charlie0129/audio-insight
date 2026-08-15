@@ -69,6 +69,7 @@ public:
         VisualizationFrame& destination) const noexcept override;
     [[nodiscard]] bool copyNextSpectrogramColumn(
         SpectrogramColumn& destination) const noexcept override;
+    void discardPendingSpectrogramColumns() noexcept override;
 
 private:
     static juce::AudioProcessorValueTreeState::ParameterLayout createParameterLayout();

@@ -878,8 +878,15 @@ SpectrogramRingAdvance SpectrogramHistoryRing::append(
     if (columnCount_ == 0 || timelineSlot == 0 || sequence == 0)
         return result;
 
-    if (hasTimeline_ && (timelineSlot <= lastTimelineSlot_ || sequence <= lastSequence_))
+    if (hasTimeline_ && (timelineSlot < lastTimelineSlot_ || sequence <= lastSequence_))
         return result;
+
+    if (hasTimeline_ && timelineSlot == lastTimelineSlot_) {
+        result.writeColumn = (nextWriteColumn_ + columnCount_ - 1) % columnCount_;
+        result.accepted = true;
+        lastSequence_ = sequence;
+        return result;
+    }
 
     auto gapCount = std::uint64_t { 0 };
     if (hasTimeline_) {
@@ -2477,6 +2484,7 @@ public:
         // the analysis stream. History duration is renderer-owned and is the
         // only setting that needs an independent deferred clear here.
         if (before.historyDurationSeconds != after.historyDurationSeconds) {
+            source.discardPendingSpectrogramColumns();
             spectrogramConfigurationClearPending.store(true, std::memory_order_release);
         }
     }

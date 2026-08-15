@@ -341,6 +341,11 @@ bool PluginProcessor::copyNextSpectrogramColumn(SpectrogramColumn& destination) 
     return analysisCoordinator.copyNextSpectrogramColumn(destination);
 }
 
+void PluginProcessor::discardPendingSpectrogramColumns() noexcept
+{
+    analysisCoordinator.discardPendingSpectrogramColumns();
+}
+
 juce::AudioProcessorValueTreeState::ParameterLayout PluginProcessor::createParameterLayout()
 {
     juce::AudioProcessorValueTreeState::ParameterLayout layout;
