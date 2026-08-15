@@ -79,6 +79,15 @@ public:
             expect(edit.committedSplits() == DashboardLayout::defaultSplits);
         }
 
+        beginTest("Done completes and must persist even when values are unchanged");
+        {
+            DashboardLayoutEdit edit;
+            edit.begin();
+            expect(edit.finish());
+            expect(!edit.isEditing());
+            expect(edit.committedSplits() == DashboardLayout::defaultSplits);
+        }
+
         beginTest("Beginning an active edit does not replace its working value");
         {
             DashboardLayoutEdit edit;

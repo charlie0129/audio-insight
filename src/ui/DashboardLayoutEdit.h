@@ -9,8 +9,9 @@ namespace audio_insight {
     Transactional state for one editor's constrained layout-edit session.
 
     The model has no persistence or UI dependencies. Callers publish working
-    splits to the renderer while editing and persist committedSplits() only
-    after finish() returns true.
+    splits to the renderer while editing and persist committedSplits() after
+    every active edit for which finish() returns true. Persist even when the
+    values are unchanged so the last completed cross-process edit wins.
 */
 class DashboardLayoutEdit final {
 public:
@@ -25,7 +26,7 @@ public:
     void moveSplitter(DashboardSplitter splitter, int requestedGridIndex) noexcept;
     void resetWorkingLayout() noexcept;
 
-    /** Commits the working layout and returns whether the committed value changed. */
+    /** Commits an active edit and returns whether an edit was completed. */
     [[nodiscard]] bool finish() noexcept;
 
     /** Discards the working layout and returns whether an edit was cancelled. */

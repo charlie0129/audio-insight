@@ -52,10 +52,9 @@ bool DashboardLayoutEdit::finish() noexcept
     if (!editing)
         return false;
 
-    const auto changed = working != committed;
     committed = working;
     editing = false;
-    return changed;
+    return true;
 }
 
 bool DashboardLayoutEdit::cancel() noexcept
