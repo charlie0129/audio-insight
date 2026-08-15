@@ -87,6 +87,7 @@ PluginProcessor::PluginProcessor()
 
 void PluginProcessor::prepareToPlay(const double sampleRate, int)
 {
+    audioCallbackMetrics.configureSampleRate(sampleRate);
     analysisCoordinator.setCaptureFormat(
         sampleRate, static_cast<std::uint32_t>(getTotalNumInputChannels()));
     currentSampleRate = sampleRate;
@@ -99,24 +100,29 @@ void PluginProcessor::releaseResources()
 
 void PluginProcessor::processBlock(juce::AudioBuffer<float>& audio, juce::MidiBuffer&)
 {
-    juce::ScopedNoDenormals disableDenormals;
+    const auto callbackToken = audioCallbackMetrics.beginCallback(
+        static_cast<std::uint32_t>(audio.getNumSamples()), readMachContinuousTime());
+    {
+        juce::ScopedNoDenormals disableDenormals;
 
-    const auto inputChannels = getTotalNumInputChannels();
-    const auto outputChannels = getTotalNumOutputChannels();
+        const auto inputChannels = getTotalNumInputChannels();
+        const auto outputChannels = getTotalNumOutputChannels();
 
-    for (auto channel = inputChannels; channel < outputChannels; ++channel)
-        audio.clear(channel, 0, audio.getNumSamples());
+        for (auto channel = inputChannels; channel < outputChannels; ++channel)
+            audio.clear(channel, 0, audio.getNumSamples());
 
-    if (inputChannels > 0 && audio.getNumSamples() > 0 && currentSampleRate > 0.0) {
-        const auto* const left = audio.getReadPointer(0);
-        const auto* const right = inputChannels > 1 ? audio.getReadPointer(1) : nullptr;
-        analysisCoordinator.captureAudioBlock(left, right,
-            static_cast<std::size_t>(audio.getNumSamples()), currentSampleRate,
-            static_cast<std::uint32_t>(inputChannels));
+        if (inputChannels > 0 && audio.getNumSamples() > 0 && currentSampleRate > 0.0) {
+            const auto* const left = audio.getReadPointer(0);
+            const auto* const right = inputChannels > 1 ? audio.getReadPointer(1) : nullptr;
+            analysisCoordinator.captureAudioBlock(left, right,
+                static_cast<std::size_t>(audio.getNumSamples()), currentSampleRate,
+                static_cast<std::uint32_t>(inputChannels));
+        }
+
+        // The processor is intentionally transparent. JUCE supplies the input and
+        // output in the same buffer for this effect, so no sample copy is needed.
     }
-
-    // The processor is intentionally transparent. JUCE supplies the input and
-    // output in the same buffer for this effect, so no sample copy is needed.
+    audioCallbackMetrics.finishCallback(callbackToken, readMachContinuousTime());
 }
 
 bool PluginProcessor::isBusesLayoutSupported(const BusesLayout& layouts) const
@@ -303,7 +309,9 @@ void PluginProcessor::removeAnalyzerConfigurationListener(AnalyzerConfigurationL
 
 AnalysisTelemetry PluginProcessor::getAnalysisTelemetry() const noexcept
 {
-    return analysisCoordinator.telemetry();
+    auto telemetry = analysisCoordinator.telemetry();
+    telemetry.audioCallback = audioCallbackMetrics.telemetry();
+    return telemetry;
 }
 
 void PluginProcessor::requestAnalysis() noexcept

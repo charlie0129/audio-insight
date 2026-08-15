@@ -2,6 +2,7 @@
 
 #pragma once
 
+#include "AudioCallbackMetrics.h"
 #include "LoudnessAnalyzer.h"
 #include "SharedAnalysisScheduler.h"
 #include "StereoMeterAccumulator.h"
@@ -19,6 +20,7 @@
 namespace audio_insight {
 /** Non-real-time diagnostics for one plugin instance's analysis pipeline. */
 struct AnalysisTelemetry {
+    AudioCallbackTelemetry audioCallback;
     StereoSampleCapture::Telemetry capture;
     StereoMeterAccumulator::Telemetry meters;
     SharedAnalysisScheduler::Counters scheduler;

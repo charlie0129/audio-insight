@@ -190,6 +190,8 @@ target_sources(AudioInsight
     PRIVATE
         src/analysis/AnalysisCoordinator.cpp
         src/analysis/AnalysisCoordinator.h
+        src/analysis/AudioCallbackMetrics.cpp
+        src/analysis/AudioCallbackMetrics.h
         src/analysis/LoudnessAnalyzer.cpp
         src/analysis/LoudnessAnalyzer.h
         src/analysis/SpectrogramColumnMapper.cpp
@@ -270,6 +272,8 @@ target_link_libraries(AudioInsight
 source_group(TREE "${CMAKE_CURRENT_SOURCE_DIR}" FILES
     src/analysis/AnalysisCoordinator.cpp
     src/analysis/AnalysisCoordinator.h
+    src/analysis/AudioCallbackMetrics.cpp
+    src/analysis/AudioCallbackMetrics.h
     src/analysis/LoudnessAnalyzer.cpp
     src/analysis/LoudnessAnalyzer.h
     src/analysis/SpectrogramColumnMapper.cpp
@@ -333,6 +337,8 @@ if(BUILD_TESTING)
         PRIVATE
             src/analysis/AnalysisCoordinator.cpp
             src/analysis/AnalysisCoordinator.h
+            src/analysis/AudioCallbackMetrics.cpp
+            src/analysis/AudioCallbackMetrics.h
             src/analysis/LoudnessAnalyzer.cpp
             src/analysis/LoudnessAnalyzer.h
             src/analysis/SpectrogramColumnMapper.cpp
@@ -385,6 +391,7 @@ if(BUILD_TESTING)
             src/ui/PresentedFrameHistory.h
             tests/AnalysisCoordinatorTests.cpp
             tests/AnalysisCoreTests.cpp
+            tests/AudioCallbackMetricsTests.cpp
             tests/AnalyzerConfigurationTests.cpp
             tests/AnalyzerSettingsPanelTests.cpp
             tests/DashboardLayoutTests.cpp
@@ -445,6 +452,8 @@ if(BUILD_TESTING)
     source_group(TREE "${CMAKE_CURRENT_SOURCE_DIR}" FILES
         src/analysis/AnalysisCoordinator.cpp
         src/analysis/AnalysisCoordinator.h
+        src/analysis/AudioCallbackMetrics.cpp
+        src/analysis/AudioCallbackMetrics.h
         src/analysis/LoudnessAnalyzer.cpp
         src/analysis/LoudnessAnalyzer.h
         src/analysis/SpectrogramColumnMapper.cpp
@@ -497,6 +506,7 @@ if(BUILD_TESTING)
         src/ui/PresentedFrameHistory.h
         tests/AnalysisCoordinatorTests.cpp
         tests/AnalysisCoreTests.cpp
+        tests/AudioCallbackMetricsTests.cpp
         tests/AnalyzerConfigurationTests.cpp
         tests/AnalyzerSettingsPanelTests.cpp
         tests/DashboardLayoutTests.cpp

@@ -78,6 +78,7 @@ private:
 
     juce::AudioProcessorValueTreeState parameters;
     AnalysisCoordinator analysisCoordinator;
+    AudioCallbackMetrics audioCallbackMetrics { MachContinuousTimebase::system() };
     mutable std::mutex analyzerConfigurationMutex;
     AnalyzerConfiguration analyzerConfiguration;
     juce::ThreadSafeListenerList<AnalyzerConfigurationListener> analyzerConfigurationListeners;

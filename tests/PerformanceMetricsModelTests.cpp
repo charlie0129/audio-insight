@@ -50,7 +50,7 @@ static_assert(aggregateFieldCount<StereoMeterAccumulator::Telemetry>() == 7);
 static_assert(aggregateFieldCount<SharedAnalysisScheduler::Counters>() == 3);
 static_assert(aggregateFieldCount<LoudnessAnalyzer::Statistics>() == 20);
 static_assert(aggregateFieldCount<LoudnessMeasurement>() == 19);
-static_assert(aggregateFieldCount<AnalysisTelemetry>() == 61);
+static_assert(aggregateFieldCount<AnalysisTelemetry>() == 62);
 
 constexpr std::array<std::string_view, 210> expectedRawFieldNames {
     "metal.epoch",

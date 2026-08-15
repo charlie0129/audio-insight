@@ -101,7 +101,12 @@ public:
             processor.processBlock(audio, midi);
 
             // A closed editor must not pay the sample-copy/analysis cost.
-            expect(processor.getAnalysisTelemetry().capture.attemptedChunks == 0);
+            const auto telemetry = processor.getAnalysisTelemetry();
+            expect(telemetry.capture.attemptedChunks == 0);
+            expect(telemetry.audioCallback.callbackCount == 1);
+            expect(telemetry.audioCallback.processedFrames == 128);
+            expect(telemetry.audioCallback.trackedBlocks[1].callbackCount == 1);
+            expect(telemetry.audioCallback.trackedBlocks[1].budgetNanoseconds == 25'000);
 
             for (auto channel = 0; channel < audio.getNumChannels(); ++channel)
                 expect(audio.getMagnitude(channel, 0, 128) > 0.0F);
