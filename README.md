@@ -7,9 +7,9 @@ for macOS. The project prioritizes smooth display-synchronized Metal graphics,
 real-time-safe audio processing, and low overhead in the host.
 
 The current analyzer dashboard combines a real-time FFT Spectrum, mono/stereo
-sample-peak and RMS meters, and a shared-FFT Spectrogram. Stereo
-field/correlation and Loudness remain visible, inert placeholders while those
-analyzers are developed. See [the architecture and decision
+sample-peak and RMS meters, a shared-FFT Spectrogram, and a fixed-scale Stereo
+field/correlation view. Loudness remains a visible, inert placeholder while
+that standards-based analyzer is developed. See [the architecture and decision
 record](docs/architecture.md) for the accepted system design and current open
 questions. The accepted multi-panel dashboard is specified separately in [the
 analyzer interface requirements](docs/analyzer-ui.md).
@@ -109,6 +109,14 @@ response, floor and ceiling, a 2–60 second history duration, and **Scroll** or
 **Overwrite** history mode. Palette, response, range, and mode edits reinterpret
 existing history; FFT, sample-format, history-duration, lifecycle, and frequency
 mapping changes start fresh compatible history.
+
+The Stereo tile combines a fixed full-scale rotated vectorscope with a `-1` to
+`+1` correlation strip. Its point cloud covers the latest 250 ms and fades older
+samples; correlation uses every input sample with a 300 ms response rather than
+the display-decimated points. Mono remains a centered vertical trace labeled
+`MONO`, with correlation shown as unavailable instead of a synthetic `+1`.
+This initial Stereo design has no adjustable controls, so its live Settings
+section says so and leaves Reset unavailable.
 
 ## Performance metrics
 

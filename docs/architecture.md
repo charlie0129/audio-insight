@@ -34,7 +34,7 @@ an incidental result of analysis.
 | Graphics | Use a native Metal renderer, hosted in a MetalKit view inside the JUCE editor. On the initial macOS baseline, drive its Metal layer with `CAMetalDisplayLink` rather than JUCE repaint timers or MetalKit's internal timer. Do not use deprecated macOS OpenGL. |
 | Signal analysis | Initially use CPU analysis and Apple's Accelerate/vDSP where useful. GPU compute is deferred until profiling demonstrates a benefit. |
 | Frequency presentation | Expose one continuous Linear-to-Logarithmic frequency-spacing control, including intermediate mappings. Spectrum and Spectrogram share the same setting and coordinate transform; they do not have independent frequency scales. |
-| Dashboard interface | Keep one fixed-topology five-tile dashboard with one Spectrum and no separate focus mode. Spectrum, Peak/RMS, and Spectrogram are live; Stereo/correlation and Loudness remain inert placeholders. Allow only the four grid-snapped width/height splits defined in [the analyzer interface requirements](analyzer-ui.md). |
+| Dashboard interface | Keep one fixed-topology five-tile dashboard with one Spectrum and no separate focus mode. Spectrum, Peak/RMS, Spectrogram, and Stereo/correlation are live; Loudness remains an inert placeholder. Allow only the four grid-snapped width/height splits defined in [the analyzer interface requirements](analyzer-ui.md). |
 | Interface state | Save analyzer settings and the Metrics toggle as non-automatable per-instance state, and the four-split layout as one versioned per-user global preference. Do not serialize transient history, holds, integration, Settings/About visibility, or uncommitted edits. |
 | Real-time handoff | The audio callback writes only to bounded, non-blocking data structures. Analysis and rendering never make the audio thread wait. |
 | Overflow policy | Prefer current visual data: coalesce or discard the oldest unclaimed analysis input, detect discontinuities by sequence number, and reset temporal analysis state across a gap. Never overwrite a slot being read or delay audio. |
@@ -44,7 +44,7 @@ an incidental result of analysis.
 | Performance observability | Offer an opt-in, persisted, per-instance metrics panel in Release builds. Show every collected renderer and analysis metric, exact presented-frame pacing history, per-frame callback-to-presentation latency composition, derived rates, and copyable raw reports without mutating the host process. |
 | DPI support | Treat layout units and render pixels separately and support both regular-density and Retina displays, including live movement between them. |
 | Editor lifecycle | Stop sample capture, analysis, history, display-link activity, and Metal submission when the editor is closed, hidden, or occluded beyond a short debounce. Reopening starts with fresh analysis state. |
-| Analyzer milestone | The initial usable baseline was a large real-time FFT spectrum with compact mono/stereo sample-peak/RMS meters. The current dashboard also implements bounded shared-FFT Spectrogram history; Stereo field/correlation and Loudness remain deferred. |
+| Analyzer milestone | The initial usable baseline was a large real-time FFT spectrum with compact mono/stereo sample-peak/RMS meters. The current dashboard also implements bounded shared-FFT Spectrogram history and fixed-scale Stereo field/correlation; standards-validated Loudness remains deferred. |
 | Portability | Keep DSP, analysis, and product state independent of Metal behind a small renderer boundary. The architecture accommodates a future Windows backend, but Windows is not a near-term supported target. |
 | Distribution | A paid Apple Developer account, Developer ID signing, and notarization are out of scope unless this policy is explicitly revisited. See [macOS distribution](macos-distribution.md). |
 | Visual review | Deliver runnable visual checkpoints and ask the user for DAW testing, observations, or screenshots when appearance and interaction cannot be verified confidently in the development environment. |
@@ -146,6 +146,14 @@ the meter at that chunk boundary instead of retroactively resetting the start of
 the host block. This producer work is bounded but must be included in audio
 callback profiling before the preliminary budget is considered met.
 
+Stereo correlation uses the same producer-owned endpoint principle. The audio
+producer advances `E[L*R]`, `E[L^2]`, and `E[R^2]` from every sample in source
+order with one 300 ms exponential time constant and publishes a bounded complete
+endpoint. Worker scheduling, endpoint coalescing, and vectorscope display
+decimation cannot change the result. Actual mono/stereo metadata accompanies the
+endpoint; mono never becomes a duplicated pair or a synthetic `+1` correlation.
+This bounded producer work is included in audio-callback profiling.
+
 Publishing samples, measurements, and bounded atomic state is the end of the
 audio callback's responsibility. It must not signal a semaphore or condition
 variable, enqueue through a general-purpose task queue, or otherwise wake a
@@ -171,6 +179,12 @@ so does not break an explicitly supported history feature. The editor lifecycle
 state is authoritative: when the editor is inactive, all first-release analyses
 stop. Rendering must be able to read the newest complete snapshot without
 waiting for an analysis job.
+
+The Stereo worker path consumes retained raw chunks before Spectrum freshness
+coalescing and owns only the transient vectorscope point history. It uniformly
+decimates the latest 250 ms of captured-audio time to at most 4096 immutable
+display points. Capture gaps reset that history instead of joining unrelated
+segments; correlation remains producer-owned and uses every source sample.
 
 There is one logical coordinator per plugin instance, but a coordinator is not a
 thread. Coordinators submit work to a scheduler shared by all instances loaded
@@ -361,9 +375,9 @@ The first usable release deliberately has one layout and two visualizations:
 - a compact vertical meter strip showing honest sample peak and RMS, with one
   meter for mono input or distinct L/R meters for stereo.
 
-The implemented five-tile dashboard keeps Spectrum, Peak/RMS, and Spectrogram
-live. Stereo field/correlation and Loudness remain titled, inert placeholders:
-they do not show fake data or submit analysis. Analyzer controls live in the
+The implemented five-tile dashboard keeps Spectrum, Peak/RMS, Spectrogram, and
+Stereo field/correlation live. Loudness remains a titled, inert placeholder: it
+does not show fake data or submit analysis. Analyzer controls live in the
 Settings inspector. Four grid-snapped splitters resize adjacent fixed tiles;
 movement, reordering, hiding, detaching, overlap, and free-form windowing remain
 out of scope. Do not label sample peak as true peak; that name is reserved for a
@@ -381,8 +395,8 @@ explicit click. The message must not interrupt use, consume visualization space,
 display repeatedly as a prompt, collect telemetry, or initiate network access on
 its own.
 
-With the shell, Settings inspector, and Spectrogram history implemented, the
-next analyzer is Stereo field/correlation, followed by standards-validated
+With the shell, Settings inspector, Spectrogram history, and Stereo
+field/correlation implemented, the next analyzer is standards-validated
 Loudness. Phase, surround layouts, multi-instance aggregation, Loudness Range,
 and true peak remain later work.
 
@@ -397,6 +411,12 @@ instrumentation early enough to observe:
 - audio-callback CPU cost and any real-time safety violation;
 - data drops, discontinuities, queue high-water mark, and snapshot age; and
 - hidden-editor and multi-instance overhead.
+
+Stereo observability separates producer correlation samples/endpoints from
+worker vectorscope chunks and point publications. It also exposes scoped reset
+and discontinuity counts, channel/correlation validity, current point count,
+capture endpoints, snapshot sequences, and derived rates. As with all collected
+telemetry, each raw field appears exactly once in Metrics and its copied report.
 
 ### Preliminary reference workload and budgets
 
@@ -534,10 +554,11 @@ files with that copyright plus `SPDX-License-Identifier: AGPL-3.0-or-later`.
    frequency controls, and finish Spectrum and Peak/RMS presentation.
 9. Implement the literal-black Spectrogram with shared frequency mapping,
    bounded Scroll/Overwrite history, and palette/response controls.
-10. Implement the mono-aware Stereo field and stereo correlation view from the
-    shared captured samples and statistics.
-11. Implement Momentary, Short-term, and Integrated Loudness only after the
-    ITU-R BS.1770-5/EBU R128 path passes published reference tests.
+10. Implemented: add the mono-aware Stereo field from worker-owned, uniformly
+    decimated captured-sample history and all-sample, producer-owned correlation
+    statistics.
+11. Next: implement Momentary, Short-term, and Integrated Loudness only after
+    the ITU-R BS.1770-5/EBU R128 path passes published reference tests.
 
 The detailed defaults and acceptance behavior for steps 7–11 live in
 [the analyzer interface requirements](analyzer-ui.md). A placeholder does not
@@ -645,3 +666,9 @@ authorize fake values, background work, or speculative resource allocation.
   results.
 - Made changed host sample rates and mono/stereo layouts start a clean capture
   generation at `prepareToPlay`; identical format notifications are no-ops.
+- Implemented the fixed-scale Stereo vectorscope and correlation tile. The
+  audio producer owns all-sample 300 ms correlation expectations, while shared
+  workers own only the uniformly decimated 250 ms point cloud.
+- Scoped Stereo resets to capture/lifecycle generations and discontinuities;
+  FFT-only changes preserve Stereo state. Added separate producer, worker,
+  publication, validity, endpoint, and reset telemetry to Metrics.

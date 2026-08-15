@@ -23,11 +23,12 @@ The current implementation contains:
 
 - one large real-time FFT Spectrum;
 - one compact vertical mono/stereo sample-peak/RMS meter; and
-- one bounded, shared-FFT Spectrogram history view.
+- one bounded, shared-FFT Spectrogram history view; and
+- one fixed-scale Stereo vectorscope with all-sample correlation.
 
 The complete dashboard shell, Settings inspector, constrained layout editor,
-Spectrum, Peak/RMS, and Spectrogram are implemented. Stereo field/correlation
-and Loudness remain titled, inert placeholders with no fake readings, history
+Spectrum, Peak/RMS, Spectrogram, and Stereo field/correlation are implemented.
+Loudness remains a titled, inert placeholder with no fake readings, history
 allocation, or analysis work.
 
 Implement the remaining dashboard in this order:
@@ -39,9 +40,9 @@ Implement the remaining dashboard in this order:
    settings.
 3. Implemented: replace the Spectrogram placeholder with the shared-FFT history
    view.
-4. Next: replace the Stereo field/correlation placeholder.
-5. Then: replace the Loudness placeholder after its standards-based measurements
-   pass reference tests.
+4. Implemented: replace the Stereo field/correlation placeholder.
+5. Next: replace the Loudness placeholder after its standards-based
+   measurements pass reference tests.
 
 Replacing a placeholder must preserve its tile identity and default position.
 This sequence does not require an unfinished placeholder to run background
@@ -157,9 +158,12 @@ Metal canvas pauses. The tile topology itself never reflows.
 Organize controls into Shared analysis, Spectrum, Peak/RMS, Spectrogram, Stereo,
 and Loudness sections. Settings documented in each panel section below live in
 that inspector. Changes apply immediately and are saved with the plugin instance;
-there is no separate Apply step. Give each section a reset-to-default action.
-Keep settings for placeholder panels visibly disabled and labeled as not yet
-implemented rather than accepting changes that do nothing without explanation.
+there is no separate Apply step. Give each section with adjustable settings a
+reset-to-default action. Stereo's initial presentation is deliberately fixed,
+so its live section states that it has no adjustable settings and leaves Reset
+visibly unavailable. Keep settings for the Loudness placeholder visibly disabled
+and labeled as not yet implemented rather than accepting changes that do nothing
+without explanation.
 
 Floor, Ceiling, and Temporal averaging live in the Spectrum section rather than
 the toolbar; do not duplicate them. Temporal averaging exposes Off plus a
@@ -492,12 +496,19 @@ zero-background-work lifecycle.
 - Use fixed full-scale coordinates rather than per-frame auto-normalization, so
   quiet signals do not falsely appear full-scale.
 - Draw a bounded point cloud from at most 4096 uniformly decimated sample pairs
-  covering the latest 250 ms. Fade alpha with age and do not connect decimated
-  points with misleading lines.
+  covering the latest 250 ms of captured-audio time. The existing shared worker
+  coordinator owns this transient history and its display decimation. It
+  consumes retained capture chunks before Spectrum freshness coalescing, fades
+  point alpha with age, and never connects decimated points with misleading
+  lines.
 - Use a near-black background, subdued neutral axes, and project-cyan points
   that brighten where density overlaps.
-- Compute correlation from all samples, not decimated display points. Accumulate
-  all three expectation terms with the same 300 ms exponential time constant:
+- Compute correlation from all samples, not decimated display points. The audio
+  producer advances its bounded correlation accumulator from every sample in
+  source order and publishes complete endpoint snapshots; worker scheduling,
+  display decimation, and endpoint coalescing therefore cannot change the
+  temporal result. Accumulate all three expectation terms with the same 300 ms
+  exponential time constant:
 
   ```text
   correlation = E[left * right] / sqrt(E[left^2] * E[right^2])
@@ -517,6 +528,13 @@ Correlation has no peak hold or manual reset. Capture/lifecycle-generation
 changes and discontinuities reset its smoothing and point history;
 FFT-generation changes do not. Adjustable scope gain, alternate polar modes,
 density heatmaps, correlation history, and multichannel scopes are deferred.
+
+Stereo telemetry distinguishes producer-owned correlation input and endpoint
+publication from worker-owned point-history processing. Report the applicable
+sample/chunk counts, resets and discontinuities, current point count, channel
+mode, correlation validity, capture/frame endpoint, snapshot sequence, and
+derived rates in Metrics. Every collected Stereo field appears in the raw
+Metrics table and copied report exactly once.
 
 ## Loudness
 
@@ -577,7 +595,7 @@ before reference tests pass.
 - Publish stable immutable snapshots to the renderer. Settings and layout
   changes must not make the render thread read mutable analysis working memory.
 - Keep the audio callback bounded and non-blocking regardless of visible panels.
-- Placeholder panels submit no analysis.
+- The Loudness placeholder submits no analysis.
 
 ## Resizing, Retina, and responsive behavior
 
