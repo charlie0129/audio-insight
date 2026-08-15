@@ -32,6 +32,26 @@ The build does not install plugins into user or system directories
 automatically. Signing, local installation, and quarantine guidance lives in
 [the macOS distribution policy](docs/macos-distribution.md).
 
+## Formatting
+
+After configuring the project once, format all project-owned C++, headers, and
+Objective-C++ sources with:
+
+```sh
+cmake --build --preset format
+```
+
+To check formatting without modifying files:
+
+```sh
+cmake --build --preset format-check
+```
+
+The targets use the repository's `.clang-format` and intentionally exclude
+JUCE, generated build trees, and other third-party code. Set
+`AUDIO_INSIGHT_CLANG_FORMAT_EXECUTABLE` during CMake configuration to select a
+specific formatter executable.
+
 ## License and support
 
 Project-owned code is licensed under

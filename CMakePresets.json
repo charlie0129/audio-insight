@@ -27,6 +27,24 @@
       "name": "macos-arm64-release",
       "configurePreset": "macos-arm64",
       "configuration": "Release"
+    },
+    {
+      "name": "format",
+      "displayName": "Format project sources",
+      "configurePreset": "macos-arm64",
+      "configuration": "Debug",
+      "targets": [
+        "format"
+      ]
+    },
+    {
+      "name": "format-check",
+      "displayName": "Check project source formatting",
+      "configurePreset": "macos-arm64",
+      "configuration": "Debug",
+      "targets": [
+        "format-check"
+      ]
     }
   ]
 }

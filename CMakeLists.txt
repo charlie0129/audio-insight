@@ -46,6 +46,112 @@ find_library(AUDIO_INSIGHT_METAL_FRAMEWORK Metal REQUIRED)
 find_library(AUDIO_INSIGHT_METALKIT_FRAMEWORK MetalKit REQUIRED)
 find_library(AUDIO_INSIGHT_QUARTZCORE_FRAMEWORK QuartzCore REQUIRED)
 
+find_program(
+    AUDIO_INSIGHT_CLANG_FORMAT_EXECUTABLE
+    NAMES clang-format
+    DOC "clang-format executable used by the format targets"
+)
+
+if(NOT AUDIO_INSIGHT_CLANG_FORMAT_EXECUTABLE)
+    execute_process(
+        COMMAND /usr/bin/xcrun --find clang-format
+        RESULT_VARIABLE AUDIO_INSIGHT_XCRUN_CLANG_FORMAT_RESULT
+        OUTPUT_VARIABLE AUDIO_INSIGHT_XCRUN_CLANG_FORMAT_EXECUTABLE
+        OUTPUT_STRIP_TRAILING_WHITESPACE
+        ERROR_QUIET
+    )
+
+    if(AUDIO_INSIGHT_XCRUN_CLANG_FORMAT_RESULT EQUAL 0
+       AND EXISTS "${AUDIO_INSIGHT_XCRUN_CLANG_FORMAT_EXECUTABLE}")
+        set(
+            AUDIO_INSIGHT_CLANG_FORMAT_EXECUTABLE
+            "${AUDIO_INSIGHT_XCRUN_CLANG_FORMAT_EXECUTABLE}"
+            CACHE FILEPATH
+            "clang-format executable used by the format targets"
+            FORCE
+        )
+    endif()
+endif()
+
+file(
+    GLOB_RECURSE AUDIO_INSIGHT_FORMAT_SOURCES
+    CONFIGURE_DEPENDS
+    LIST_DIRECTORIES FALSE
+    "${CMAKE_CURRENT_SOURCE_DIR}/src/*.c"
+    "${CMAKE_CURRENT_SOURCE_DIR}/src/*.cc"
+    "${CMAKE_CURRENT_SOURCE_DIR}/src/*.cpp"
+    "${CMAKE_CURRENT_SOURCE_DIR}/src/*.cxx"
+    "${CMAKE_CURRENT_SOURCE_DIR}/src/*.h"
+    "${CMAKE_CURRENT_SOURCE_DIR}/src/*.hh"
+    "${CMAKE_CURRENT_SOURCE_DIR}/src/*.hpp"
+    "${CMAKE_CURRENT_SOURCE_DIR}/src/*.hxx"
+    "${CMAKE_CURRENT_SOURCE_DIR}/src/*.m"
+    "${CMAKE_CURRENT_SOURCE_DIR}/src/*.metal"
+    "${CMAKE_CURRENT_SOURCE_DIR}/src/*.mm"
+    "${CMAKE_CURRENT_SOURCE_DIR}/tests/*.c"
+    "${CMAKE_CURRENT_SOURCE_DIR}/tests/*.cc"
+    "${CMAKE_CURRENT_SOURCE_DIR}/tests/*.cpp"
+    "${CMAKE_CURRENT_SOURCE_DIR}/tests/*.cxx"
+    "${CMAKE_CURRENT_SOURCE_DIR}/tests/*.h"
+    "${CMAKE_CURRENT_SOURCE_DIR}/tests/*.hh"
+    "${CMAKE_CURRENT_SOURCE_DIR}/tests/*.hpp"
+    "${CMAKE_CURRENT_SOURCE_DIR}/tests/*.hxx"
+    "${CMAKE_CURRENT_SOURCE_DIR}/tests/*.m"
+    "${CMAKE_CURRENT_SOURCE_DIR}/tests/*.metal"
+    "${CMAKE_CURRENT_SOURCE_DIR}/tests/*.mm"
+)
+list(SORT AUDIO_INSIGHT_FORMAT_SOURCES)
+
+if(AUDIO_INSIGHT_CLANG_FORMAT_EXECUTABLE)
+    add_custom_target(
+        format
+        COMMAND
+            "${AUDIO_INSIGHT_CLANG_FORMAT_EXECUTABLE}"
+            --style=file
+            -i
+            ${AUDIO_INSIGHT_FORMAT_SOURCES}
+        WORKING_DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}"
+        COMMENT "Formatting project-owned C++ and Objective-C++ sources"
+        COMMAND_EXPAND_LISTS
+        USES_TERMINAL
+        VERBATIM
+    )
+
+    add_custom_target(
+        format-check
+        COMMAND
+            "${AUDIO_INSIGHT_CLANG_FORMAT_EXECUTABLE}"
+            --style=file
+            --dry-run
+            --Werror
+            ${AUDIO_INSIGHT_FORMAT_SOURCES}
+        WORKING_DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}"
+        COMMENT "Checking project-owned C++ and Objective-C++ formatting"
+        COMMAND_EXPAND_LISTS
+        USES_TERMINAL
+        VERBATIM
+    )
+else()
+    set(
+        AUDIO_INSIGHT_CLANG_FORMAT_ERROR
+        "clang-format was not found; install it or configure AUDIO_INSIGHT_CLANG_FORMAT_EXECUTABLE"
+    )
+
+    add_custom_target(
+        format
+        COMMAND "${CMAKE_COMMAND}" -E echo "${AUDIO_INSIGHT_CLANG_FORMAT_ERROR}"
+        COMMAND "${CMAKE_COMMAND}" -E false
+        VERBATIM
+    )
+
+    add_custom_target(
+        format-check
+        COMMAND "${CMAKE_COMMAND}" -E echo "${AUDIO_INSIGHT_CLANG_FORMAT_ERROR}"
+        COMMAND "${CMAKE_COMMAND}" -E false
+        VERBATIM
+    )
+endif()
+
 juce_add_plugin(AudioInsight
     VERSION "${PROJECT_VERSION}"
     COMPANY_NAME "charlie0129"
