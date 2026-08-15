@@ -1,4 +1,5 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
+# Formatting is pinned to clang-format 22; major versions produce different output.
 
 ---
 BasedOnStyle: WebKit

@@ -47,10 +47,10 @@ To check formatting without modifying files:
 cmake --build --preset format-check
 ```
 
-The targets use the repository's `.clang-format` and intentionally exclude
-JUCE, generated build trees, and other third-party code. Set
+The targets require clang-format 22, use the repository's `.clang-format`, and
+intentionally exclude JUCE, generated build trees, and other third-party code. Set
 `AUDIO_INSIGHT_CLANG_FORMAT_EXECUTABLE` during CMake configuration to select a
-specific formatter executable.
+specific clang-format 22 executable. Ordinary builds do not require the formatter.
 
 ## License and support
 

@@ -48,28 +48,45 @@ find_library(AUDIO_INSIGHT_QUARTZCORE_FRAMEWORK QuartzCore REQUIRED)
 
 find_program(
     AUDIO_INSIGHT_CLANG_FORMAT_EXECUTABLE
-    NAMES clang-format
+    NAMES clang-format-22 clang-format
     DOC "clang-format executable used by the format targets"
 )
 
-if(NOT AUDIO_INSIGHT_CLANG_FORMAT_EXECUTABLE)
+set(AUDIO_INSIGHT_CLANG_FORMAT_COMPATIBLE FALSE)
+set(
+    AUDIO_INSIGHT_CLANG_FORMAT_ERROR
+    "clang-format 22 was not found; install it or configure AUDIO_INSIGHT_CLANG_FORMAT_EXECUTABLE"
+)
+
+if(AUDIO_INSIGHT_CLANG_FORMAT_EXECUTABLE)
     execute_process(
-        COMMAND /usr/bin/xcrun --find clang-format
-        RESULT_VARIABLE AUDIO_INSIGHT_XCRUN_CLANG_FORMAT_RESULT
-        OUTPUT_VARIABLE AUDIO_INSIGHT_XCRUN_CLANG_FORMAT_EXECUTABLE
+        COMMAND "${AUDIO_INSIGHT_CLANG_FORMAT_EXECUTABLE}" --version
+        RESULT_VARIABLE AUDIO_INSIGHT_CLANG_FORMAT_VERSION_RESULT
+        OUTPUT_VARIABLE AUDIO_INSIGHT_CLANG_FORMAT_VERSION_OUTPUT
         OUTPUT_STRIP_TRAILING_WHITESPACE
         ERROR_QUIET
     )
 
-    if(AUDIO_INSIGHT_XCRUN_CLANG_FORMAT_RESULT EQUAL 0
-       AND EXISTS "${AUDIO_INSIGHT_XCRUN_CLANG_FORMAT_EXECUTABLE}")
+    if(AUDIO_INSIGHT_CLANG_FORMAT_VERSION_RESULT EQUAL 0)
         set(
-            AUDIO_INSIGHT_CLANG_FORMAT_EXECUTABLE
-            "${AUDIO_INSIGHT_XCRUN_CLANG_FORMAT_EXECUTABLE}"
-            CACHE FILEPATH
-            "clang-format executable used by the format targets"
-            FORCE
+            AUDIO_INSIGHT_CLANG_FORMAT_VERSION_PATTERN
+            "clang-format version ([0-9]+)"
         )
+        string(
+            REGEX MATCH
+            "${AUDIO_INSIGHT_CLANG_FORMAT_VERSION_PATTERN}"
+            AUDIO_INSIGHT_CLANG_FORMAT_VERSION_MATCH
+            "${AUDIO_INSIGHT_CLANG_FORMAT_VERSION_OUTPUT}"
+        )
+
+        if(AUDIO_INSIGHT_CLANG_FORMAT_VERSION_MATCH AND CMAKE_MATCH_1 STREQUAL "22")
+            set(AUDIO_INSIGHT_CLANG_FORMAT_COMPATIBLE TRUE)
+        else()
+            set(
+                AUDIO_INSIGHT_CLANG_FORMAT_ERROR
+                "Audio Insight requires clang-format 22, but found: ${AUDIO_INSIGHT_CLANG_FORMAT_VERSION_OUTPUT}"
+            )
+        endif()
     endif()
 endif()
 
@@ -102,7 +119,7 @@ file(
 )
 list(SORT AUDIO_INSIGHT_FORMAT_SOURCES)
 
-if(AUDIO_INSIGHT_CLANG_FORMAT_EXECUTABLE)
+if(AUDIO_INSIGHT_CLANG_FORMAT_COMPATIBLE)
     add_custom_target(
         format
         COMMAND
@@ -132,11 +149,6 @@ if(AUDIO_INSIGHT_CLANG_FORMAT_EXECUTABLE)
         VERBATIM
     )
 else()
-    set(
-        AUDIO_INSIGHT_CLANG_FORMAT_ERROR
-        "clang-format was not found; install it or configure AUDIO_INSIGHT_CLANG_FORMAT_EXECUTABLE"
-    )
-
     add_custom_target(
         format
         COMMAND "${CMAKE_COMMAND}" -E echo "${AUDIO_INSIGHT_CLANG_FORMAT_ERROR}"
