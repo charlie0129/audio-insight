@@ -1,6 +1,6 @@
 # Analyzer dashboard interface requirements
 
-> **Status:** Accepted target design, staged after the first usable release
+> **Status:** Accepted target design and implementation defaults
 >
 > **Established:** 2026-08-15
 >
@@ -11,245 +11,544 @@ dashboard, layout editing, settings inspector, and per-panel presentation. The
 interactive layout prototype is illustrative; when it conflicts with this
 document, this document wins.
 
-System architecture, real-time safety, rendering, lifecycle, and first-release
-scope remain defined by [the architecture and decision record](architecture.md).
-Unresolved details are collected under **Open questions** instead of being
-silently assumed.
+System architecture, real-time safety, rendering, lifecycle, and distribution
+remain defined by [the architecture and decision record](architecture.md).
+Numeric defaults below are accepted starting values. They may be tuned from
+profiling, standards conformance tests, or user visual review, with the reason
+recorded in the architecture decision log.
 
-## Scope and milestones
+## Scope and implementation sequence
 
-The first usable release remains the deliberately narrow vertical slice already
-accepted in the architecture document:
+The current first usable vertical slice remains:
 
 - one large real-time FFT Spectrum; and
 - one compact vertical stereo sample-peak/RMS meter.
 
-It may use a fixed default arrangement while those analyzers, host behavior, and
-performance gates are being established.
+The next UI milestone adds the complete dashboard shell, Settings inspector, and
+constrained layout editor. Spectrum and Peak/RMS remain live. Spectrogram, Stereo
+field/correlation, and Loudness initially appear as titled, inert placeholders
+with no fake readings, history allocation, or analysis work.
 
-The accepted target dashboard expands that surface with Spectrogram, Stereo
-field/correlation, and Loudness panels plus constrained layout editing. These
-are accepted product requirements, but this document does not move them into
-the first usable release or determine their exact implementation order.
+Implement the remaining dashboard in this order:
+
+1. Add the five-tile shell, numeric-axis text infrastructure, four layout
+   splitters, edit mode, global layout persistence, and Settings inspector.
+2. Finish Spectrum and Peak/RMS presentation and connect the shared settings.
+3. Replace the Spectrogram placeholder with the shared-FFT history view.
+4. Replace the Stereo field/correlation placeholder.
+5. Replace the Loudness placeholder after its standards-based measurements pass
+   reference tests.
+
+Replacing a placeholder must preserve its tile identity and default position.
+This sequence does not require an unfinished placeholder to run background
+analysis.
 
 ## Dashboard model
 
-- Use one dashboard view containing one instance of each enabled analyzer.
-- Do not add separate Overview and Focus Spectrum modes. In particular, do not
-  duplicate Spectrum or hide the rest of the dashboard behind a focus switch.
-- Treat Spectrum, Peak/RMS, Spectrogram, Stereo field/correlation, and Loudness
-  as logical tile regions within the dashboard.
-- Keep utility UI such as Settings, Metrics, and About outside the analyzer tile
-  grid.
+- Use one dashboard view containing one instance of every panel.
+- Do not add Overview or Focus Spectrum modes, duplicate Spectrum, or hide the
+  rest of the dashboard behind a focus switch.
+- Keep the panel order and adjacency fixed.
+- Do not allow moving, reordering, hiding, detaching, or floating panels.
+- Keep utility UI such as Settings, Metrics, and About outside the analyzer
+  tile grid.
 - Keep the whole editor resizable.
 
-The default visual hierarchy is qualitative rather than a fixed column count:
+All tiles are logical regions of one Metal canvas, not separate native views or
+renderers.
 
-| Panel | Default emphasis |
-| --- | --- |
-| Spectrum | Dominant, occupying most of the upper dashboard |
-| Peak/RMS | Compact, narrow vertical strip beside Spectrum |
-| Spectrogram | Largest history panel in the lower dashboard |
-| Stereo field/correlation | Medium supporting panel |
-| Loudness | Particularly slim vertical panel |
+### Default tile geometry
 
-Exact default spans remain open. The prototype's grid proportions are examples,
-not requirements.
+Lay out the dashboard below the toolbar on a normalized 48-column by 40-row
+grid. Grid bounds below are half-open. Use an 8-logical-point outer inset and
+8-logical-point gutters; split percentages describe the available track span
+before those fixed gutters are subtracted.
+
+The compiled default split indices are:
+
+- horizontal row split: `22 / 40`;
+- upper-row column split: `36 / 48`; and
+- lower-row column splits: `28 / 48` and `40 / 48`.
+
+| Panel | Grid bounds | Default proportion |
+| --- | --- | --- |
+| Spectrum | columns `0..36`, rows `0..22` | 75% of upper width, 55% of dashboard height |
+| Peak/RMS | columns `36..48`, rows `0..22` | 25% of upper width |
+| Spectrogram | columns `0..28`, rows `22..40` | 58.33% of lower width, 45% of dashboard height |
+| Stereo field/correlation | columns `28..40`, rows `22..40` | 25% of lower width |
+| Loudness | columns `40..48`, rows `22..40` | 16.67% of lower width |
+
+These proportions encode the requested dominant Spectrum, narrow Peak/RMS,
+large Spectrogram, supporting Stereo field, and particularly slim Loudness
+panel.
 
 ### Constrained layout editing
 
-- Provide an explicit **Edit layout** mode.
-- Let the user adjust both tile width and tile height.
-- Resize from tile edges or corners and snap results to a constrained dashboard
-  grid.
-- Keep tiles inside the dashboard and prevent the edit operation from producing
-  overlapping, detached, or floating analyzer windows.
-- Show resize affordances only while edit mode is active so the normal analyzer
-  view remains visually quiet.
+Provide an explicit **Edit layout** mode with exactly four adjustable splitters:
 
-This is intentionally constrained layout editing, not an arbitrary windowing
-system. Tile movement, hiding, reordering, collision resolution, minimum sizes,
-reset behavior, keyboard editing, and persistence are still open.
+- the horizontal row boundary;
+- the Spectrum/Peak-RMS boundary;
+- the Spectrogram/Stereo boundary; and
+- the Stereo/Loudness boundary.
 
-## Settings inspector
+Dragging a splitter transfers space between adjacent panels. It does not push
+other tiles, reorder them, create overlap, or move an outer dashboard edge.
+Outer-edge resizing remains editor-window resizing.
 
-Open analyzer settings from the editor toolbar in a temporary right-side
-inspector. Settings must not become a permanent analyzer tile.
+Snap each splitter to the normalized grid and clamp before publishing one
+immutable layout snapshot. The constraints are:
 
-The native Metal surface cannot reliably be covered by a sibling JUCE component
-in every plugin host. The implementation may therefore reserve space and narrow
-or reflow the Metal canvas while the inspector is open instead of drawing JUCE
-controls over it. The user-facing behavior remains a temporary right-side
-inspector.
+- horizontal split: rows `14..26`, leaving at least 35% height in each band;
+- upper split: columns `24..40`, leaving Spectrum at least 50% and Peak/RMS at
+  least 16.67% of the upper width;
+- Spectrogram width: at least 16 columns;
+- Stereo field width: at least 8 columns;
+- Loudness width: 6 to 12 columns; and
+- lower splitters cannot cross.
 
-### Shared analysis controls
+Because adjacency is fixed, collision handling is only clamping ordered
+splitters; there is no tile-placement algorithm.
 
-The inspector must provide room for:
+### Edit interaction and accessibility
 
-- FFT size;
-- FFT window function; and
-- analysis update rate.
+- Show subtle visual handles only in edit mode, but give each at least a
+  24-logical-point pointer hit band.
+- Tab and Shift-Tab cycle the four splitters.
+- Axis-appropriate arrow keys move the focused splitter by one grid track.
+- Home and End move it to its legal extremes.
+- Expose each handle as an accessible adjustable separator. Its name and value
+  identify both affected panels and their current percentages.
+- **Done** commits and persists the working layout.
+- **Cancel** or Escape restores the layout present when edit mode opened.
+- **Reset layout** loads the compiled defaults into the working edit; **Done**
+  must still be pressed to persist them.
+- Closing or destroying an editor during an edit discards the uncommitted
+  working layout.
 
-The exact choices, ranges, and defaults are open. The current 4096-point Hann
-FFT at 60 analysis updates per second remains the initial implementation and
-reference workload, not a permanent restriction on these controls.
+### Global layout persistence
 
-FFT size and window changes are structural analysis changes. They must occur
-off the audio callback, advance or replace the analysis generation, discard
-incompatible snapshots, and reset overlap, smoothing, and Spectrogram history
-as needed. They should not be treated as audio-rate automation.
+Layout is one versioned, per-user global presentation preference shared by AUv2
+and VST3. It is not a host parameter and is not serialized into plugin-instance
+or DAW-project state.
 
-Analysis update rate and display refresh rate are separate. Lowering the FFT or
-Spectrogram update cadence must not reduce display-linked animation from 120 Hz
-to the analysis rate; the renderer continues at the cadence granted by the
-active display and consumes the newest complete analysis snapshot.
+Persist only the four integer split indices after **Done**, using a
+non-audio-thread user preference store with atomic replacement and
+cross-process serialization. Last completed edit wins. New editors load the
+global layout; already-open editors do not live-sync. Missing, malformed, or
+unknown versions use the compiled defaults.
 
-### Shared frequency spacing
+## Utility panels
 
-- Provide one continuous frequency-spacing control ranging from Linear through
-  intermediate blends to Logarithmic.
-- Spectrum and Spectrogram use the same setting and the same coordinate
-  transform; do not expose independent frequency scales.
-- Apply the transform to Spectrum data and numeric ticks along its horizontal
-  axis.
-- Apply the same transform to Spectrogram energy traces and numeric ticks along
-  its vertical axis.
-- A presentation-only spacing change should reuse the existing FFT result rather
-  than trigger another FFT merely to move coordinates.
+### Settings inspector
 
-The precise interpolation formula, frequency limits, and tick-selection rules
-remain open.
+Open Settings from the toolbar as a temporary right-side inspector, not an
+analyzer tile. A sibling JUCE component cannot reliably overlap the native Metal
+view, so Settings reserves space beside the canvas when there is room.
 
-### Spectrum controls
+Use a 360-logical-point inspector only when at least 720 logical points remain
+for the dashboard. At narrower editor widths, Settings takes the complete
+content area below the toolbar, becomes vertically scrollable, and the covered
+Metal canvas pauses. The tile topology itself never reflows.
 
-The accepted Spectrum control set includes:
+Organize controls into Shared analysis, Spectrum, Peak/RMS, Spectrogram, Stereo,
+and Loudness sections. Settings documented in each panel section below live in
+that inspector. Changes apply immediately and are saved with the plugin instance;
+there is no separate Apply step. Give each section a reset-to-default action.
+Keep settings for placeholder panels visibly disabled and labeled as not yet
+implemented rather than accepting changes that do nothing without explanation.
 
-- trace color;
-- temporal smoothing;
-- fill visibility or opacity beneath the trace; and
-- displayed dB floor and ceiling.
+### Settings and Metrics exclusivity
 
-Exact ranges, defaults, and whether the fill can be disabled independently are
-open.
+Settings and Metrics do not coexist:
 
-### Spectrogram controls
+- Opening Settings records whether Metrics was visible, temporarily hides it
+  without changing its persisted toggle, then opens Settings.
+- Closing Settings with its close action, toolbar button, or Escape restores
+  Metrics if that recorded value was true.
+- Pressing Metrics while Settings is open is a switch-to action: it cancels
+  automatic restoration, closes Settings, enables Metrics if necessary, and
+  shows it. To turn Metrics off, switch to it and press Metrics again.
+- Accessibility state distinguishes “Metrics requested but temporarily hidden”
+  from Metrics being off.
 
-The accepted Spectrogram control set includes:
+Metrics always keeps a live Metal preview so the act of observing renderer
+performance does not stop the renderer. Prefer 43% of the content width for the
+Metrics panel, clamped to 360–720 logical points while leaving at least 320
+logical points for the preview. The compact preview keeps the five-tile
+topology, but may suppress secondary labels and layout editing. Metrics' own
+vblank-paced graphs and throttled numeric/table updates continue normally.
 
-- intensity palette or trace colors;
-- color response/intensity transfer, including a linear response and other
-  useful responses between low-contrast and high-contrast presentations;
-- dB floor and ceiling used for the color mapping; and
-- visible history duration.
+About remains a separate full-content utility view and may continue to pause the
+canvas while visible.
 
-"Color response" describes how analyzed intensity maps into the palette; it is
-not a second frequency-spacing control. Its final product name, mathematical
-transfer function, range, and defaults remain open.
+## Saved settings and host automation
 
-Changing the visible history duration does not authorize background history
-collection. History stops and resets according to the editor lifecycle rules.
+In a DAW, an **automatable** parameter can appear on a timeline automation lane
+and be changed by the host during playback. Audio Insight's layout and analyzer
+presentation settings do not alter audio, and rapid FFT/window changes would
+rebuild analysis state. Therefore none of the following is host-automatable in
+the initial product:
 
-### State and automation
+- layout;
+- FFT size, window, or requested FFT slice rate;
+- shared frequency spacing;
+- Spectrum or Spectrogram presentation settings;
+- Spectrogram history mode or duration; or
+- panel-specific meter, scope, or loudness presentation settings.
 
-The processor already saves some settings per plugin instance. Before adding
-the expanded controls, explicitly decide:
+Save analyzer configuration as non-automatable per-instance plugin state so a
+DAW project can recall different analyzer views on different instances. Keep
+layout in the global store described above. Metrics remains a non-automatable
+per-instance toggle. Settings visibility, edit-mode working state, active
+history samples, holds, and loudness integration are transient and are not
+serialized.
 
-- which analyzer values are host-automatable parameters;
-- which are non-automatable per-instance configuration;
-- whether any presentation preferences are also global user defaults; and
-- how missing or older state versions migrate to safe defaults.
+Current development builds exposed `spectrumFloor`, `spectrumCeiling`, and
+`spectrumSmoothing` as automatable host parameters. There is no public state or
+automation compatibility baseline yet. When the Settings inspector lands, bump
+the state schema and retain those IDs with their original normalized mappings
+only as deprecated, non-automatable compatibility shims; do not silently assign
+them the new settings' ranges or meanings.
 
-Do not expose structural FFT reconfiguration as unrestricted audio-rate
-automation. Layout persistence and reset behavior remain open questions.
+When loading a legacy state without the new analyzer-configuration subtree:
 
-## Panel requirements
+- preserve the physical floor and ceiling values, clamp them to the new ranges,
+  and lower the floor if necessary to enforce the 24 dB minimum span;
+- map a legacy normalized smoothing value `x <= 0` to Off, otherwise map it to
+  `clamp(15 + 435 * x^2, 25, 2000)` milliseconds, approximating the legacy
+  renderer's release time; and
+- write the result into the versioned per-instance configuration. On later
+  loads that new configuration wins over the compatibility shims.
 
-### Spectrum
+Legacy DAW automation lanes are intentionally not supported after this
+pre-release migration. Missing or malformed values use the documented defaults.
 
-- Spectrum is the dominant real-time FFT visualization and the first analyzer
-  to implement fully.
-- Show numeric frequency ticks along the horizontal axis, using Hz or kHz as
-  appropriate.
-- Show numeric signal-level ticks along the vertical axis in dB.
-- Omit redundant axis-title text such as `X FREQUENCY` and `Y LEVEL`; numeric
-  ticks and their units are sufficient.
-- Use the shared continuous frequency-spacing transform.
-- Apply Spectrum trace color, smoothing, fill, floor, and ceiling settings
-  without blocking analysis or rendering.
+## Shared analysis controls
 
-The visible `dB` versus `dBFS` suffix, frequency range, tick density, slope
-compensation, averaging, and peak-hold behavior remain open.
+| Setting | Accepted choices | Default |
+| --- | --- | --- |
+| FFT size | 1024, 2048, 4096, 8192, 16384 | 4096 |
+| Window | Rectangular, periodic Hann, four-term Blackman-Harris, five-term flat-top | periodic Hann |
+| Requested FFT slice rate | 15, 30, 60, 120 Hz | 60 Hz |
 
-### Peak/RMS
+All non-rectangular windows use the periodic convention. For sample index `n`
+in a transform of length `N`, let `x = 2 * pi * n / N` and use:
 
-- Use a compact, narrow, vertical stereo meter strip.
-- Show distinct left and right channels.
-- Present sample peak and RMS honestly and make the two measurements visually
-  distinguishable.
-- Do not label sample peak as true peak. Reserve that name for a correctly
-  oversampled true-peak implementation if one is added later.
-- Keep the meter substantially narrower than the dominant Spectrum panel.
+```text
+Hann:              0.5 - 0.5 cos(x)
+Blackman-Harris:   0.35875 - 0.48829 cos(x) + 0.14128 cos(2x)
+                   - 0.01168 cos(3x)
+Flat-top:          0.21557895 - 0.41663158 cos(x) + 0.277263158 cos(2x)
+                   - 0.083578947 cos(3x) + 0.006947368 cos(4x)
+```
 
-Meter ballistics, peak hold/reset, numeric readouts, scale ticks, and warning
-threshold colors remain open.
+Correct every window by its coherent gain and use one-sided FFT normalization so
+a bin-centered full-scale sine reads 0 dB internally. FFT size, window, and
+requested slice-rate changes occur off the audio callback, advance the FFT
+generation, discard incompatible snapshots, and reset overlap, Spectrum
+temporal state, and Spectrogram history.
 
-### Spectrogram
+The requested FFT slice rate controls only new Spectrum FFT snapshots and
+Spectrogram history columns. It does not throttle Peak/RMS capture from every
+audio block, Stereo field/correlation sampling, or Loudness' fixed 100 ms
+measurement completions. It is also not the render rate: Metal remains paced by
+the active display, including host/display-permitted 120 Hz, and consumes or
+interpolates the newest complete snapshot. The fair, latest-wins scheduler may
+skip stale FFT work rather than building a backlog. Telemetry reports both
+requested and achieved FFT slice rates.
 
-- Render time-frequency energy as intensity-colored traces over a black or
-  near-black background.
-- The default visual direction is dark blue for lower energy, rising through
-  orange and toward near-white for stronger energy.
-- Preserve a trace-like representation of real energy. Do not substitute broad
-  decorative color bands or a generic striped gradient.
-- Use the shared continuous frequency transform for both energy placement and
-  frequency tick placement.
-- Show only numeric frequency ticks in Hz or kHz around the plot.
+For the single Spectrum and Spectrogram views, combine stereo channels using the
+greater per-bin power so out-of-phase material does not cancel. Analyze a mono
+input once rather than duplicating it as a synthetic stereo pair.
+
+### Invalidation scopes
+
+Use scoped generations rather than one counter that resets unrelated analyzers:
+
+- A capture/lifecycle generation changes after editor reactivation, sample-rate
+  or channel-layout changes, and capture discontinuities. It invalidates every
+  analyzer's temporal state.
+- An FFT generation changes after FFT size, window, or requested slice-rate
+  changes. It invalidates FFT overlap, Spectrum averaging/holds, and Spectrogram
+  history, but not Peak/RMS, Stereo, or Loudness state.
+- A Spectrogram-mapping generation changes with shared frequency spacing. It
+  clears mapped Spectrogram history but does not invalidate FFT results or any
+  other analyzer.
+- Layout, palette, color response/range, and loudness-reference changes are
+  presentation-only and do not advance an analysis generation.
+
+## Shared frequency spacing
+
+Store one spacing value `s` in `[0, 1]`:
+
+- `0` is Linear;
+- `1` is Logarithmic and is the default; and
+- `0.25`, `0.5`, and `0.75` are labeled intermediate marks, while the control
+  remains continuous.
+
+For displayed frequency `f` between `f0` and `f1`:
+
+```text
+linear(f) = (f - f0) / (f1 - f0)
+log(f)    = ln(f / f0) / ln(f1 / f0)
+u(f, s)   = (1 - s) * linear(f) + s * log(f)
+```
+
+Use `f0 = 20 Hz` and `f1 = min(20 kHz, Nyquist)`. Spectrum maps `x = u`.
+Spectrogram maps `y = 1 - u` so high frequency is at the top. Data, traces,
+gridlines, hit testing, and numeric labels all use the same transform.
+
+Build any inverse map or lookup table off the audio thread when spacing, bounds,
+or sample rate changes. A presentation-only spacing change reuses the current
+FFT and does not calculate another FFT. Spectrum remaps immediately;
+Spectrogram starts a new history because its stored rows use the prior mapping.
+
+Generate scale-appropriate “nice” frequency candidates, map them through `u`,
+prioritize endpoints and 1/2/5 multiples, then retain only labels whose measured
+bounds do not overlap. Use integer Hz below 1 kHz and compact kHz above it.
+
+## Spectrum
+
+Spectrum remains the dominant real-time FFT visualization.
+
+### Presentation
+
+- Show only numeric horizontal frequency ticks in Hz/kHz and vertical level
+  ticks such as `-48 dB`.
+- Omit `X FREQUENCY`, `Y LEVEL`, and `dBFS` axis-title chrome. Values are
+  calibrated internally as dBFS even though compact ticks say `dB`.
+- Display 20 Hz through `min(20 kHz, Nyquist)`.
+- Select vertical tick steps from 6, 12, 24, or 48 dB according to panel height,
+  retaining at least 28 logical points between labels.
+- Use the shared continuous frequency transform.
+
+### Settings and defaults
+
+| Setting | Range or choices | Default |
+| --- | --- | --- |
+| Floor | -180 to -36 dB, 1 dB steps | -90 dB |
+| Ceiling | -24 to +12 dB, 1 dB steps | 0 dB |
+| Minimum visible span | 24 dB | 90 dB from defaults |
+| Temporal averaging | Off or 25–2000 ms, logarithmic control | 150 ms |
+| Slope compensation | 0, +3, +4.5, +6 dB/octave, referenced at 1 kHz | 0 dB/octave |
+| Peak-hold duration | Off, 0.25–10 seconds, or Infinite | Off; 2 seconds when first enabled |
+| Hold decay | Fixed at 12 dB/s after a finite hold | 12 dB/s |
+| Trace color | sRGB color value | project cyan |
+| Fill opacity | 0–50%; zero means Off | 18% |
+
+Average power, not already-converted dB values:
+
+```text
+a = exp(-elapsed / timeConstant)
+averagePower = a * previousPower + (1 - a) * currentPower
+```
+
+Rendering interpolation remains separate from this analyzer averaging. Slope
+compensation is presentation-only and the default zero keeps the dB axis
+literal. Peak hold operates on unsmoothed per-bin power; apply the current slope
+to both live and held traces only at presentation. Explicit Clear, capture
+discontinuity, editor reactivation, and FFT/window/sample-rate changes reset
+averaging and holds.
+
+## Peak/RMS
+
+- Use a compact, narrow, vertical stereo L/R strip.
+- Use a linear-in-dB scale from -60 to +3 dBFS with major ticks at -60, -48,
+  -36, -24, -12, -6, 0, and +3.
+- Measure sample peak from the maximum absolute value of every captured sample;
+  do not decimate this path.
+- Measure RMS as an unweighted exponential mean square with a 300 ms time
+  constant, then take its square root and convert with `20 log10`.
+- Do not apply an AES17 +3.01 dB sine calibration offset. A full-scale sine
+  therefore reads approximately -3.01 dBFS RMS.
+- Render RMS as the wider muted fill and sample peak as a thinner brighter
+  indicator.
+- Sample peak has instantaneous attack and 20 dB/s visual release.
+- Hold sample peak for 2 seconds, then decay the hold marker at 20 dB/s.
+- Use neutral/project cyan below -6 dBFS, amber from -6 to below 0 dBFS, and red
+  only at or above 0 dBFS.
+- Latch an `OVER` indicator at or above nominal full scale. Do not label it
+  `CLIP` because floating-point samples at 0 dBFS do not prove waveform
+  clipping.
+- A user reset clears both channel holds and `OVER` latches.
+- Show one-decimal sample-peak readouts when space permits and `-∞` below
+  the measurement floor.
+- For mono input, show one centered meter labeled `M`; do not render two
+  identical meters labeled L and R.
+
+Capture/lifecycle-generation changes, capture discontinuities, and editor
+reactivation reset temporal meter state. FFT-generation changes do not. Host
+transport stop, seek, or loop alone does not clear a hold or `OVER` latch.
+
+Do not claim IEC PPM ballistics or true peak. Oversampled true peak/dBTP,
+selectable RMS standards, and long-term maximum history are deferred.
+
+## Spectrogram
+
+### Presentation
+
+- Render time-frequency energy as intensity-colored traces over literal black.
+- The default Blue Fire palette rises from black through dark navy/blue and
+  orange toward near-white, matching the supplied reference.
+- Preserve real trace-like energy. Do not substitute broad decorative bands,
+  rainbow gradients, or a generic striped field.
+- Use the shared frequency transform for both energy and tick placement.
+- Show only numeric frequency ticks in Hz or kHz.
 - Omit axis-title text, time/history labels, and a visible dB/color legend.
-  Time/history still exists internally and may be adjustable even though the
-  horizontal axis is unlabeled.
-- Stop capture and history accumulation when the editor is inactive. Reopening
-  starts fresh rather than reconstructing the missing interval.
+  Time/history exists internally despite the unlabeled horizontal axis.
+- Use unsmoothed FFT slices; Spectrum averaging must not smear history.
 
-Palette choices, color-response math, history direction, texture resolution,
-history duration, and whether the background is literal black or near-black
-remain open.
+### Settings and defaults
 
-### Stereo field and correlation
+| Setting | Range or choices | Default |
+| --- | --- | --- |
+| Palette | Blue Fire, Inferno, Viridis, Grayscale | Blue Fire |
+| Color response | -2 to +2 | 0 |
+| Color floor | -180 to -36 dB, 1 dB steps | -120 dB |
+| Color ceiling | -24 to +12 dB, 1 dB steps | 0 dB |
+| Minimum color span | 24 dB | 120 dB from defaults |
+| History duration | 2, 5, 10, 20, 30, 60 seconds | 10 seconds |
+| History mode | Scroll or Overwrite | Scroll |
 
-- Reserve one dashboard tile for a Stereo field visualization.
-- Keep correlation integrated with that tile rather than introducing a separate
-  permanent dashboard tile for it.
-- Treat this as a post-first-release analyzer.
+Every palette begins at black and has monotonically increasing perceived
+luminance. Store calibrated dB, normalize it, then apply response:
 
-The vectorscope/goniometer algorithm, normalization, persistence, correlation
-scale, smoothing, and visual style are not yet decided.
+```text
+v = clamp((dB - floor) / (ceiling - floor), 0, 1)
+gamma = 2 ^ response
+paletteCoordinate = v ^ gamma
+```
 
-### Loudness
+Zero is linear in dB. Negative response reveals quieter detail; positive
+response suppresses low energy and isolates stronger traces. This is unrelated
+to frequency spacing.
 
-- Use a particularly slim tile with a vertical loudness bar.
-- Center the bar horizontally.
-- Place the primary loudness value above the bar.
-- Place secondary readings below the bar rather than stacking all text in a
-  column to its left.
-- Treat this as a post-first-release analyzer.
+In Scroll mode, newest history is at the right and older history moves left. In
+Overwrite mode, the write head advances left-to-right, wraps, and shows a subtle
+one-pixel seam. Switching mode reinterprets the same ring and does not clear
+history.
 
-The current mockup's LUFS-I, short-term, and range values are illustrative. The
-supported standard, gating, reset behavior, history, target/reference, and exact
-set of momentary, short-term, integrated, and range measurements remain open.
-Do not ship labels until their underlying measurements are implemented
-correctly.
+### Bounded history storage
 
-### Performance metrics
+- Keep one renderer-owned circular `R16Float` Metal texture containing dB, not
+  precolored RGBA.
+- Palette, dB range, and response changes recolor existing history in the
+  shader without clearing it.
+- Use `min(1024, usable FFT bins)` frequency rows. Each row represents one
+  uniform interval in the current shared coordinate `u`, not a linear FFT-bin
+  index. The shader reverses row direction so high frequency appears at top.
+- On a non-audio worker, inverse-map each row interval to frequency. Preserve a
+  narrow trace by taking the greatest calibrated bin power in that interval; if
+  it contains no bin center, linearly interpolate power at its center. Convert
+  that result to dB for the stored column.
+- Allocate `ceil(history seconds * requested FFT slice rate)` columns, capped at
+  8192.
+- Upload immutable columns through preallocated staging buffers in the normal
+  frame command buffer. Never upload or allocate from the audio callback.
+- Scroll mode remaps circular texture coordinates; never copy the whole texture
+  to scroll pixels. Overwrite mode draws physical ring order.
+- A small bounded non-audio SPSC column queue may let a slower render consume
+  multiple analysis columns without stretching time.
+- Advance history by timestamps. Missing/coalesced intervals become black gap
+  columns rather than making history appear slower than real time.
 
-The existing opt-in Metrics panel remains a utility and observability surface,
-not an analyzer tile. Its collection cadence, exact histories, raw report, and
-visibility lifecycle remain governed by the architecture document and README.
-How Metrics and Settings share the right side when both are requested is open.
+FFT size, window, sample rate, FFT slice rate, or history-duration changes clear
+history and reallocate it if a texture dimension changed. Frequency-spacing
+changes clear the now-incompatible row mapping without reallocating an
+unchanged-size texture; seed the next column from the latest FFT snapshot rather
+than performing a new FFT. Palette, color range, response, layout resize, and
+Scroll/Overwrite changes neither clear nor reallocate history.
+
+Stopping or hiding the editor clears Spectrogram history under the accepted
+zero-background-work lifecycle.
+
+## Stereo field and correlation
+
+- Use a conventional rotated vectorscope:
+
+  ```text
+  x = (right - left) / 2
+  y = (left + right) / 2
+  ```
+
+- Mono is vertical, anti-phase is horizontal, left-only slopes upper-left, and
+  right-only slopes upper-right.
+- Use fixed full-scale coordinates rather than per-frame auto-normalization, so
+  quiet signals do not falsely appear full-scale.
+- Draw a bounded point cloud from at most 4096 uniformly decimated sample pairs
+  covering the latest 250 ms. Fade alpha with age and do not connect decimated
+  points with misleading lines.
+- Use a near-black background, subdued neutral axes, and project-cyan points
+  that brighten where density overlaps.
+- Compute correlation from all samples, not decimated display points. Accumulate
+  all three expectation terms with the same 300 ms exponential time constant:
+
+  ```text
+  correlation = E[left * right] / sqrt(E[left^2] * E[right^2])
+  ```
+
+- Show an em dash when either exponentially averaged channel RMS is below
+  -90 dBFS because correlation is undefined there.
+- Integrate a -1 to +1 correlation strip in the same tile, with minor ticks at
+  -0.5 and +0.5.
+- Use cyan for positive values, neutral gray near zero, and amber for negative
+  values; avoid green/red pass/fail semantics.
+- For mono input, show a centered vertical mono trace and an explicit `MONO`
+  state, but show correlation as an em dash rather than claiming `+1` for a
+  synthetic duplicated pair.
+
+Correlation has no peak hold or manual reset. Capture/lifecycle-generation
+changes and discontinuities reset its smoothing and point history;
+FFT-generation changes do not. Adjustable scope gain, alternate polar modes,
+density heatmaps, correlation history, and multichannel scopes are deferred.
+
+## Loudness
+
+Implement current ITU-R BS.1770-5 K-weighting and channel summation with EBU R128
+measurement semantics. Validate published reference vectors before exposing any
+LUFS label.
+
+Initial measurements are:
+
+- Momentary (`M`): ungated 400 ms;
+- Short-term (`S`): ungated 3 seconds; and
+- Integrated (`I`): gated 400 ms blocks with 75% overlap, an absolute -70 LUFS
+  gate, then a relative -10 LU gate.
+
+Complete measurements every 100 ms. Rendering remains display-linked but does
+not invent new values between analysis updates.
+
+- Use a particularly slim tile with a centered vertical bar.
+- The bar and primary value above it show Momentary loudness.
+- A thin bar marker shows Short-term loudness.
+- Put Short-term and Integrated numeric readings below the bar.
+- Use a linear -60 to 0 LUFS scale and one-decimal readouts.
+- Use a neutral/project-cyan bar and an amber reference line.
+- The presentation-only reference is adjustable from -36 to -9 LUFS in 0.5 LU
+  steps and defaults to -23 LUFS; it does not alter measurement or gating.
+- Show an em dash until a measurement window is ready and `-∞` for a
+  completed silent window.
+
+Integrated loudness begins when its panel becomes active. An explicit **Reset
+loudness** begins a new integration. Its state is transient and also resets on
+sample-rate/channel-layout change, capture discontinuity, or editor
+reactivation. Do not reset merely on host play, stop, seek, or loop, and do not
+serialize integrated state.
+
+Carry the actual host channel layout into Loudness analysis. A mono sample is
+summed once with the BS.1770 mono channel weight; never pass duplicated mono as
+L/R, which would overstate loudness. Only mono and stereo layouts are in the
+initial scope.
+
+Do not add a loudness history graph initially. Loudness Range and true peak are
+deferred. When LRA is added, implement EBU Tech 3342 correctly instead of
+shipping an approximation; do not expose `LRA`, `dBTP`, or true-peak labels
+before reference tests pass.
 
 ## Rendering, analysis, and threading
 
 - Keep dashboard tiles as logical regions of one native Metal surface.
-- Prefer one display-linked frame, drawable, command buffer, and render pass for
+- Use one display-linked frame, drawable, command buffer, and render pass for
   the dashboard rather than one native view or renderer per tile.
 - Use scissor rectangles, logical panel bounds, shared geometry/text resources,
   and textures as appropriate inside that surface.
@@ -257,70 +556,45 @@ How Metrics and Settings share the right side when both are requested is open.
 - Reuse channel measurements, windowed samples, FFT bins, and other compatible
   results through the existing per-instance coordinator and process-wide worker
   pool.
+- Carry actual channel-count/layout metadata through the capture and immutable
+  snapshot path; pointer duplication is not channel-layout metadata.
 - Publish stable immutable snapshots to the renderer. Settings and layout
   changes must not make the render thread read mutable analysis working memory.
-- Keep the audio callback bounded and non-blocking regardless of how many
-  panels are visible.
-
-If panels can eventually be hidden or disabled, their unneeded analysis should
-stop or reduce cadence without affecting audio pass-through or other panels.
+- Keep the audio callback bounded and non-blocking regardless of visible panels.
+- Placeholder panels submit no analysis.
 
 ## Resizing, Retina, and responsive behavior
 
-- Store and compute dashboard geometry in logical points or normalized layout
-  coordinates, not drawable pixels.
+- Keep the existing 720 by 420 logical-point editor minimum.
+- Keep the same dashboard topology at every allowed editor size; do not wrap,
+  reorder, or hide tiles automatically.
+- Reduce minor ticks, labels, grid detail, and optional numeric readouts before
+  compromising primary readings at smaller sizes.
+- Store dashboard geometry in normalized grid coordinates and compute it in
+  logical points, not drawable pixels.
 - Derive physical Metal drawable dimensions from the current backing scale.
 - Support regular-density and Retina displays plus live movement between them;
   do not assume the only scale factors are exactly 1 and 2.
 - Keep plot strokes, text, tick labels, hit targets, and resize affordances crisp
   and visually consistent across backing-scale changes.
 - Rebuild only pixel-density-dependent resources, such as a glyph atlas, when
-  the backing scale changes.
-- Enforce enough space for numeric labels and analyzer content during resize.
-  The exact minimum tile sizes and narrow-window reflow rules remain open.
+  backing scale changes.
 - Preserve display-linked 60 Hz and host/display-permitted 120 Hz animation
-  during live editor and tile resize, subject to the accepted performance gates.
+  during live editor and tile resize, subject to accepted performance gates.
 
 ## Editor lifecycle
 
-The accepted lifecycle policy applies to every future panel:
+The accepted lifecycle policy applies to every panel:
 
-- while attached and visibly active, run only the analysis required by visible
+- while attached and visibly active, run only analysis required by implemented
   panels and render at display cadence;
 - after the hidden, minimized, occluded, detached, or closed debounce, stop
   sample handoff, analysis jobs, all history accumulation, display-link
   callbacks, and Metal submissions; and
-- on reactivation, advance the analysis generation, discard stale snapshots,
-  reset temporal state, and warm up from current audio.
+- on reactivation, advance the capture/lifecycle generation, discard stale
+  snapshots, reset temporal state, and warm up from current audio.
 
-Opening a side Settings inspector while the canvas remains visible does not by
-itself make the editor inactive. About may continue to hide and pause the canvas
-as currently implemented.
-
-## Open questions
-
-- When do constrained layout editing and each post-first-release panel enter the
-  implementation sequence?
-- What are the exact default tile positions and proportions?
-- Can tiles be moved, reordered, hidden, or restored as well as resized?
-- What are the collision rules, minimum sizes, keyboard controls, reset action,
-  and narrow-window reflow behavior?
-- Is layout saved per plugin instance, as a global default, or both?
-- How do Settings and Metrics coexist when both are open?
-- Which settings are automatable, per-instance non-automatable state, or global
-  presentation preferences?
-- Which FFT sizes, window functions, and analysis update rates are supported,
-  and what are their product defaults?
-- What interpolation formula defines intermediate Linear-to-Logarithmic
-  frequency spacing, and how are ticks selected without overlap?
-- What are the Spectrum frequency limits, level-unit suffix, averaging, slope,
-  and peak-hold behaviors?
-- Which Spectrogram palettes are included, what does color response control
-  mathematically, and what are the dB and history ranges/defaults?
-- Which direction does Spectrogram history move, and what texture/history
-  storage strategy meets the performance budget?
-- What meter ballistics, holds, numeric scales, and warning thresholds does
-  Peak/RMS use?
-- Which Stereo field algorithm and correlation presentation are correct?
-- Which loudness standard and exact measurements are implemented, and how do
-  their reset, gating, targets, and history behave?
+Opening a side Settings or Metrics panel while the canvas remains visible does
+not make the editor inactive. Full-content Settings and About views cover and
+pause the canvas; Metrics always retains its compact live preview. No analyzer
+retains or reconstructs an inactive interval.
