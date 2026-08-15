@@ -13,11 +13,9 @@
 #include <memory>
 #include <mutex>
 
-namespace audio_insight
-{
+namespace audio_insight {
 /** Non-real-time diagnostics for one plugin instance's analysis pipeline. */
-struct AnalysisTelemetry
-{
+struct AnalysisTelemetry {
     StereoSampleCapture::Telemetry capture;
     StereoMeterAccumulator::Telemetry meters;
     SharedAnalysisScheduler::Counters scheduler;
@@ -51,8 +49,7 @@ struct AnalysisTelemetry
     requests or wakes a worker. All VisualizationDataSource calls are strictly
     non-real-time.
 */
-class AnalysisCoordinator final : public VisualizationDataSource
-{
+class AnalysisCoordinator final : public VisualizationDataSource {
 public:
     AnalysisCoordinator();
     ~AnalysisCoordinator() override;
@@ -61,26 +58,19 @@ public:
     AnalysisCoordinator& operator=(const AnalysisCoordinator&) = delete;
 
     /** Audio-thread entry point. Null channels are treated as silence. */
-    void captureAudioBlock(const float* left,
-                           const float* right,
-                           std::size_t frameCount,
-                           double sampleRate) noexcept;
+    void captureAudioBlock(
+        const float* left, const float* right, std::size_t frameCount, double sampleRate) noexcept;
 
     void requestAnalysis() noexcept override;
     void setVisualizationActive(bool shouldBeActive) noexcept override;
-    [[nodiscard]] bool
-    copyLatestVisualizationFrame(VisualizationFrame& destination) const noexcept override;
+    [[nodiscard]] bool copyLatestVisualizationFrame(
+        VisualizationFrame& destination) const noexcept override;
 
     [[nodiscard]] bool isVisualizationActive() const noexcept;
     [[nodiscard]] AnalysisTelemetry telemetry() const noexcept;
 
 #if defined(JUCE_UNIT_TESTS) && JUCE_UNIT_TESTS
-    enum class LifecycleTestOperation
-    {
-        request,
-        activate,
-        deactivate
-    };
+    enum class LifecycleTestOperation { request, activate, deactivate };
 
     using LifecycleTestHook = void (*)(void*, LifecycleTestOperation) noexcept;
 

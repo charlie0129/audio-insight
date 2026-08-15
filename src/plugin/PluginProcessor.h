@@ -6,10 +6,8 @@
 
 #include <juce_audio_processors/juce_audio_processors.h>
 
-namespace audio_insight
-{
-class PluginProcessor final : public juce::AudioProcessor, public VisualizationDataSource
-{
+namespace audio_insight {
+class PluginProcessor final : public juce::AudioProcessor, public VisualizationDataSource {
 public:
     PluginProcessor();
     ~PluginProcessor() override = default;
@@ -43,8 +41,8 @@ public:
 
     void requestAnalysis() noexcept override;
     void setVisualizationActive(bool shouldBeActive) noexcept override;
-    [[nodiscard]] bool
-    copyLatestVisualizationFrame(VisualizationFrame& destination) const noexcept override;
+    [[nodiscard]] bool copyLatestVisualizationFrame(
+        VisualizationFrame& destination) const noexcept override;
 
 private:
     static juce::AudioProcessorValueTreeState::ParameterLayout createParameterLayout();

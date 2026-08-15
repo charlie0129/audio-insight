@@ -9,11 +9,9 @@
 #include <cstdint>
 #include <memory>
 
-namespace audio_insight
-{
+namespace audio_insight {
 /** A point-in-time copy of the Metal renderer's non-real-time telemetry. */
-struct MetalRenderTelemetry
-{
+struct MetalRenderTelemetry {
     // A callback is attributed to host delay only when it begins after the
     // CAMetalDisplayLink update's targetTimestamp. CPU and GPU deadline misses
     // are independently compared with targetPresentationTimestamp. The
@@ -68,8 +66,7 @@ struct MetalRenderTelemetry
 };
 
 /** Thread-safe render settings corresponding to the spectrum APVTS values. */
-struct SpectrumRenderSettings
-{
+struct SpectrumRenderSettings {
     float floorDecibels = -90.0F;
     float ceilingDecibels = 0.0F;
     float smoothing = 0.65F;
@@ -84,8 +81,7 @@ struct SpectrumRenderSettings
     attachment, and Metal availability are additionally considered before the
     renderer or its VisualizationDataSource is activated.
 */
-class MetalVisualization final : public juce::NSViewComponent
-{
+class MetalVisualization final : public juce::NSViewComponent {
 public:
     explicit MetalVisualization(VisualizationDataSource& dataSource);
     ~MetalVisualization() override;

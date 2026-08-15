@@ -6,16 +6,14 @@
 #include <cstddef>
 #include <cstdint>
 
-namespace audio_insight
-{
+namespace audio_insight {
 inline constexpr std::size_t fftOrder = 12;
 inline constexpr std::size_t fftSize = std::size_t { 1 } << fftOrder;
 inline constexpr std::size_t spectrumBinCount = (fftSize / 2) + 1;
 inline constexpr float minimumDisplayDecibels = -120.0F;
 
-struct VisualizationFrame
-{
-    std::array<float, spectrumBinCount> spectrumDecibels {};
+struct VisualizationFrame {
+    std::array<float, spectrumBinCount> spectrumDecibels { };
     std::array<float, 2> peakDecibels { minimumDisplayDecibels, minimumDisplayDecibels };
     std::array<float, 2> rmsDecibels { minimumDisplayDecibels, minimumDisplayDecibels };
 

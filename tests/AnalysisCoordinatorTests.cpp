@@ -15,19 +15,16 @@
 #include <numbers>
 #include <thread>
 
-namespace audio_insight
-{
-namespace
-{
+namespace audio_insight {
+namespace {
 using namespace std::chrono_literals;
 
 template <typename Predicate>
 bool waitForFrame(AnalysisCoordinator& coordinator, VisualizationFrame& frame,
-                  Predicate&& predicate, const std::chrono::milliseconds timeout = 2s)
+    Predicate&& predicate, const std::chrono::milliseconds timeout = 2s)
 {
     const auto deadline = std::chrono::steady_clock::now() + timeout;
-    while (std::chrono::steady_clock::now() < deadline)
-    {
+    while (std::chrono::steady_clock::now() < deadline) {
         coordinator.requestAnalysis();
         if (coordinator.copyLatestVisualizationFrame(frame) && predicate(frame))
             return true;
@@ -44,29 +41,26 @@ bool waitForFrame(AnalysisCoordinator& coordinator, VisualizationFrame& frame,
 }
 
 #if defined(JUCE_UNIT_TESTS) && JUCE_UNIT_TESTS
-struct LifecycleHookBarrier
-{
-    explicit LifecycleHookBarrier(const AnalysisCoordinator::LifecycleTestOperation operationToBlock)
+struct LifecycleHookBarrier {
+    explicit LifecycleHookBarrier(
+        const AnalysisCoordinator::LifecycleTestOperation operationToBlock)
         : operation(operationToBlock)
     {
     }
 
-    static void invoke(void* const context,
-                       const AnalysisCoordinator::LifecycleTestOperation operation) noexcept
+    static void invoke(
+        void* const context, const AnalysisCoordinator::LifecycleTestOperation operation) noexcept
     {
         auto& barrier = *static_cast<LifecycleHookBarrier*>(context);
         if (operation != barrier.operation)
             return;
 
-        try
-        {
+        try {
             std::unique_lock lock(barrier.mutex);
             barrier.entered = true;
             barrier.condition.notify_all();
             barrier.condition.wait(lock, [&barrier] { return barrier.released; });
-        }
-        catch (...)
-        {
+        } catch (...) {
         }
     }
 
@@ -91,11 +85,9 @@ struct LifecycleHookBarrier
 };
 #endif
 
-class AnalysisCoordinatorTests final : public juce::UnitTest
-{
+class AnalysisCoordinatorTests final : public juce::UnitTest {
 public:
-    AnalysisCoordinatorTests()
-        : UnitTest("Analysis coordinator", "audio-insight")
+    AnalysisCoordinatorTests() : UnitTest("Analysis coordinator", "audio-insight")
     {
     }
 
@@ -104,7 +96,7 @@ public:
         beginTest("Inactive instances do not capture or schedule work");
         {
             AnalysisCoordinator coordinator;
-            constexpr std::array<float, 16> samples {};
+            constexpr std::array<float, 16> samples { };
 
             coordinator.captureAudioBlock(samples.data(), samples.data(), samples.size(), 48'000.0);
             coordinator.requestAnalysis();
@@ -122,15 +114,15 @@ public:
             coordinator.setVisualizationActive(true);
             expect(coordinator.isVisualizationActive());
 
-            std::array<float, fftSize> left {};
-            std::array<float, fftSize> right {};
+            std::array<float, fftSize> left { };
+            std::array<float, fftSize> right { };
             constexpr std::size_t sineBin = 96;
 
-            for (std::size_t frame = 0; frame < left.size(); ++frame)
-            {
-                left[frame] = 0.5F * std::sin(static_cast<float>(
-                    2.0 * std::numbers::pi * static_cast<double>(sineBin)
-                    * static_cast<double>(frame) / static_cast<double>(fftSize)));
+            for (std::size_t frame = 0; frame < left.size(); ++frame) {
+                left[frame] = 0.5F
+                    * std::sin(
+                        static_cast<float>(2.0 * std::numbers::pi * static_cast<double>(sineBin)
+                            * static_cast<double>(frame) / static_cast<double>(fftSize)));
                 right[frame] = left[frame] * 0.5F;
             }
 
@@ -164,7 +156,7 @@ public:
             const auto afterEmptyRequests = coordinator.telemetry();
             expect(afterEmptyRequests.scheduler.submitted == submittedBeforeEmptyRequests);
             expect(afterEmptyRequests.emptyAnalysisRequestsAvoided
-                   >= activeTelemetry.emptyAnalysisRequestsAvoided + 32);
+                >= activeTelemetry.emptyAnalysisRequestsAvoided + 32);
 
             coordinator.setVisualizationActive(false);
             const auto beforeClosedCapture = coordinator.telemetry();
@@ -174,11 +166,11 @@ public:
 
             expect(!coordinator.isVisualizationActive());
             expect(afterClosedCapture.capture.attemptedChunks
-                   == beforeClosedCapture.capture.attemptedChunks);
+                == beforeClosedCapture.capture.attemptedChunks);
             expect(afterClosedCapture.meters.attemptedBlocks
-                   == beforeClosedCapture.meters.attemptedBlocks);
-            expect(afterClosedCapture.scheduler.submitted
-                   == beforeClosedCapture.scheduler.submitted);
+                == beforeClosedCapture.meters.attemptedBlocks);
+            expect(
+                afterClosedCapture.scheduler.submitted == beforeClosedCapture.scheduler.submitted);
         }
 
         beginTest("A saturated capture queue fast-forwards to one newest FFT window");
@@ -186,13 +178,12 @@ public:
             AnalysisCoordinator coordinator;
             coordinator.setVisualizationActive(true);
 
-            std::array<float, StereoSampleCapture::framesPerSlot> samples {};
+            std::array<float, StereoSampleCapture::framesPerSlot> samples { };
             samples.fill(0.25F);
             constexpr auto publishedBlocks = StereoSampleCapture::slotCount * 2;
-            for (std::size_t block = 0; block < publishedBlocks; ++block)
-            {
-                coordinator.captureAudioBlock(samples.data(), samples.data(), samples.size(),
-                                              48'000.0);
+            for (std::size_t block = 0; block < publishedBlocks; ++block) {
+                coordinator.captureAudioBlock(
+                    samples.data(), samples.data(), samples.size(), 48'000.0);
             }
 
             VisualizationFrame frame;
@@ -204,26 +195,25 @@ public:
             expect(backlogTelemetry.capture.reclaimedReadyChunks > 0);
             expect(backlogTelemetry.backlogDiscardedFrames >= fftSize);
             expect(backlogTelemetry.maximumJobSpectrumTransforms <= 1,
-                   "A saturated queue performed more than one display-useful transform");
+                "A saturated queue performed more than one display-useful transform");
             expect(backlogTelemetry.spectrumCapturedFrameEnd == frame.capturedFrameEnd);
             expect(backlogTelemetry.meterCapturedFrameEnd == frame.capturedFrameEnd);
 
             const auto spectrumEndpoint = backlogTelemetry.spectrumCapturedFrameEnd;
-            constexpr std::array<float, 128> shortBlock {};
-            coordinator.captureAudioBlock(shortBlock.data(), shortBlock.data(), shortBlock.size(),
-                                          48'000.0);
+            constexpr std::array<float, 128> shortBlock { };
+            coordinator.captureAudioBlock(
+                shortBlock.data(), shortBlock.data(), shortBlock.size(), 48'000.0);
 
-            const auto receivedMeterOnlyUpdate = waitForFrame(
-                coordinator, frame,
-                [spectrumEndpoint](const auto& candidate) {
-                    return candidate.capturedFrameEnd > spectrumEndpoint;
-                });
+            const auto receivedMeterOnlyUpdate
+                = waitForFrame(coordinator, frame, [spectrumEndpoint](const auto& candidate) {
+                      return candidate.capturedFrameEnd > spectrumEndpoint;
+                  });
             expect(receivedMeterOnlyUpdate);
 
             const auto freshnessTelemetry = coordinator.telemetry();
             expect(freshnessTelemetry.spectrumCapturedFrameEnd == spectrumEndpoint);
-            expect(freshnessTelemetry.meterCapturedFrameEnd
-                   == spectrumEndpoint + shortBlock.size());
+            expect(
+                freshnessTelemetry.meterCapturedFrameEnd == spectrumEndpoint + shortBlock.size());
         }
 
         beginTest("Transport-stop staleness publishes one cleared frame without empty jobs");
@@ -231,13 +221,12 @@ public:
             AnalysisCoordinator coordinator;
             coordinator.setVisualizationActive(true);
 
-            std::array<float, fftSize> signal {};
+            std::array<float, fftSize> signal { };
             signal.fill(0.5F);
             coordinator.captureAudioBlock(signal.data(), signal.data(), signal.size(), 48'000.0);
 
             VisualizationFrame signalFrame;
-            const auto receivedSignal = waitForFrame(
-                coordinator, signalFrame,
+            const auto receivedSignal = waitForFrame(coordinator, signalFrame,
                 [](const auto& candidate) { return candidate.spectrumValid; });
             expect(receivedSignal);
 
@@ -245,11 +234,10 @@ public:
             const auto receivedClear = waitForFrame(
                 coordinator, clearedFrame,
                 [](const auto& candidate) {
-                    return !candidate.spectrumValid
-                           && isDisplayFloor(candidate.peakDecibels[0])
-                           && isDisplayFloor(candidate.peakDecibels[1])
-                           && isDisplayFloor(candidate.rmsDecibels[0])
-                           && isDisplayFloor(candidate.rmsDecibels[1]);
+                    return !candidate.spectrumValid && isDisplayFloor(candidate.peakDecibels[0])
+                        && isDisplayFloor(candidate.peakDecibels[1])
+                        && isDisplayFloor(candidate.rmsDecibels[0])
+                        && isDisplayFloor(candidate.rmsDecibels[1]);
                 },
                 1s);
             expect(receivedClear, "A stopped transport left the last meters frozen");
@@ -273,20 +261,19 @@ public:
             AnalysisCoordinator coordinator;
             coordinator.setVisualizationActive(true);
 
-            std::array<float, fftSize> signal {};
+            std::array<float, fftSize> signal { };
             signal.fill(0.25F);
             coordinator.captureAudioBlock(signal.data(), signal.data(), signal.size(), 48'000.0);
 
             VisualizationFrame activeFrame;
             expect(waitForFrame(coordinator, activeFrame,
-                                [](const auto& candidate) { return candidate.spectrumValid; }));
+                [](const auto& candidate) { return candidate.spectrumValid; }));
 
             coordinator.setVisualizationActive(false);
             coordinator.setVisualizationActive(true);
 
             VisualizationFrame reopenedFrame;
-            const auto receivedFreshGeneration = waitForFrame(
-                coordinator, reopenedFrame,
+            const auto receivedFreshGeneration = waitForFrame(coordinator, reopenedFrame,
                 [oldGeneration = activeFrame.generation](const auto& candidate) {
                     return candidate.generation > oldGeneration && !candidate.spectrumValid;
                 });
@@ -302,7 +289,7 @@ public:
         {
             AnalysisCoordinator coordinator;
             coordinator.setVisualizationActive(true);
-            constexpr std::array<float, 64> samples {};
+            constexpr std::array<float, 64> samples { };
             coordinator.captureAudioBlock(samples.data(), samples.data(), samples.size(), 48'000.0);
 
             LifecycleHookBarrier barrier(AnalysisCoordinator::LifecycleTestOperation::deactivate);
@@ -332,14 +319,14 @@ public:
             const auto telemetry = coordinator.telemetry();
             expect(!coordinator.isVisualizationActive());
             expect(telemetry.scheduler.submitted == 0,
-                   "A renderer request slipped in after deactivation drained the client");
+                "A renderer request slipped in after deactivation drained the client");
         }
 
         beginTest("A request linearized before deactivation is cancelled and drained");
         {
             AnalysisCoordinator coordinator;
             coordinator.setVisualizationActive(true);
-            constexpr std::array<float, 64> samples {};
+            constexpr std::array<float, 64> samples { };
             coordinator.captureAudioBlock(samples.data(), samples.data(), samples.size(), 48'000.0);
 
             LifecycleHookBarrier barrier(AnalysisCoordinator::LifecycleTestOperation::request);

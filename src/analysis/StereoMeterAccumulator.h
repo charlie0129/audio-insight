@@ -9,14 +9,12 @@
 #include <cstddef>
 #include <cstdint>
 
-namespace audio_insight
-{
-struct StereoMeterReading
-{
-    std::array<float, 2> peakLinear{};
-    std::array<float, 2> rmsLinear{};
-    std::array<float, 2> peakDecibels{minimumDisplayDecibels, minimumDisplayDecibels};
-    std::array<float, 2> rmsDecibels{minimumDisplayDecibels, minimumDisplayDecibels};
+namespace audio_insight {
+struct StereoMeterReading {
+    std::array<float, 2> peakLinear { };
+    std::array<float, 2> rmsLinear { };
+    std::array<float, 2> peakDecibels { minimumDisplayDecibels, minimumDisplayDecibels };
+    std::array<float, 2> rmsDecibels { minimumDisplayDecibels, minimumDisplayDecibels };
 
     std::uint64_t generation = 0;
     std::uint64_t firstSequence = 0;
@@ -37,21 +35,18 @@ struct StereoMeterReading
     separate from raw sample capture, so reclaiming FFT input cannot erase a
     large recent meter peak.
 */
-class StereoMeterAccumulator final
-{
+class StereoMeterAccumulator final {
 public:
     static constexpr std::size_t slotCount = 8;
 
-    struct PublishResult
-    {
+    struct PublishResult {
         std::uint64_t sequence = 0;
         bool published = false;
         bool coalesced = false;
         bool dropped = false;
     };
 
-    struct Telemetry
-    {
+    struct Telemetry {
         std::uint64_t attemptedBlocks = 0;
         std::uint64_t publishedBlocks = 0;
         std::uint64_t coalescedBlocks = 0;
@@ -68,8 +63,7 @@ public:
 
     /** Audio-thread entry point. Null channels are treated as silence. */
     [[nodiscard]] PublishResult publishBlock(const float* left, const float* right,
-                                             std::size_t frameCount, double sampleRate,
-                                             std::uint64_t generation) noexcept;
+        std::size_t frameCount, double sampleRate, std::uint64_t generation) noexcept;
 
     /**
         Drains and coalesces all complete publications available at the time of
@@ -86,23 +80,16 @@ public:
     void discardPending() noexcept;
 
 private:
-    enum class SlotState : std::uint32_t
-    {
-        free,
-        writing,
-        ready,
-        reading
-    };
+    enum class SlotState : std::uint32_t { free, writing, ready, reading };
 
     static_assert(std::atomic<SlotState>::is_always_lock_free);
     static_assert(std::atomic<SlotState>::is_always_lock_free);
     static_assert(std::atomic<std::uint32_t>::is_always_lock_free);
     static_assert(std::atomic<std::uint64_t>::is_always_lock_free);
 
-    struct Aggregate
-    {
-        std::array<float, 2> peak{};
-        std::array<double, 2> sumSquares{};
+    struct Aggregate {
+        std::array<float, 2> peak { };
+        std::array<double, 2> sumSquares { };
         std::uint64_t frameCount = 0;
         std::uint64_t representedBlocks = 0;
         std::uint64_t generation = 0;
@@ -113,23 +100,21 @@ private:
         bool containsSequenceGap = false;
     };
 
-    struct Slot
-    {
-        std::atomic<SlotState> state{SlotState::free};
-        Aggregate aggregate{};
+    struct Slot {
+        std::atomic<SlotState> state { SlotState::free };
+        Aggregate aggregate { };
     };
 
     [[nodiscard]] static Aggregate measure(const float* left, const float* right,
-                                           std::size_t frameCount, double sampleRate,
-                                           std::uint64_t generation, std::uint64_t sequence,
-                                           std::uint64_t capturedFrameEnd) noexcept;
+        std::size_t frameCount, double sampleRate, std::uint64_t generation, std::uint64_t sequence,
+        std::uint64_t capturedFrameEnd) noexcept;
     static void merge(Aggregate& destination, const Aggregate& source) noexcept;
     [[nodiscard]] static float linearToDecibels(float value) noexcept;
     [[nodiscard]] bool publishToFreeSlot(const Aggregate& aggregate) noexcept;
     [[nodiscard]] bool coalesceIntoNewestReady(const Aggregate& aggregate) noexcept;
     void updateReadyHighWaterMark() noexcept;
 
-    std::array<Slot, slotCount> slots_{};
+    std::array<Slot, slotCount> slots_ { };
 
     // Producer-owned counters.
     std::uint64_t nextSequence_ = 1;
@@ -141,11 +126,11 @@ private:
     std::uint64_t consumerPreviousGeneration_ = 0;
     std::uint64_t consumerPreviousSequence_ = 0;
 
-    std::atomic<std::uint64_t> attemptedBlocks_{0};
-    std::atomic<std::uint64_t> publishedBlocks_{0};
-    std::atomic<std::uint64_t> coalescedBlocks_{0};
-    std::atomic<std::uint64_t> droppedBlocks_{0};
-    std::atomic<std::uint64_t> consumerDiscontinuities_{0};
-    std::atomic<std::uint32_t> readyHighWaterMark_{0};
+    std::atomic<std::uint64_t> attemptedBlocks_ { 0 };
+    std::atomic<std::uint64_t> publishedBlocks_ { 0 };
+    std::atomic<std::uint64_t> coalescedBlocks_ { 0 };
+    std::atomic<std::uint64_t> droppedBlocks_ { 0 };
+    std::atomic<std::uint64_t> consumerDiscontinuities_ { 0 };
+    std::atomic<std::uint32_t> readyHighWaterMark_ { 0 };
 };
 } // namespace audio_insight

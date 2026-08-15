@@ -7,27 +7,24 @@
 #include <limits>
 #include <numbers>
 
-namespace audio_insight
-{
-namespace
-{
+namespace audio_insight {
+namespace {
 [[nodiscard]] bool sampleRatesDiffer(const double left, const double right) noexcept
 {
-    const auto scale = std::max({1.0, std::abs(left), std::abs(right)});
+    const auto scale = std::max({ 1.0, std::abs(left), std::abs(right) });
     return std::abs(left - right) > std::numeric_limits<double>::epsilon() * scale * 4.0;
 }
 } // namespace
 
 HannSpectrumAnalyzer::HannSpectrumAnalyzer(const double targetUpdatesPerSecond)
     : targetUpdatesPerSecond_(std::isfinite(targetUpdatesPerSecond) && targetUpdatesPerSecond > 0.0
-                                  ? targetUpdatesPerSecond
-                                  : 60.0)
+              ? targetUpdatesPerSecond
+              : 60.0)
 {
     double windowSum = 0.0;
-    for (std::size_t index = 0; index < hannWindow_.size(); ++index)
-    {
-        const auto phase = (2.0 * std::numbers::pi * static_cast<double>(index)) /
-                           static_cast<double>(fftSize - 1);
+    for (std::size_t index = 0; index < hannWindow_.size(); ++index) {
+        const auto phase = (2.0 * std::numbers::pi * static_cast<double>(index))
+            / static_cast<double>(fftSize - 1);
         const auto coefficient = static_cast<float>(0.5 * (1.0 - std::cos(phase)));
         hannWindow_[index] = coefficient;
         windowSum += coefficient;
@@ -37,19 +34,17 @@ HannSpectrumAnalyzer::HannSpectrumAnalyzer(const double targetUpdatesPerSecond)
     interiorBinScale_ = 2.0F * edgeBinScale_;
 }
 
-bool HannSpectrumAnalyzer::process(const CapturedStereoChunkView& chunk,
-                                   VisualizationFrame& destination) noexcept
+bool HannSpectrumAnalyzer::process(
+    const CapturedStereoChunkView& chunk, VisualizationFrame& destination) noexcept
 {
     ++statistics_.inputChunks;
 
-    if (chunk.frameCount == 0 || chunk.left == nullptr || chunk.right == nullptr ||
-        !std::isfinite(chunk.sampleRate) || chunk.sampleRate <= 0.0)
-    {
+    if (chunk.frameCount == 0 || chunk.left == nullptr || chunk.right == nullptr
+        || !std::isfinite(chunk.sampleRate) || chunk.sampleRate <= 0.0) {
         return false;
     }
 
-    if (chunk.capturedFrameEnd < chunk.frameCount)
-    {
+    if (chunk.capturedFrameEnd < chunk.frameCount) {
         resetTemporalState(ResetReason::capturedFrameGap, &destination);
         hasPreviousChunk_ = false;
         previousGeneration_ = 0;
@@ -61,30 +56,21 @@ bool HannSpectrumAnalyzer::process(const CapturedStereoChunkView& chunk,
     ResetReason resetReason = ResetReason::explicitReset;
     bool needsReset = false;
 
-    if (hasPreviousChunk_)
-    {
-        if (chunk.generation != previousGeneration_)
-        {
+    if (hasPreviousChunk_) {
+        if (chunk.generation != previousGeneration_) {
             resetReason = ResetReason::generationChange;
             needsReset = true;
-        }
-        else if (chunk.sequence != previousChunkSequence_ + 1 || chunk.followsDiscontinuity)
-        {
+        } else if (chunk.sequence != previousChunkSequence_ + 1 || chunk.followsDiscontinuity) {
             resetReason = ResetReason::sequenceGap;
             needsReset = true;
-        }
-        else
-        {
+        } else {
             const auto hasValidFrameRange = chunk.capturedFrameEnd >= chunk.frameCount;
-            const auto capturedFrameStart =
-                hasValidFrameRange ? chunk.capturedFrameEnd - chunk.frameCount : 0;
-            if (!hasValidFrameRange || capturedFrameStart != previousCapturedFrameEnd_)
-            {
+            const auto capturedFrameStart
+                = hasValidFrameRange ? chunk.capturedFrameEnd - chunk.frameCount : 0;
+            if (!hasValidFrameRange || capturedFrameStart != previousCapturedFrameEnd_) {
                 resetReason = ResetReason::capturedFrameGap;
                 needsReset = true;
-            }
-            else if (sampleRatesDiffer(sampleRate_, chunk.sampleRate))
-            {
+            } else if (sampleRatesDiffer(sampleRate_, chunk.sampleRate)) {
                 resetReason = ResetReason::sampleRateChange;
                 needsReset = true;
             }
@@ -100,8 +86,7 @@ bool HannSpectrumAnalyzer::process(const CapturedStereoChunkView& chunk,
     bool produced = false;
     const auto chunkFrameStart = chunk.capturedFrameEnd - chunk.frameCount;
 
-    for (std::size_t frame = 0; frame < chunk.frameCount; ++frame)
-    {
+    for (std::size_t frame = 0; frame < chunk.frameCount; ++frame) {
         leftRing_[writeIndex_] = std::isfinite(chunk.left[frame]) ? chunk.left[frame] : 0.0F;
         rightRing_[writeIndex_] = std::isfinite(chunk.right[frame]) ? chunk.right[frame] : 0.0F;
         writeIndex_ = (writeIndex_ + 1) % fftSize;
@@ -110,8 +95,7 @@ bool HannSpectrumAnalyzer::process(const CapturedStereoChunkView& chunk,
 
         const bool firstWindowReady = !hasProducedSinceReset_ && validSampleCount_ == fftSize;
         const bool nextHopReady = hasProducedSinceReset_ && samplesSinceTransform_ >= hopSize_;
-        if (firstWindowReady || nextHopReady)
-        {
+        if (firstWindowReady || nextHopReady) {
             runTransform(chunk.generation, chunkFrameStart + frame + 1, destination);
             produced = true;
         }
@@ -133,8 +117,8 @@ void HannSpectrumAnalyzer::reset(VisualizationFrame* const destinationToInvalida
     previousCapturedFrameEnd_ = 0;
 }
 
-void HannSpectrumAnalyzer::resetTemporalState(const ResetReason reason,
-                                              VisualizationFrame* const destination) noexcept
+void HannSpectrumAnalyzer::resetTemporalState(
+    const ResetReason reason, VisualizationFrame* const destination) noexcept
 {
     std::fill(leftRing_.begin(), leftRing_.end(), 0.0F);
     std::fill(rightRing_.begin(), rightRing_.end(), 0.0F);
@@ -147,8 +131,7 @@ void HannSpectrumAnalyzer::resetTemporalState(const ResetReason reason,
     if (reason == ResetReason::sequenceGap || reason == ResetReason::capturedFrameGap)
         ++statistics_.sequenceGapResets;
 
-    if (destination != nullptr)
-    {
+    if (destination != nullptr) {
         destination->spectrumDecibels.fill(minimumDisplayDecibels);
         destination->spectrumValid = false;
     }
@@ -162,8 +145,7 @@ void HannSpectrumAnalyzer::configureSampleRate(const double sampleRate) noexcept
 }
 
 void HannSpectrumAnalyzer::runTransform(const std::uint64_t generation,
-                                        const std::uint64_t capturedFrameEnd,
-                                        VisualizationFrame& destination) noexcept
+    const std::uint64_t capturedFrameEnd, VisualizationFrame& destination) noexcept
 {
     prepareChannelTransform(leftRing_, leftWorkspace_);
     prepareChannelTransform(rightRing_, rightWorkspace_);
@@ -171,8 +153,7 @@ void HannSpectrumAnalyzer::runTransform(const std::uint64_t generation,
     fft_.performFrequencyOnlyForwardTransform(leftWorkspace_.data(), true);
     fft_.performFrequencyOnlyForwardTransform(rightWorkspace_.data(), true);
 
-    for (std::size_t bin = 0; bin < spectrumBinCount; ++bin)
-    {
+    for (std::size_t bin = 0; bin < spectrumBinCount; ++bin) {
         const auto scale = (bin == 0 || bin == fftSize / 2) ? edgeBinScale_ : interiorBinScale_;
         const auto magnitude = std::max(leftWorkspace_[bin], rightWorkspace_[bin]) * scale;
         destination.spectrumDecibels[bin] = magnitudeToDecibels(magnitude);
@@ -189,8 +170,7 @@ void HannSpectrumAnalyzer::runTransform(const std::uint64_t generation,
     ++statistics_.transforms;
 }
 
-void HannSpectrumAnalyzer::prepareChannelTransform(
-    const std::array<float, fftSize>& ring,
+void HannSpectrumAnalyzer::prepareChannelTransform(const std::array<float, fftSize>& ring,
     std::array<float, transformWorkspaceSize>& workspace) noexcept
 {
     // Once the ring is full, writeIndex_ identifies its oldest sample.

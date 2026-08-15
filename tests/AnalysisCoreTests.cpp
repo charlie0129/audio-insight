@@ -12,33 +12,30 @@
 #include <cstddef>
 #include <numbers>
 
-namespace audio_insight
-{
-namespace
-{
-class StereoSampleCaptureTests final : public juce::UnitTest
-{
+namespace audio_insight {
+namespace {
+class StereoSampleCaptureTests final : public juce::UnitTest {
 public:
-    StereoSampleCaptureTests() : UnitTest("Stereo sample capture", "audio-insight") {}
+    StereoSampleCaptureTests() : UnitTest("Stereo sample capture", "audio-insight")
+    {
+    }
 
     void runTest() override
     {
         beginTest("Continuous chunks preserve plugin sequence and frame time");
         {
             StereoSampleCapture capture;
-            constexpr std::array<float, 4> left{0.1F, 0.2F, 0.3F, 0.4F};
-            constexpr std::array<float, 4> right{-0.1F, -0.2F, -0.3F, -0.4F};
+            constexpr std::array<float, 4> left { 0.1F, 0.2F, 0.3F, 0.4F };
+            constexpr std::array<float, 4> right { -0.1F, -0.2F, -0.3F, -0.4F };
 
-            for (std::size_t block = 0; block < 3; ++block)
-            {
-                const auto result =
-                    capture.publishBlock(left.data(), right.data(), left.size(), 48000.0, 7);
+            for (std::size_t block = 0; block < 3; ++block) {
+                const auto result
+                    = capture.publishBlock(left.data(), right.data(), left.size(), 48000.0, 7);
                 expect(result.publishedChunks == 1);
                 expect(result.droppedIncomingChunks == 0);
             }
 
-            for (std::uint64_t expectedSequence = 1; expectedSequence <= 3; ++expectedSequence)
-            {
+            for (std::uint64_t expectedSequence = 1; expectedSequence <= 3; ++expectedSequence) {
                 StereoSampleCapture::ReadHandle handle;
                 expect(capture.tryAcquireOldest(handle));
                 expect(handle.view().sequence == expectedSequence);
@@ -58,24 +55,24 @@ public:
         beginTest("Overflow never overwrites reading storage and is observable");
         {
             StereoSampleCapture capture;
-            std::array<float, 1> sample{};
+            std::array<float, 1> sample { };
 
-            for (std::size_t index = 0; index < StereoSampleCapture::slotCount; ++index)
-            {
+            for (std::size_t index = 0; index < StereoSampleCapture::slotCount; ++index) {
                 sample[0] = static_cast<float>(index + 1);
                 expect(capture.publishBlock(sample.data(), sample.data(), sample.size(), 48000.0, 1)
-                           .publishedChunks == 1);
+                           .publishedChunks
+                    == 1);
             }
 
             std::array<StereoSampleCapture::ReadHandle, StereoSampleCapture::slotCount> held;
             expect(capture.tryAcquireOldest(held[0]));
             expectWithinAbsoluteError(held[0].view().left[0], 1.0F, 1.0e-7F);
 
-            for (std::size_t index = 0; index < StereoSampleCapture::slotCount; ++index)
-            {
+            for (std::size_t index = 0; index < StereoSampleCapture::slotCount; ++index) {
                 sample[0] = 100.0F + static_cast<float>(index);
                 expect(capture.publishBlock(sample.data(), sample.data(), sample.size(), 48000.0, 1)
-                           .publishedChunks == 1);
+                           .publishedChunks
+                    == 1);
             }
 
             // The producer reclaimed only ready slots; the held payload is intact.
@@ -93,8 +90,8 @@ public:
 
             // With every fixed slot being read there is no safe reclaim target.
             sample[0] = 999.0F;
-            const auto dropped =
-                capture.publishBlock(sample.data(), sample.data(), sample.size(), 48000.0, 1);
+            const auto dropped
+                = capture.publishBlock(sample.data(), sample.data(), sample.size(), 48000.0, 1);
             expect(dropped.droppedIncomingChunks == 1);
             expect(capture.telemetry().droppedIncomingChunks == 1);
             expectWithinAbsoluteError(held[0].view().left[0], 1.0F, 1.0e-7F);
@@ -102,21 +99,22 @@ public:
     }
 };
 
-class StereoMeterAccumulatorTests final : public juce::UnitTest
-{
+class StereoMeterAccumulatorTests final : public juce::UnitTest {
 public:
-    StereoMeterAccumulatorTests() : UnitTest("Stereo meter accumulator", "audio-insight") {}
+    StereoMeterAccumulatorTests() : UnitTest("Stereo meter accumulator", "audio-insight")
+    {
+    }
 
     void runTest() override
     {
         beginTest("Sample peak and RMS use the represented frame count");
         {
             StereoMeterAccumulator meters;
-            constexpr std::array<float, 4> left{0.5F, -0.25F, 0.0F, 0.0F};
-            constexpr std::array<float, 4> right{0.25F, 0.25F, -0.25F, -0.25F};
+            constexpr std::array<float, 4> left { 0.5F, -0.25F, 0.0F, 0.0F };
+            constexpr std::array<float, 4> right { 0.25F, 0.25F, -0.25F, -0.25F };
 
-            const auto publication =
-                meters.publishBlock(left.data(), right.data(), left.size(), 48000.0, 4);
+            const auto publication
+                = meters.publishBlock(left.data(), right.data(), left.size(), 48000.0, 4);
             expect(publication.published);
 
             StereoMeterReading reading;
@@ -133,9 +131,9 @@ public:
         beginTest("Bounded coalescing retains the largest recent peak");
         {
             StereoMeterAccumulator meters;
-            std::array<float, 1> low{0.1F};
-            std::array<float, 1> high{0.9F};
-            std::array<float, 1> tail{0.2F};
+            std::array<float, 1> low { 0.1F };
+            std::array<float, 1> high { 0.9F };
+            std::array<float, 1> tail { 0.2F };
 
             for (std::size_t index = 0; index < StereoMeterAccumulator::slotCount; ++index)
                 expect(
@@ -162,66 +160,65 @@ public:
     }
 };
 
-class HannSpectrumAnalyzerTests final : public juce::UnitTest
-{
+class HannSpectrumAnalyzerTests final : public juce::UnitTest {
 public:
-    HannSpectrumAnalyzerTests() : UnitTest("Hann spectrum analyzer", "audio-insight") {}
+    HannSpectrumAnalyzerTests() : UnitTest("Hann spectrum analyzer", "audio-insight")
+    {
+    }
 
     void runTest() override
     {
         beginTest("A bin-centred full-scale sine produces the expected dB bin");
         {
             constexpr std::size_t sineBin = 128;
-            std::array<float, fftSize> left{};
-            std::array<float, fftSize> right{};
+            std::array<float, fftSize> left { };
+            std::array<float, fftSize> right { };
 
-            for (std::size_t frame = 0; frame < fftSize; ++frame)
-            {
+            for (std::size_t frame = 0; frame < fftSize; ++frame) {
                 left[frame] = std::sin(
-                    static_cast<float>(2.0 * std::numbers::pi * static_cast<double>(sineBin) *
-                                       static_cast<double>(frame) / static_cast<double>(fftSize)));
+                    static_cast<float>(2.0 * std::numbers::pi * static_cast<double>(sineBin)
+                        * static_cast<double>(frame) / static_cast<double>(fftSize)));
             }
 
             HannSpectrumAnalyzer analyzer;
             VisualizationFrame frame;
-            const CapturedStereoChunkView chunk{left.data(), right.data(), left.size(), 2,
-                                                1,           fftSize,      48000.0,     false};
+            const CapturedStereoChunkView chunk { left.data(), right.data(), left.size(), 2, 1,
+                fftSize, 48000.0, false };
             expect(analyzer.process(chunk, frame));
             expect(frame.spectrumValid);
             expect(frame.generation == 2);
             expect(frame.capturedFrameEnd == fftSize);
             expectWithinAbsoluteError(frame.spectrumDecibels[sineBin], 0.0F, 0.1F);
 
-            const auto maximum =
-                std::max_element(frame.spectrumDecibels.begin() + 1, frame.spectrumDecibels.end());
+            const auto maximum = std::max_element(
+                frame.spectrumDecibels.begin() + 1, frame.spectrumDecibels.end());
             expect(static_cast<std::size_t>(maximum - frame.spectrumDecibels.begin()) == sineBin);
         }
 
         beginTest("A chunk sequence gap clears overlap before another transform");
         {
-            std::array<float, fftSize> initial{};
+            std::array<float, fftSize> initial { };
             for (std::size_t frame = 0; frame < fftSize; ++frame)
-                initial[frame] = std::sin(
-                    static_cast<float>(2.0 * std::numbers::pi * 64.0 * static_cast<double>(frame) /
-                                       static_cast<double>(fftSize)));
+                initial[frame] = std::sin(static_cast<float>(2.0 * std::numbers::pi * 64.0
+                    * static_cast<double>(frame) / static_cast<double>(fftSize)));
 
             HannSpectrumAnalyzer analyzer;
             VisualizationFrame frame;
             expect(analyzer.process(
-                {initial.data(), initial.data(), initial.size(), 1, 1, fftSize, 48000.0, false},
+                { initial.data(), initial.data(), initial.size(), 1, 1, fftSize, 48000.0, false },
                 frame));
             expect(frame.spectrumValid);
 
-            std::array<float, 64> afterGap{};
-            expect(!analyzer.process({afterGap.data(), afterGap.data(), afterGap.size(), 1, 3,
-                                      fftSize + afterGap.size(), 48000.0, true},
-                                     frame));
+            std::array<float, 64> afterGap { };
+            expect(!analyzer.process({ afterGap.data(), afterGap.data(), afterGap.size(), 1, 3,
+                                         fftSize + afterGap.size(), 48000.0, true },
+                frame));
             expect(!frame.spectrumValid);
             expect(analyzer.statistics().sequenceGapResets == 1);
 
-            std::array<float, fftSize - afterGap.size()> refill{};
+            std::array<float, fftSize - afterGap.size()> refill { };
             expect(analyzer.process(
-                {refill.data(), refill.data(), refill.size(), 1, 4, fftSize * 2, 48000.0, false},
+                { refill.data(), refill.data(), refill.size(), 1, 4, fftSize * 2, 48000.0, false },
                 frame));
             expect(frame.spectrumValid);
             expect(frame.capturedFrameEnd == fftSize * 2);
@@ -230,14 +227,14 @@ public:
 
         beginTest("An invalid first captured-frame range cannot underflow timing");
         {
-            std::array<float, 16> samples{};
+            std::array<float, 16> samples { };
             HannSpectrumAnalyzer analyzer;
             VisualizationFrame frame;
             frame.spectrumValid = true;
 
-            expect(!analyzer.process({samples.data(), samples.data(), samples.size(), 1, 1,
-                                      samples.size() - 1, 48000.0, false},
-                                     frame));
+            expect(!analyzer.process({ samples.data(), samples.data(), samples.size(), 1, 1,
+                                         samples.size() - 1, 48000.0, false },
+                frame));
             expect(!frame.spectrumValid);
             expect(analyzer.statistics().sequenceGapResets == 1);
         }

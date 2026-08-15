@@ -5,10 +5,8 @@
 
 #include <memory>
 
-namespace audio_insight
-{
-namespace
-{
+namespace audio_insight {
+namespace {
 constexpr auto stateTreeName = "AudioInsightState";
 constexpr auto spectrumFloorParameter = "spectrumFloor";
 constexpr auto spectrumCeilingParameter = "spectrumCeiling";
@@ -17,8 +15,8 @@ constexpr auto spectrumSmoothingParameter = "spectrumSmoothing";
 
 PluginProcessor::PluginProcessor()
     : AudioProcessor(BusesProperties()
-                         .withInput("Input", juce::AudioChannelSet::stereo(), true)
-                         .withOutput("Output", juce::AudioChannelSet::stereo(), true)),
+              .withInput("Input", juce::AudioChannelSet::stereo(), true)
+              .withOutput("Output", juce::AudioChannelSet::stereo(), true)),
       parameters(*this, nullptr, stateTreeName, createParameterLayout())
 {
 }
@@ -43,13 +41,11 @@ void PluginProcessor::processBlock(juce::AudioBuffer<float>& audio, juce::MidiBu
     for (auto channel = inputChannels; channel < outputChannels; ++channel)
         audio.clear(channel, 0, audio.getNumSamples());
 
-    if (inputChannels > 0 && audio.getNumSamples() > 0 && currentSampleRate > 0.0)
-    {
+    if (inputChannels > 0 && audio.getNumSamples() > 0 && currentSampleRate > 0.0) {
         const auto* const left = audio.getReadPointer(0);
         const auto* const right = inputChannels > 1 ? audio.getReadPointer(1) : left;
-        analysisCoordinator.captureAudioBlock(left, right,
-                                              static_cast<std::size_t>(audio.getNumSamples()),
-                                              currentSampleRate);
+        analysisCoordinator.captureAudioBlock(
+            left, right, static_cast<std::size_t>(audio.getNumSamples()), currentSampleRate);
     }
 
     // The processor is intentionally transparent. JUCE supplies the input and
@@ -117,7 +113,7 @@ void PluginProcessor::setCurrentProgram(int)
 
 const juce::String PluginProcessor::getProgramName(int)
 {
-    return {};
+    return { };
 }
 
 void PluginProcessor::changeProgramName(int, const juce::String&)
@@ -132,8 +128,7 @@ void PluginProcessor::getStateInformation(juce::MemoryBlock& destinationData)
 
 void PluginProcessor::setStateInformation(const void* data, int sizeInBytes)
 {
-    if (auto xml = getXmlFromBinary(data, sizeInBytes); xml != nullptr)
-    {
+    if (auto xml = getXmlFromBinary(data, sizeInBytes); xml != nullptr) {
         if (xml->hasTagName(parameters.state.getType()))
             parameters.replaceState(juce::ValueTree::fromXml(*xml));
     }
@@ -168,25 +163,19 @@ juce::AudioProcessorValueTreeState::ParameterLayout PluginProcessor::createParam
 {
     juce::AudioProcessorValueTreeState::ParameterLayout layout;
 
+    layout.add(
+        std::make_unique<juce::AudioParameterFloat>(juce::ParameterID { spectrumFloorParameter, 1 },
+            "Spectrum floor", juce::NormalisableRange<float> { -120.0F, -40.0F, 1.0F }, -90.0F,
+            juce::AudioParameterFloatAttributes().withLabel("dB")));
+
     layout.add(std::make_unique<juce::AudioParameterFloat>(
-        juce::ParameterID { spectrumFloorParameter, 1 },
-        "Spectrum floor",
-        juce::NormalisableRange<float> { -120.0F, -40.0F, 1.0F },
-        -90.0F,
+        juce::ParameterID { spectrumCeilingParameter, 1 }, "Spectrum ceiling",
+        juce::NormalisableRange<float> { -24.0F, 12.0F, 1.0F }, 0.0F,
         juce::AudioParameterFloatAttributes().withLabel("dB")));
 
     layout.add(std::make_unique<juce::AudioParameterFloat>(
-        juce::ParameterID { spectrumCeilingParameter, 1 },
-        "Spectrum ceiling",
-        juce::NormalisableRange<float> { -24.0F, 12.0F, 1.0F },
-        0.0F,
-        juce::AudioParameterFloatAttributes().withLabel("dB")));
-
-    layout.add(std::make_unique<juce::AudioParameterFloat>(
-        juce::ParameterID { spectrumSmoothingParameter, 1 },
-        "Spectrum smoothing",
-        juce::NormalisableRange<float> { 0.0F, 1.0F, 0.01F },
-        0.65F));
+        juce::ParameterID { spectrumSmoothingParameter, 1 }, "Spectrum smoothing",
+        juce::NormalisableRange<float> { 0.0F, 1.0F, 0.01F }, 0.65F));
 
     return layout;
 }

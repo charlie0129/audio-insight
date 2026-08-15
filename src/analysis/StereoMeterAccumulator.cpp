@@ -7,23 +7,20 @@
 #include <cmath>
 #include <limits>
 
-namespace audio_insight
-{
-namespace
-{
+namespace audio_insight {
+namespace {
 [[nodiscard]] bool sampleRatesDiffer(const double left, const double right) noexcept
 {
-    const auto scale = std::max({1.0, std::abs(left), std::abs(right)});
+    const auto scale = std::max({ 1.0, std::abs(left), std::abs(right) });
     return std::abs(left - right) > std::numeric_limits<double>::epsilon() * scale * 4.0;
 }
 } // namespace
 
 StereoMeterAccumulator::StereoMeterAccumulator() noexcept = default;
 
-StereoMeterAccumulator::PublishResult
-StereoMeterAccumulator::publishBlock(const float* const left, const float* const right,
-                                     const std::size_t frameCount, const double sampleRate,
-                                     const std::uint64_t generation) noexcept
+StereoMeterAccumulator::PublishResult StereoMeterAccumulator::publishBlock(const float* const left,
+    const float* const right, const std::size_t frameCount, const double sampleRate,
+    const std::uint64_t generation) noexcept
 {
     PublishResult result;
     if (frameCount == 0)
@@ -33,19 +30,17 @@ StereoMeterAccumulator::publishBlock(const float* const left, const float* const
     capturedFrameCursor_ += frameCount;
     attemptedBlocks_.fetch_add(1, std::memory_order_relaxed);
 
-    const auto aggregate = measure(left, right, frameCount, sampleRate, generation, result.sequence,
-                                   capturedFrameCursor_);
+    const auto aggregate = measure(
+        left, right, frameCount, sampleRate, generation, result.sequence, capturedFrameCursor_);
 
-    if (publishToFreeSlot(aggregate))
-    {
+    if (publishToFreeSlot(aggregate)) {
         result.published = true;
         publishedBlocks_.fetch_add(1, std::memory_order_relaxed);
         updateReadyHighWaterMark();
         return result;
     }
 
-    if (coalesceIntoNewestReady(aggregate))
-    {
+    if (coalesceIntoNewestReady(aggregate)) {
         result.published = true;
         result.coalesced = true;
         publishedBlocks_.fetch_add(1, std::memory_order_relaxed);
@@ -55,8 +50,7 @@ StereoMeterAccumulator::publishBlock(const float* const left, const float* const
 
     // A consumer may have claimed the newest slot between our bounded scans.
     // Take one final bounded pass over newly freed storage, then drop safely.
-    if (publishToFreeSlot(aggregate))
-    {
+    if (publishToFreeSlot(aggregate)) {
         result.published = true;
         publishedBlocks_.fetch_add(1, std::memory_order_relaxed);
         updateReadyHighWaterMark();
@@ -70,20 +64,16 @@ StereoMeterAccumulator::publishBlock(const float* const left, const float* const
 
 bool StereoMeterAccumulator::consumeLatest(StereoMeterReading& destination) noexcept
 {
-    std::array<Aggregate, slotCount * 2> acquired{};
+    std::array<Aggregate, slotCount * 2> acquired { };
     std::size_t acquiredCount = 0;
 
     // Repeat a fixed number of complete scans. This catches slots published into
     // an index already visited during the first scan without ever waiting.
-    for (std::size_t pass = 0; pass < 2; ++pass)
-    {
-        for (auto& slot : slots_)
-        {
+    for (std::size_t pass = 0; pass < 2; ++pass) {
+        for (auto& slot : slots_) {
             auto expected = SlotState::ready;
             if (!slot.state.compare_exchange_strong(expected, SlotState::reading,
-                                                    std::memory_order_acquire,
-                                                    std::memory_order_relaxed))
-            {
+                    std::memory_order_acquire, std::memory_order_relaxed)) {
                 continue;
             }
 
@@ -96,43 +86,37 @@ bool StereoMeterAccumulator::consumeLatest(StereoMeterReading& destination) noex
         return false;
 
     const auto acquiredEnd = acquired.begin() + static_cast<std::ptrdiff_t>(acquiredCount);
-    const auto newestGeneration = std::max_element(acquired.begin(), acquiredEnd,
-                                                   [](const Aggregate& left, const Aggregate& right)
-                                                   { return left.generation < right.generation; })
-                                      ->generation;
+    const auto newestGeneration = std::max_element(
+        acquired.begin(), acquiredEnd, [](const Aggregate& left, const Aggregate& right) {
+            return left.generation < right.generation;
+        })->generation;
 
-    std::sort(acquired.begin(), acquiredEnd,
-              [](const Aggregate& left, const Aggregate& right)
-              {
-                  if (left.generation != right.generation)
-                      return left.generation < right.generation;
-                  return left.firstSequence < right.firstSequence;
-              });
+    std::sort(acquired.begin(), acquiredEnd, [](const Aggregate& left, const Aggregate& right) {
+        if (left.generation != right.generation)
+            return left.generation < right.generation;
+        return left.firstSequence < right.firstSequence;
+    });
 
     Aggregate combined;
     bool hasCombined = false;
     bool followsDiscontinuity = false;
 
-    for (auto iterator = acquired.begin(); iterator != acquiredEnd; ++iterator)
-    {
+    for (auto iterator = acquired.begin(); iterator != acquiredEnd; ++iterator) {
         const auto& value = *iterator;
         if (value.generation != newestGeneration)
             continue;
 
-        if (!hasCombined)
-        {
+        if (!hasCombined) {
             combined = value;
             hasCombined = true;
             followsDiscontinuity = value.containsSequenceGap;
             continue;
         }
 
-        const auto isContiguous =
-            combined.lastSequence != std::numeric_limits<std::uint64_t>::max() &&
-            value.firstSequence == combined.lastSequence + 1;
-        if (!isContiguous || value.containsSequenceGap ||
-            sampleRatesDiffer(combined.sampleRate, value.sampleRate))
-        {
+        const auto isContiguous = combined.lastSequence != std::numeric_limits<std::uint64_t>::max()
+            && value.firstSequence == combined.lastSequence + 1;
+        if (!isContiguous || value.containsSequenceGap
+            || sampleRatesDiffer(combined.sampleRate, value.sampleRate)) {
             // RMS integration and peak hold restart at a missing interval. Keep
             // the newest contiguous segment rather than blending across a gap.
             combined = value;
@@ -144,14 +128,14 @@ bool StereoMeterAccumulator::consumeLatest(StereoMeterReading& destination) noex
     }
 
     const auto sequenceSpan = combined.lastSequence >= combined.firstSequence
-                                  ? (combined.lastSequence - combined.firstSequence) + 1
-                                  : 0;
-    followsDiscontinuity = followsDiscontinuity || combined.containsSequenceGap ||
-                           sequenceSpan != combined.representedBlocks;
+        ? (combined.lastSequence - combined.firstSequence) + 1
+        : 0;
+    followsDiscontinuity = followsDiscontinuity || combined.containsSequenceGap
+        || sequenceSpan != combined.representedBlocks;
 
     if (consumerHasPreviousSequence_ && combined.generation == consumerPreviousGeneration_)
-        followsDiscontinuity =
-            followsDiscontinuity || combined.firstSequence != consumerPreviousSequence_ + 1;
+        followsDiscontinuity
+            = followsDiscontinuity || combined.firstSequence != consumerPreviousSequence_ + 1;
 
     if (followsDiscontinuity)
         consumerDiscontinuities_.fetch_add(1, std::memory_order_relaxed);
@@ -170,14 +154,12 @@ bool StereoMeterAccumulator::consumeLatest(StereoMeterReading& destination) noex
     reading.sampleRate = combined.sampleRate;
     reading.followsDiscontinuity = followsDiscontinuity;
 
-    for (std::size_t channel = 0; channel < 2; ++channel)
-    {
+    for (std::size_t channel = 0; channel < 2; ++channel) {
         reading.peakLinear[channel] = combined.peak[channel];
-        reading.rmsLinear[channel] =
-            combined.frameCount > 0
-                ? static_cast<float>(std::sqrt(combined.sumSquares[channel] /
-                                               static_cast<double>(combined.frameCount)))
-                : 0.0F;
+        reading.rmsLinear[channel] = combined.frameCount > 0
+            ? static_cast<float>(std::sqrt(
+                  combined.sumSquares[channel] / static_cast<double>(combined.frameCount)))
+            : 0.0F;
         reading.peakDecibels[channel] = linearToDecibels(reading.peakLinear[channel]);
         reading.rmsDecibels[channel] = linearToDecibels(reading.rmsLinear[channel]);
     }
@@ -216,8 +198,7 @@ StereoMeterAccumulator::Telemetry StereoMeterAccumulator::telemetry() const noex
 
 void StereoMeterAccumulator::discardPending() noexcept
 {
-    for (auto& slot : slots_)
-    {
+    for (auto& slot : slots_) {
         const auto state = slot.state.load(std::memory_order_acquire);
         assert(state != SlotState::writing && state != SlotState::reading);
 
@@ -230,11 +211,10 @@ void StereoMeterAccumulator::discardPending() noexcept
     consumerPreviousSequence_ = 0;
 }
 
-StereoMeterAccumulator::Aggregate
-StereoMeterAccumulator::measure(const float* const left, const float* const right,
-                                const std::size_t frameCount, const double sampleRate,
-                                const std::uint64_t generation, const std::uint64_t sequence,
-                                const std::uint64_t capturedFrameEnd) noexcept
+StereoMeterAccumulator::Aggregate StereoMeterAccumulator::measure(const float* const left,
+    const float* const right, const std::size_t frameCount, const double sampleRate,
+    const std::uint64_t generation, const std::uint64_t sequence,
+    const std::uint64_t capturedFrameEnd) noexcept
 {
     Aggregate result;
     result.frameCount = frameCount;
@@ -245,18 +225,17 @@ StereoMeterAccumulator::measure(const float* const left, const float* const righ
     result.capturedFrameEnd = capturedFrameEnd;
     result.sampleRate = sampleRate;
 
-    for (std::size_t frame = 0; frame < frameCount; ++frame)
-    {
-        const std::array<float, 2> samples{
+    for (std::size_t frame = 0; frame < frameCount; ++frame) {
+        const std::array<float, 2> samples {
             left != nullptr && std::isfinite(left[frame]) ? left[frame] : 0.0F,
-            right != nullptr && std::isfinite(right[frame]) ? right[frame] : 0.0F};
+            right != nullptr && std::isfinite(right[frame]) ? right[frame] : 0.0F
+        };
 
-        for (std::size_t channel = 0; channel < 2; ++channel)
-        {
+        for (std::size_t channel = 0; channel < 2; ++channel) {
             const auto magnitude = std::abs(samples[channel]);
             result.peak[channel] = std::max(result.peak[channel], magnitude);
-            result.sumSquares[channel] +=
-                static_cast<double>(samples[channel]) * static_cast<double>(samples[channel]);
+            result.sumSquares[channel]
+                += static_cast<double>(samples[channel]) * static_cast<double>(samples[channel]);
         }
     }
 
@@ -265,8 +244,7 @@ StereoMeterAccumulator::measure(const float* const left, const float* const righ
 
 void StereoMeterAccumulator::merge(Aggregate& destination, const Aggregate& source) noexcept
 {
-    if (destination.generation != source.generation)
-    {
+    if (destination.generation != source.generation) {
         if (source.generation > destination.generation)
             destination = source;
         return;
@@ -282,8 +260,7 @@ void StereoMeterAccumulator::merge(Aggregate& destination, const Aggregate& sour
     if (sourceIsNewer)
         destination.sampleRate = source.sampleRate;
 
-    for (std::size_t channel = 0; channel < 2; ++channel)
-    {
+    for (std::size_t channel = 0; channel < 2; ++channel) {
         destination.peak[channel] = std::max(destination.peak[channel], source.peak[channel]);
         destination.sumSquares[channel] += source.sumSquares[channel];
     }
@@ -300,12 +277,10 @@ float StereoMeterAccumulator::linearToDecibels(const float value) noexcept
 
 bool StereoMeterAccumulator::publishToFreeSlot(const Aggregate& aggregate) noexcept
 {
-    for (auto& slot : slots_)
-    {
+    for (auto& slot : slots_) {
         auto expected = SlotState::free;
-        if (!slot.state.compare_exchange_strong(
-                expected, SlotState::writing, std::memory_order_acquire, std::memory_order_relaxed))
-        {
+        if (!slot.state.compare_exchange_strong(expected, SlotState::writing,
+                std::memory_order_acquire, std::memory_order_relaxed)) {
             continue;
         }
 
@@ -322,13 +297,11 @@ bool StereoMeterAccumulator::coalesceIntoNewestReady(const Aggregate& aggregate)
     std::size_t newestIndex = slots_.size();
     std::uint64_t newestSequence = 0;
 
-    for (std::size_t index = 0; index < slots_.size(); ++index)
-    {
+    for (std::size_t index = 0; index < slots_.size(); ++index) {
         if (slots_[index].state.load(std::memory_order_acquire) != SlotState::ready)
             continue;
 
-        if (newestIndex == slots_.size() || slots_[index].aggregate.lastSequence > newestSequence)
-        {
+        if (newestIndex == slots_.size() || slots_[index].aggregate.lastSequence > newestSequence) {
             newestIndex = index;
             newestSequence = slots_[index].aggregate.lastSequence;
         }
@@ -339,23 +312,18 @@ bool StereoMeterAccumulator::coalesceIntoNewestReady(const Aggregate& aggregate)
 
     auto& slot = slots_[newestIndex];
     auto expected = SlotState::ready;
-    if (!slot.state.compare_exchange_strong(expected, SlotState::writing, std::memory_order_acquire,
-                                            std::memory_order_relaxed))
-    {
+    if (!slot.state.compare_exchange_strong(
+            expected, SlotState::writing, std::memory_order_acquire, std::memory_order_relaxed)) {
         return false;
     }
 
     const auto sameGeneration = slot.aggregate.generation == aggregate.generation;
-    const auto contiguous =
-        slot.aggregate.lastSequence != std::numeric_limits<std::uint64_t>::max() &&
-        slot.aggregate.lastSequence + 1 == aggregate.firstSequence;
+    const auto contiguous = slot.aggregate.lastSequence != std::numeric_limits<std::uint64_t>::max()
+        && slot.aggregate.lastSequence + 1 == aggregate.firstSequence;
     const auto sameSampleRate = !sampleRatesDiffer(slot.aggregate.sampleRate, aggregate.sampleRate);
-    if (sameGeneration && contiguous && sameSampleRate)
-    {
+    if (sameGeneration && contiguous && sameSampleRate) {
         merge(slot.aggregate, aggregate);
-    }
-    else
-    {
+    } else {
         // Across lifecycle/sequence discontinuities, begin a fresh RMS interval.
         slot.aggregate = aggregate;
         slot.aggregate.containsSequenceGap = sameGeneration && (!contiguous || !sameSampleRate);
@@ -372,8 +340,7 @@ void StereoMeterAccumulator::updateReadyHighWaterMark() noexcept
         if (slot.state.load(std::memory_order_acquire) == SlotState::ready)
             ++readyCount;
 
-    if (readyCount > producerReadyHighWaterMark_)
-    {
+    if (readyCount > producerReadyHighWaterMark_) {
         producerReadyHighWaterMark_ = readyCount;
         readyHighWaterMark_.store(readyCount, std::memory_order_relaxed);
     }

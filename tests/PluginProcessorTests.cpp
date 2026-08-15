@@ -7,20 +7,16 @@
 #include <cmath>
 #include <memory>
 
-namespace audio_insight
-{
-class PluginProcessorTests final : public juce::UnitTest
-{
+namespace audio_insight {
+class PluginProcessorTests final : public juce::UnitTest {
 public:
-    PluginProcessorTests()
-        : UnitTest("Plugin processor", "audio-insight")
+    PluginProcessorTests() : UnitTest("Plugin processor", "audio-insight")
     {
     }
 
     void runTest() override
     {
-        testCase("Mono and stereo layouts are supported", [this]
-        {
+        testCase("Mono and stereo layouts are supported", [this] {
             PluginProcessor processor;
 
             juce::AudioProcessor::BusesLayout mono;
@@ -39,18 +35,15 @@ public:
             expect(!processor.isBusesLayoutSupported(surround));
         });
 
-        testCase("Audio is passed through unchanged", [this]
-        {
+        testCase("Audio is passed through unchanged", [this] {
             PluginProcessor processor;
             processor.prepareToPlay(48'000.0, 128);
 
             juce::AudioBuffer<float> audio(2, 128);
             juce::AudioBuffer<float> expected(2, 128);
 
-            for (auto channel = 0; channel < audio.getNumChannels(); ++channel)
-            {
-                for (auto sample = 0; sample < audio.getNumSamples(); ++sample)
-                {
+            for (auto channel = 0; channel < audio.getNumChannels(); ++channel) {
+                for (auto sample = 0; sample < audio.getNumSamples(); ++sample) {
                     const auto value = static_cast<float>(
                         std::sin((static_cast<double>(sample) + (channel * 0.25)) * 0.071));
                     audio.setSample(channel, sample, value);
@@ -67,15 +60,14 @@ public:
             for (auto channel = 0; channel < audio.getNumChannels(); ++channel)
                 expect(audio.getMagnitude(channel, 0, 128) > 0.0F);
 
-            for (auto channel = 0; channel < audio.getNumChannels(); ++channel)
-            {
+            for (auto channel = 0; channel < audio.getNumChannels(); ++channel) {
                 for (auto sample = 0; sample < audio.getNumSamples(); ++sample)
-                    expectEquals(audio.getSample(channel, sample), expected.getSample(channel, sample));
+                    expectEquals(
+                        audio.getSample(channel, sample), expected.getSample(channel, sample));
             }
         });
 
-        testCase("An active editor forwards audio into the bounded capture path", [this]
-        {
+        testCase("An active editor forwards audio into the bounded capture path", [this] {
             PluginProcessor processor;
             processor.prepareToPlay(48'000.0, 128);
             processor.setVisualizationActive(true);
@@ -93,8 +85,7 @@ public:
             processor.setVisualizationActive(false);
         });
 
-        testCase("Parameter state round-trips", [this]
-        {
+        testCase("Parameter state round-trips", [this] {
             PluginProcessor source;
             auto* floor = source.getParameters().getParameter("spectrumFloor");
             expect(floor != nullptr);
@@ -118,8 +109,7 @@ public:
                 expectWithinAbsoluteError(restoredFloor->getValue(), 0.375F, 0.0001F);
         });
 
-        testCase("The custom editor starts detached and inactive", [this]
-        {
+        testCase("The custom editor starts detached and inactive", [this] {
             PluginProcessor processor;
             std::unique_ptr<juce::AudioProcessorEditor> editor { processor.createEditor() };
 

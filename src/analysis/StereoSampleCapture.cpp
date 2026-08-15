@@ -8,10 +8,9 @@
 #include <limits>
 #include <utility>
 
-namespace audio_insight
-{
-StereoSampleCapture::ReadHandle::ReadHandle(StereoSampleCapture& owner, const std::size_t slotIndex,
-                                            CapturedStereoChunkView view) noexcept
+namespace audio_insight {
+StereoSampleCapture::ReadHandle::ReadHandle(
+    StereoSampleCapture& owner, const std::size_t slotIndex, CapturedStereoChunkView view) noexcept
     : owner_(&owner), slotIndex_(slotIndex), view_(view)
 {
 }
@@ -21,11 +20,10 @@ StereoSampleCapture::ReadHandle::ReadHandle(ReadHandle&& other) noexcept
 {
 }
 
-StereoSampleCapture::ReadHandle&
-StereoSampleCapture::ReadHandle::operator=(ReadHandle&& other) noexcept
+StereoSampleCapture::ReadHandle& StereoSampleCapture::ReadHandle::operator=(
+    ReadHandle&& other) noexcept
 {
-    if (this != &other)
-    {
+    if (this != &other) {
         release();
         owner_ = std::exchange(other.owner_, nullptr);
         slotIndex_ = other.slotIndex_;
@@ -47,42 +45,38 @@ void StereoSampleCapture::ReadHandle::release() noexcept
 
     owner_->releaseReadSlot(slotIndex_);
     owner_ = nullptr;
-    view_ = {};
+    view_ = { };
 }
 
 StereoSampleCapture::StereoSampleCapture() noexcept = default;
 
-StereoSampleCapture::PublishResult
-StereoSampleCapture::publishBlock(const float* const left, const float* const right,
-                                  const std::size_t frameCount, const double sampleRate,
-                                  const std::uint64_t generation) noexcept
+StereoSampleCapture::PublishResult StereoSampleCapture::publishBlock(const float* const left,
+    const float* const right, const std::size_t frameCount, const double sampleRate,
+    const std::uint64_t generation) noexcept
 {
     PublishResult result;
     std::size_t offset = 0;
 
-    while (offset < frameCount)
-    {
+    while (offset < frameCount) {
         const auto chunkFrames = std::min(framesPerSlot, frameCount - offset);
         publishChunk(left != nullptr ? left + offset : nullptr,
-                     right != nullptr ? right + offset : nullptr, chunkFrames, sampleRate,
-                     generation, result);
+            right != nullptr ? right + offset : nullptr, chunkFrames, sampleRate, generation,
+            result);
         offset += chunkFrames;
     }
 
     return result;
 }
 
-StereoSampleCapture::Slot* StereoSampleCapture::claimSlot(bool& reclaimedReady,
-                                                          std::size_t& slotIndex) noexcept
+StereoSampleCapture::Slot* StereoSampleCapture::claimSlot(
+    bool& reclaimedReady, std::size_t& slotIndex) noexcept
 {
     reclaimedReady = false;
 
-    for (std::size_t index = 0; index < slots_.size(); ++index)
-    {
+    for (std::size_t index = 0; index < slots_.size(); ++index) {
         auto expected = SlotState::free;
-        if (slots_[index].state.compare_exchange_strong(
-                expected, SlotState::writing, std::memory_order_acquire, std::memory_order_relaxed))
-        {
+        if (slots_[index].state.compare_exchange_strong(expected, SlotState::writing,
+                std::memory_order_acquire, std::memory_order_relaxed)) {
             slotIndex = index;
             return &slots_[index];
         }
@@ -90,19 +84,16 @@ StereoSampleCapture::Slot* StereoSampleCapture::claimSlot(bool& reclaimedReady,
 
     // The consumer can win one of these claims while this bounded scan runs. A
     // failed claim is excluded on the next iteration because it is then reading.
-    for (std::size_t attempt = 0; attempt < slots_.size(); ++attempt)
-    {
+    for (std::size_t attempt = 0; attempt < slots_.size(); ++attempt) {
         std::size_t oldestIndex = slots_.size();
         auto oldestSequence = std::numeric_limits<std::uint64_t>::max();
 
-        for (std::size_t index = 0; index < slots_.size(); ++index)
-        {
+        for (std::size_t index = 0; index < slots_.size(); ++index) {
             if (slots_[index].state.load(std::memory_order_acquire) != SlotState::ready)
                 continue;
 
             const auto sequence = slots_[index].publishedSequence.load(std::memory_order_relaxed);
-            if (sequence < oldestSequence)
-            {
+            if (sequence < oldestSequence) {
                 oldestSequence = sequence;
                 oldestIndex = index;
             }
@@ -112,9 +103,8 @@ StereoSampleCapture::Slot* StereoSampleCapture::claimSlot(bool& reclaimedReady,
             return nullptr;
 
         auto expected = SlotState::ready;
-        if (slots_[oldestIndex].state.compare_exchange_strong(
-                expected, SlotState::writing, std::memory_order_acquire, std::memory_order_relaxed))
-        {
+        if (slots_[oldestIndex].state.compare_exchange_strong(expected, SlotState::writing,
+                std::memory_order_acquire, std::memory_order_relaxed)) {
             reclaimedReady = true;
             slotIndex = oldestIndex;
             return &slots_[oldestIndex];
@@ -125,9 +115,8 @@ StereoSampleCapture::Slot* StereoSampleCapture::claimSlot(bool& reclaimedReady,
 }
 
 void StereoSampleCapture::publishChunk(const float* const left, const float* const right,
-                                       const std::size_t frameCount, const double sampleRate,
-                                       const std::uint64_t generation,
-                                       PublishResult& result) noexcept
+    const std::size_t frameCount, const double sampleRate, const std::uint64_t generation,
+    PublishResult& result) noexcept
 {
     const auto sequence = nextSequence_++;
     capturedFrameCursor_ += frameCount;
@@ -141,15 +130,13 @@ void StereoSampleCapture::publishChunk(const float* const left, const float* con
     std::size_t slotIndex = 0;
     auto* const slot = claimSlot(reclaimedReady, slotIndex);
 
-    if (slot == nullptr)
-    {
+    if (slot == nullptr) {
         ++result.droppedIncomingChunks;
         droppedIncomingChunks_.fetch_add(1, std::memory_order_relaxed);
         return;
     }
 
-    if (reclaimedReady)
-    {
+    if (reclaimedReady) {
         ++result.reclaimedReadyChunks;
         reclaimedReadyChunks_.fetch_add(1, std::memory_order_relaxed);
     }
@@ -181,19 +168,16 @@ bool StereoSampleCapture::tryAcquireOldest(ReadHandle& destination) noexcept
 {
     destination.release();
 
-    for (std::size_t attempt = 0; attempt < slots_.size(); ++attempt)
-    {
+    for (std::size_t attempt = 0; attempt < slots_.size(); ++attempt) {
         std::size_t oldestIndex = slots_.size();
         auto oldestSequence = std::numeric_limits<std::uint64_t>::max();
 
-        for (std::size_t index = 0; index < slots_.size(); ++index)
-        {
+        for (std::size_t index = 0; index < slots_.size(); ++index) {
             if (slots_[index].state.load(std::memory_order_acquire) != SlotState::ready)
                 continue;
 
             const auto sequence = slots_[index].publishedSequence.load(std::memory_order_relaxed);
-            if (sequence < oldestSequence)
-            {
+            if (sequence < oldestSequence) {
                 oldestSequence = sequence;
                 oldestIndex = index;
             }
@@ -204,9 +188,8 @@ bool StereoSampleCapture::tryAcquireOldest(ReadHandle& destination) noexcept
 
         auto expected = SlotState::ready;
         auto& slot = slots_[oldestIndex];
-        if (!slot.state.compare_exchange_strong(
-                expected, SlotState::reading, std::memory_order_acquire, std::memory_order_relaxed))
-        {
+        if (!slot.state.compare_exchange_strong(expected, SlotState::reading,
+                std::memory_order_acquire, std::memory_order_relaxed)) {
             continue;
         }
 
@@ -222,9 +205,8 @@ bool StereoSampleCapture::tryAcquireOldest(ReadHandle& destination) noexcept
         consumerPreviousSequence_ = slot.sequence;
 
         destination = ReadHandle(*this, oldestIndex,
-                                 {slot.left.data(), slot.right.data(), slot.frameCount,
-                                  slot.generation, slot.sequence, slot.capturedFrameEnd,
-                                  slot.sampleRate, followsDiscontinuity});
+            { slot.left.data(), slot.right.data(), slot.frameCount, slot.generation, slot.sequence,
+                slot.capturedFrameEnd, slot.sampleRate, followsDiscontinuity });
         return true;
     }
 
@@ -252,8 +234,7 @@ StereoSampleCapture::Telemetry StereoSampleCapture::telemetry() const noexcept
 
 void StereoSampleCapture::discardPending() noexcept
 {
-    for (auto& slot : slots_)
-    {
+    for (auto& slot : slots_) {
         const auto state = slot.state.load(std::memory_order_acquire);
         assert(state != SlotState::writing && state != SlotState::reading);
 
@@ -280,8 +261,7 @@ void StereoSampleCapture::updateReadyHighWaterMark() noexcept
         if (slot.state.load(std::memory_order_acquire) == SlotState::ready)
             ++readyCount;
 
-    if (readyCount > producerReadyHighWaterMark_)
-    {
+    if (readyCount > producerReadyHighWaterMark_) {
         producerReadyHighWaterMark_ = readyCount;
         readyHighWaterMark_.store(readyCount, std::memory_order_relaxed);
     }

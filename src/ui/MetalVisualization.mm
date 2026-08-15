@@ -20,13 +20,11 @@
 #include <memory>
 #include <string>
 
-namespace audio_insight::detail
-{
+namespace audio_insight::detail {
 class MetalRenderBackend;
 }
 
-@interface AIAudioInsightMetalView : MTKView <CAMetalDisplayLinkDelegate>
-{
+@interface AIAudioInsightMetalView : MTKView <CAMetalDisplayLinkDelegate> {
 @private
     audio_insight::detail::MetalRenderBackend* renderBackend;
     NSWindow* observedWindow;
@@ -41,16 +39,15 @@ class MetalRenderBackend;
 
 @end
 
-namespace audio_insight::detail
-{
-namespace
-{
+namespace audio_insight::detail {
+namespace {
 using Clock = std::chrono::steady_clock;
 
 constexpr std::size_t renderBufferCount = 3;
 constexpr std::size_t maximumGridVertices = 160;
 constexpr std::size_t maximumMeterVertices = 48;
-constexpr std::size_t maximumVertexCount = (2 * spectrumBinCount) + maximumGridVertices + maximumMeterVertices;
+constexpr std::size_t maximumVertexCount
+    = (2 * spectrumBinCount) + maximumGridVertices + maximumMeterVertices;
 
 constexpr float minimumSpectrumFrequency = 20.0F;
 constexpr float maximumSpectrumFrequency = 20'000.0F;
@@ -60,14 +57,12 @@ constexpr float minimumAllowedSpectrumFloor = -160.0F;
 constexpr float maximumAllowedSpectrumCeiling = 24.0F;
 constexpr float minimumSpectrumRange = 6.0F;
 
-struct MetalVertex
-{
+struct MetalVertex {
     simd_float2 position;
     simd_float4 colour;
 };
 
-struct AtomicRenderTelemetry
-{
+struct AtomicRenderTelemetry {
     std::uint64_t epoch = 1;
     std::atomic<std::uint64_t> displayLinkCallbacks { 0 };
     std::atomic<std::uint64_t> submittedFrames { 0 };
@@ -122,12 +117,8 @@ void updateMaximum(std::atomic<Integer>& destination, Integer candidate) noexcep
     auto previous = destination.load(std::memory_order_relaxed);
 
     while (candidate > previous
-           && ! destination.compare_exchange_weak(previous,
-                                                   candidate,
-                                                   std::memory_order_relaxed,
-                                                   std::memory_order_relaxed))
-    {
-    }
+        && !destination.compare_exchange_weak(
+            previous, candidate, std::memory_order_relaxed, std::memory_order_relaxed)) { }
 }
 
 std::uint64_t nanosecondsBetween(Clock::time_point start, Clock::time_point end) noexcept
@@ -138,23 +129,19 @@ std::uint64_t nanosecondsBetween(Clock::time_point start, Clock::time_point end)
 
 std::uint64_t hostTimeNanoseconds(CFTimeInterval hostTime) noexcept
 {
-    if (! std::isfinite(hostTime) || hostTime <= 0.0)
+    if (!std::isfinite(hostTime) || hostTime <= 0.0)
         return 0;
 
     const auto nanoseconds = hostTime * 1'000'000'000.0;
-    const auto bounded = std::min<double>(nanoseconds,
-                                          static_cast<double>(std::numeric_limits<std::uint64_t>::max()));
+    const auto bounded = std::min<double>(
+        nanoseconds, static_cast<double>(std::numeric_limits<std::uint64_t>::max()));
     return static_cast<std::uint64_t>(std::llround(bounded));
 }
 
 std::uint64_t positiveHostTimeDifference(CFTimeInterval later, CFTimeInterval earlier) noexcept
 {
-    if (! std::isfinite(later)
-        || ! std::isfinite(earlier)
-        || later <= 0.0
-        || earlier <= 0.0
-        || later <= earlier)
-    {
+    if (!std::isfinite(later) || !std::isfinite(earlier) || later <= 0.0 || earlier <= 0.0
+        || later <= earlier) {
         return 0;
     }
 
@@ -163,7 +150,7 @@ std::uint64_t positiveHostTimeDifference(CFTimeInterval later, CFTimeInterval ea
 
 std::uint32_t roundedPixelDimension(CGFloat value) noexcept
 {
-    if (! std::isfinite(value) || value <= 0.0)
+    if (!std::isfinite(value) || value <= 0.0)
         return 0;
 
     const auto bounded = std::min<double>(value, std::numeric_limits<std::uint32_t>::max());
@@ -172,7 +159,7 @@ std::uint32_t roundedPixelDimension(CGFloat value) noexcept
 
 float sanitiseDecibels(float value, float minimum, float maximum) noexcept
 {
-    if (! std::isfinite(value))
+    if (!std::isfinite(value))
         return minimum;
 
     return std::clamp(value, minimum, maximum);
@@ -180,14 +167,13 @@ float sanitiseDecibels(float value, float minimum, float maximum) noexcept
 
 float smoothingCoefficient(double elapsedSeconds, double timeConstantSeconds) noexcept
 {
-    if (! std::isfinite(elapsedSeconds) || elapsedSeconds <= 0.0)
+    if (!std::isfinite(elapsedSeconds) || elapsedSeconds <= 0.0)
         return 1.0F;
 
     return static_cast<float>(1.0 - std::exp(-elapsedSeconds / timeConstantSeconds));
 }
 
-struct RenderBufferSlot
-{
+struct RenderBufferSlot {
     // Even values are free. The following odd value identifies a particular
     // in-flight admission, allowing late callbacks to release only their own.
     std::atomic<std::uint64_t> admissionState { 0 };
@@ -200,13 +186,11 @@ struct RenderBufferSlot
     }
 };
 
-struct SharedRenderState
-{
+struct SharedRenderState {
     std::array<RenderBufferSlot, renderBufferCount> slots;
 };
 
-struct VertexBatches
-{
+struct VertexBatches {
     std::size_t gridStart = 0;
     std::size_t gridCount = 0;
     std::size_t spectrumStart = 0;
@@ -215,29 +199,26 @@ struct VertexBatches
     std::size_t meterCount = 0;
 };
 
-struct RenderBufferAdmission
-{
+struct RenderBufferAdmission {
     std::size_t index = renderBufferCount;
     std::uint64_t busyState = 0;
 };
 
 SpectrumRenderSettings sanitiseSpectrumSettings(SpectrumRenderSettings settings) noexcept
 {
-    if (! std::isfinite(settings.floorDecibels))
-        settings.floorDecibels = SpectrumRenderSettings {}.floorDecibels;
+    if (!std::isfinite(settings.floorDecibels))
+        settings.floorDecibels = SpectrumRenderSettings { }.floorDecibels;
 
-    if (! std::isfinite(settings.ceilingDecibels))
-        settings.ceilingDecibels = SpectrumRenderSettings {}.ceilingDecibels;
+    if (!std::isfinite(settings.ceilingDecibels))
+        settings.ceilingDecibels = SpectrumRenderSettings { }.ceilingDecibels;
 
-    if (! std::isfinite(settings.smoothing))
-        settings.smoothing = SpectrumRenderSettings {}.smoothing;
+    if (!std::isfinite(settings.smoothing))
+        settings.smoothing = SpectrumRenderSettings { }.smoothing;
 
-    settings.floorDecibels = std::clamp(settings.floorDecibels,
-                                        minimumAllowedSpectrumFloor,
-                                        maximumAllowedSpectrumCeiling - minimumSpectrumRange);
+    settings.floorDecibels = std::clamp(settings.floorDecibels, minimumAllowedSpectrumFloor,
+        maximumAllowedSpectrumCeiling - minimumSpectrumRange);
     settings.ceilingDecibels = std::clamp(settings.ceilingDecibels,
-                                          settings.floorDecibels + minimumSpectrumRange,
-                                          maximumAllowedSpectrumCeiling);
+        settings.floorDecibels + minimumSpectrumRange, maximumAllowedSpectrumCeiling);
     settings.smoothing = std::clamp(settings.smoothing, 0.0F, 1.0F);
     return settings;
 }
@@ -249,11 +230,12 @@ std::uint64_t packSpectrumSettings(SpectrumRenderSettings settings) noexcept
         std::lround((settings.floorDecibels - minimumAllowedSpectrumFloor) * 100.0F));
     const auto ceilingValue = static_cast<std::uint16_t>(
         std::lround((settings.ceilingDecibels - minimumAllowedSpectrumFloor) * 100.0F));
-    const auto smoothingValue = static_cast<std::uint16_t>(std::lround(settings.smoothing * 65'535.0F));
+    const auto smoothingValue
+        = static_cast<std::uint16_t>(std::lround(settings.smoothing * 65'535.0F));
 
     return static_cast<std::uint64_t>(floorValue)
-           | (static_cast<std::uint64_t>(ceilingValue) << 16U)
-           | (static_cast<std::uint64_t>(smoothingValue) << 32U);
+        | (static_cast<std::uint64_t>(ceilingValue) << 16U)
+        | (static_cast<std::uint64_t>(smoothingValue) << 32U);
 }
 
 SpectrumRenderSettings unpackSpectrumSettings(std::uint64_t packed) noexcept
@@ -262,94 +244,76 @@ SpectrumRenderSettings unpackSpectrumSettings(std::uint64_t packed) noexcept
     const auto ceilingValue = static_cast<std::uint16_t>((packed >> 16U) & 0xffffU);
     const auto smoothingValue = static_cast<std::uint16_t>((packed >> 32U) & 0xffffU);
 
-    return {
-        minimumAllowedSpectrumFloor + (static_cast<float>(floorValue) * 0.01F),
+    return { minimumAllowedSpectrumFloor + (static_cast<float>(floorValue) * 0.01F),
         minimumAllowedSpectrumFloor + (static_cast<float>(ceilingValue) * 0.01F),
-        static_cast<float>(smoothingValue) / 65'535.0F
-    };
+        static_cast<float>(smoothingValue) / 65'535.0F };
 }
 
-void releaseRenderBuffer(const std::shared_ptr<SharedRenderState>& state,
-                         RenderBufferAdmission admission) noexcept
+void releaseRenderBuffer(
+    const std::shared_ptr<SharedRenderState>& state, RenderBufferAdmission admission) noexcept
 {
     if (admission.index >= state->slots.size())
         return;
 
     auto expected = admission.busyState;
     state->slots[admission.index].admissionState.compare_exchange_strong(
-        expected,
-        admission.busyState + 1,
-        std::memory_order_release,
-        std::memory_order_relaxed);
+        expected, admission.busyState + 1, std::memory_order_release, std::memory_order_relaxed);
 }
 
-bool classifyPresentation(const std::shared_ptr<SharedRenderState>& state,
-                          RenderBufferAdmission admission) noexcept
+bool classifyPresentation(
+    const std::shared_ptr<SharedRenderState>& state, RenderBufferAdmission admission) noexcept
 {
     if (admission.index >= state->slots.size())
         return false;
 
     auto expected = admission.busyState >= 2 ? admission.busyState - 2 : 0;
     return state->slots[admission.index].classifiedAdmission.compare_exchange_strong(
-        expected,
-        admission.busyState,
-        std::memory_order_acq_rel,
-        std::memory_order_relaxed);
+        expected, admission.busyState, std::memory_order_acq_rel, std::memory_order_relaxed);
 }
 
 void recordSkippedPresentation(const std::shared_ptr<SharedRenderState>& state,
-                               RenderBufferAdmission admission,
-                               const std::shared_ptr<AtomicRenderTelemetry>& telemetry) noexcept
+    RenderBufferAdmission admission,
+    const std::shared_ptr<AtomicRenderTelemetry>& telemetry) noexcept
 {
     if (classifyPresentation(state, admission))
         telemetry->skippedPresentations.fetch_add(1, std::memory_order_relaxed);
 }
 
 void recordPresentedDrawable(const std::shared_ptr<SharedRenderState>& state,
-                             RenderBufferAdmission admission,
-                             const std::shared_ptr<AtomicRenderTelemetry>& telemetry,
-                             id<MTLDrawable> drawable,
-                             CFTimeInterval targetPresentationTimestamp) noexcept
+    RenderBufferAdmission admission, const std::shared_ptr<AtomicRenderTelemetry>& telemetry,
+    id<MTLDrawable> drawable, CFTimeInterval targetPresentationTimestamp) noexcept
 {
     telemetry->presentationCallbacks.fetch_add(1, std::memory_order_relaxed);
 
     const auto presentedTime = drawable.presentedTime;
 
-    if (! std::isfinite(presentedTime) || presentedTime <= 0.0)
-    {
+    if (!std::isfinite(presentedTime) || presentedTime <= 0.0) {
         recordSkippedPresentation(state, admission, telemetry);
         return;
     }
 
-    if (! classifyPresentation(state, admission))
+    if (!classifyPresentation(state, admission))
         return;
 
     const auto presentedNanoseconds = hostTimeNanoseconds(presentedTime);
-    auto previous = telemetry->lastPresentedHostTimestampNanoseconds.load(std::memory_order_relaxed);
+    auto previous
+        = telemetry->lastPresentedHostTimestampNanoseconds.load(std::memory_order_relaxed);
 
     while (presentedNanoseconds > previous
-           && ! telemetry->lastPresentedHostTimestampNanoseconds.compare_exchange_weak(
-               previous,
-               presentedNanoseconds,
-               std::memory_order_relaxed,
-               std::memory_order_relaxed))
-    {
+        && !telemetry->lastPresentedHostTimestampNanoseconds.compare_exchange_weak(previous,
+            presentedNanoseconds, std::memory_order_relaxed, std::memory_order_relaxed)) { }
+
+    if (presentedNanoseconds > previous && previous != 0) {
+        telemetry->lastPresentedFrameIntervalNanoseconds.store(
+            presentedNanoseconds - previous, std::memory_order_relaxed);
     }
 
-    if (presentedNanoseconds > previous && previous != 0)
-    {
-        telemetry->lastPresentedFrameIntervalNanoseconds.store(presentedNanoseconds - previous,
-                                                                std::memory_order_relaxed);
-    }
-
-    if (std::isfinite(targetPresentationTimestamp) && targetPresentationTimestamp > 0.0)
-    {
-        const auto presentationLateness = positiveHostTimeDifference(presentedTime,
-                                                                      targetPresentationTimestamp);
-        telemetry->lastPresentationLatenessNanoseconds.store(presentationLateness,
-                                                              std::memory_order_relaxed);
-        updateMaximum(telemetry->maximumPresentationLatenessNanoseconds,
-                      presentationLateness);
+    if (std::isfinite(targetPresentationTimestamp) && targetPresentationTimestamp > 0.0) {
+        const auto presentationLateness
+            = positiveHostTimeDifference(presentedTime, targetPresentationTimestamp);
+        telemetry->lastPresentationLatenessNanoseconds.store(
+            presentationLateness, std::memory_order_relaxed);
+        updateMaximum(telemetry->maximumPresentationLatenessNanoseconds, presentationLateness);
 
         if (presentationLateness != 0)
             telemetry->presentationsAfterTarget.fetch_add(1, std::memory_order_relaxed);
@@ -390,15 +354,15 @@ fragment half4 audioInsightFragment(RasterVertex input [[stage_in]])
 )metal";
 } // namespace
 
-class MetalRenderBackend
-{
+class MetalRenderBackend {
 public:
     MetalRenderBackend(VisualizationDataSource& sourceToUse, AIAudioInsightMetalView* viewToUse)
         : source(sourceToUse), view(viewToUse), sharedState(std::make_shared<SharedRenderState>())
     {
         callbackTelemetry = std::make_shared<AtomicRenderTelemetry>();
-        std::atomic_store_explicit(&publishedTelemetry, callbackTelemetry, std::memory_order_release);
-        setSpectrumSettings({});
+        std::atomic_store_explicit(
+            &publishedTelemetry, callbackTelemetry, std::memory_order_release);
+        setSpectrumSettings({ });
         initialiseMetal();
         callbackTelemetry->metalAvailable.store(metalReady, std::memory_order_relaxed);
     }
@@ -425,8 +389,7 @@ public:
         view.colorPixelFormat = MTLPixelFormatBGRA8Unorm_sRGB;
         view.clearColor = MTLClearColorMake(0.018, 0.024, 0.035, 1.0);
 
-        if ([view.layer isKindOfClass:[CAMetalLayer class]])
-        {
+        if ([view.layer isKindOfClass:[CAMetalLayer class]]) {
             auto* layer = static_cast<CAMetalLayer*>(view.layer);
             layer.maximumDrawableCount = renderBufferCount;
             layer.allowsNextDrawableTimeout = YES;
@@ -436,8 +399,7 @@ public:
 
         [view attachRenderBackend:this];
 
-        if (! [view hasDisplayLink])
-        {
+        if (![view hasDisplayLink]) {
             metalReady = false;
             initializationError = "CAMetalDisplayLink could not attach to the Metal layer.";
             callbackTelemetry->metalAvailable.store(false, std::memory_order_relaxed);
@@ -457,8 +419,7 @@ public:
         loadPublishedTelemetry()->renderingRequested.store(false, std::memory_order_relaxed);
         setEffectiveActive(false);
 
-        if (view != nil)
-        {
+        if (view != nil) {
             view.paused = YES;
             view.delegate = nil;
             [view detachRenderBackend];
@@ -475,7 +436,8 @@ public:
             return;
 
         requestedActive.store(shouldBeActive, std::memory_order_relaxed);
-        loadPublishedTelemetry()->renderingRequested.store(shouldBeActive, std::memory_order_relaxed);
+        loadPublishedTelemetry()->renderingRequested.store(
+            shouldBeActive, std::memory_order_relaxed);
         refreshEffectiveActivity();
     }
 
@@ -522,49 +484,84 @@ public:
         MetalRenderTelemetry result;
 
         result.epoch = telemetry->epoch;
-        result.displayLinkCallbacks = telemetry->displayLinkCallbacks.load(std::memory_order_relaxed);
+        result.displayLinkCallbacks
+            = telemetry->displayLinkCallbacks.load(std::memory_order_relaxed);
         result.submittedFrames = telemetry->submittedFrames.load(std::memory_order_relaxed);
         result.completedFrames = telemetry->completedFrames.load(std::memory_order_relaxed);
-        result.commandBufferFailures = telemetry->commandBufferFailures.load(std::memory_order_relaxed);
-        result.presentationCallbacks = telemetry->presentationCallbacks.load(std::memory_order_relaxed);
+        result.commandBufferFailures
+            = telemetry->commandBufferFailures.load(std::memory_order_relaxed);
+        result.presentationCallbacks
+            = telemetry->presentationCallbacks.load(std::memory_order_relaxed);
         result.presentedFrames = telemetry->presentedFrames.load(std::memory_order_relaxed);
-        result.presentationsAfterTarget = telemetry->presentationsAfterTarget.load(std::memory_order_relaxed);
-        result.skippedPresentations = telemetry->skippedPresentations.load(std::memory_order_relaxed);
-        result.gpuBackpressureDrops = telemetry->gpuBackpressureDrops.load(std::memory_order_relaxed);
-        result.drawableUnavailableDrops = telemetry->drawableUnavailableDrops.load(std::memory_order_relaxed);
-        result.callbackAlreadyLateHostDelays = telemetry->callbackAlreadyLateHostDelays.load(std::memory_order_relaxed);
-        result.cpuCommitDeadlineMisses = telemetry->cpuCommitDeadlineMisses.load(std::memory_order_relaxed);
-        result.gpuCompletionDeadlineMisses = telemetry->gpuCompletionDeadlineMisses.load(std::memory_order_relaxed);
-        result.analysisRequestCalls = telemetry->analysisRequestCalls.load(std::memory_order_relaxed);
+        result.presentationsAfterTarget
+            = telemetry->presentationsAfterTarget.load(std::memory_order_relaxed);
+        result.skippedPresentations
+            = telemetry->skippedPresentations.load(std::memory_order_relaxed);
+        result.gpuBackpressureDrops
+            = telemetry->gpuBackpressureDrops.load(std::memory_order_relaxed);
+        result.drawableUnavailableDrops
+            = telemetry->drawableUnavailableDrops.load(std::memory_order_relaxed);
+        result.callbackAlreadyLateHostDelays
+            = telemetry->callbackAlreadyLateHostDelays.load(std::memory_order_relaxed);
+        result.cpuCommitDeadlineMisses
+            = telemetry->cpuCommitDeadlineMisses.load(std::memory_order_relaxed);
+        result.gpuCompletionDeadlineMisses
+            = telemetry->gpuCompletionDeadlineMisses.load(std::memory_order_relaxed);
+        result.analysisRequestCalls
+            = telemetry->analysisRequestCalls.load(std::memory_order_relaxed);
         result.snapshotReads = telemetry->snapshotReads.load(std::memory_order_relaxed);
-        result.framesWithNewSnapshot = telemetry->framesWithNewSnapshot.load(std::memory_order_relaxed);
-        result.lastSpectrumSequence = telemetry->lastSpectrumSequence.load(std::memory_order_relaxed);
-        result.lastCpuEncodeNanoseconds = telemetry->lastCpuEncodeNanoseconds.load(std::memory_order_relaxed);
-        result.maximumCpuEncodeNanoseconds = telemetry->maximumCpuEncodeNanoseconds.load(std::memory_order_relaxed);
-        result.lastGpuExecutionNanoseconds = telemetry->lastGpuExecutionNanoseconds.load(std::memory_order_relaxed);
-        result.maximumGpuExecutionNanoseconds = telemetry->maximumGpuExecutionNanoseconds.load(std::memory_order_relaxed);
-        result.lastDisplayCallbackIntervalNanoseconds = telemetry->lastDisplayCallbackIntervalNanoseconds.load(std::memory_order_relaxed);
-        result.lastTargetIntervalNanoseconds = telemetry->lastTargetIntervalNanoseconds.load(std::memory_order_relaxed);
-        result.lastTargetPresentationIntervalNanoseconds = telemetry->lastTargetPresentationIntervalNanoseconds.load(std::memory_order_relaxed);
-        result.lastPresentedFrameIntervalNanoseconds = telemetry->lastPresentedFrameIntervalNanoseconds.load(std::memory_order_relaxed);
-        result.lastPresentedHostTimestampNanoseconds = telemetry->lastPresentedHostTimestampNanoseconds.load(std::memory_order_relaxed);
-        result.lastPresentationLatenessNanoseconds = telemetry->lastPresentationLatenessNanoseconds.load(std::memory_order_relaxed);
-        result.maximumPresentationLatenessNanoseconds = telemetry->maximumPresentationLatenessNanoseconds.load(std::memory_order_relaxed);
-        result.lastCallbackHostDelayNanoseconds = telemetry->lastCallbackHostDelayNanoseconds.load(std::memory_order_relaxed);
-        result.lastCpuCommitLatenessNanoseconds = telemetry->lastCpuCommitLatenessNanoseconds.load(std::memory_order_relaxed);
-        result.lastGpuCompletionLatenessNanoseconds = telemetry->lastGpuCompletionLatenessNanoseconds.load(std::memory_order_relaxed);
-        result.lastTargetTimestampNanoseconds = telemetry->lastTargetTimestampNanoseconds.load(std::memory_order_relaxed);
-        result.lastTargetPresentationTimestampNanoseconds = telemetry->lastTargetPresentationTimestampNanoseconds.load(std::memory_order_relaxed);
-        result.lastProvidedDrawableAccessNanoseconds = telemetry->lastProvidedDrawableAccessNanoseconds.load(std::memory_order_relaxed);
-        result.maximumProvidedDrawableAccessNanoseconds = telemetry->maximumProvidedDrawableAccessNanoseconds.load(std::memory_order_relaxed);
+        result.framesWithNewSnapshot
+            = telemetry->framesWithNewSnapshot.load(std::memory_order_relaxed);
+        result.lastSpectrumSequence
+            = telemetry->lastSpectrumSequence.load(std::memory_order_relaxed);
+        result.lastCpuEncodeNanoseconds
+            = telemetry->lastCpuEncodeNanoseconds.load(std::memory_order_relaxed);
+        result.maximumCpuEncodeNanoseconds
+            = telemetry->maximumCpuEncodeNanoseconds.load(std::memory_order_relaxed);
+        result.lastGpuExecutionNanoseconds
+            = telemetry->lastGpuExecutionNanoseconds.load(std::memory_order_relaxed);
+        result.maximumGpuExecutionNanoseconds
+            = telemetry->maximumGpuExecutionNanoseconds.load(std::memory_order_relaxed);
+        result.lastDisplayCallbackIntervalNanoseconds
+            = telemetry->lastDisplayCallbackIntervalNanoseconds.load(std::memory_order_relaxed);
+        result.lastTargetIntervalNanoseconds
+            = telemetry->lastTargetIntervalNanoseconds.load(std::memory_order_relaxed);
+        result.lastTargetPresentationIntervalNanoseconds
+            = telemetry->lastTargetPresentationIntervalNanoseconds.load(std::memory_order_relaxed);
+        result.lastPresentedFrameIntervalNanoseconds
+            = telemetry->lastPresentedFrameIntervalNanoseconds.load(std::memory_order_relaxed);
+        result.lastPresentedHostTimestampNanoseconds
+            = telemetry->lastPresentedHostTimestampNanoseconds.load(std::memory_order_relaxed);
+        result.lastPresentationLatenessNanoseconds
+            = telemetry->lastPresentationLatenessNanoseconds.load(std::memory_order_relaxed);
+        result.maximumPresentationLatenessNanoseconds
+            = telemetry->maximumPresentationLatenessNanoseconds.load(std::memory_order_relaxed);
+        result.lastCallbackHostDelayNanoseconds
+            = telemetry->lastCallbackHostDelayNanoseconds.load(std::memory_order_relaxed);
+        result.lastCpuCommitLatenessNanoseconds
+            = telemetry->lastCpuCommitLatenessNanoseconds.load(std::memory_order_relaxed);
+        result.lastGpuCompletionLatenessNanoseconds
+            = telemetry->lastGpuCompletionLatenessNanoseconds.load(std::memory_order_relaxed);
+        result.lastTargetTimestampNanoseconds
+            = telemetry->lastTargetTimestampNanoseconds.load(std::memory_order_relaxed);
+        result.lastTargetPresentationTimestampNanoseconds
+            = telemetry->lastTargetPresentationTimestampNanoseconds.load(std::memory_order_relaxed);
+        result.lastProvidedDrawableAccessNanoseconds
+            = telemetry->lastProvidedDrawableAccessNanoseconds.load(std::memory_order_relaxed);
+        result.maximumProvidedDrawableAccessNanoseconds
+            = telemetry->maximumProvidedDrawableAccessNanoseconds.load(std::memory_order_relaxed);
         result.drawableWidthPixels = telemetry->drawableWidthPixels.load(std::memory_order_relaxed);
-        result.drawableHeightPixels = telemetry->drawableHeightPixels.load(std::memory_order_relaxed);
-        result.configuredMaximumFramesPerSecond = telemetry->configuredMaximumFramesPerSecond.load(std::memory_order_relaxed);
+        result.drawableHeightPixels
+            = telemetry->drawableHeightPixels.load(std::memory_order_relaxed);
+        result.configuredMaximumFramesPerSecond
+            = telemetry->configuredMaximumFramesPerSecond.load(std::memory_order_relaxed);
         result.backingScale = telemetry->backingScale.load(std::memory_order_relaxed);
         result.metalAvailable = telemetry->metalAvailable.load(std::memory_order_relaxed);
         result.renderingRequested = telemetry->renderingRequested.load(std::memory_order_relaxed);
-        result.effectivelyRendering = telemetry->effectivelyRendering.load(std::memory_order_relaxed);
-        result.resetPending = requestedTelemetryEpoch.load(std::memory_order_acquire) != result.epoch;
+        result.effectivelyRendering
+            = telemetry->effectivelyRendering.load(std::memory_order_relaxed);
+        result.resetPending
+            = requestedTelemetryEpoch.load(std::memory_order_acquire) != result.epoch;
         return result;
     }
 
@@ -588,11 +585,8 @@ public:
     {
         assertMessageThread();
 
-        if (! effectiveActive.load(std::memory_order_relaxed)
-            || view == nil
-            || update == nil
-            || ! metalReady)
-        {
+        if (!effectiveActive.load(std::memory_order_relaxed) || view == nil || update == nil
+            || !metalReady) {
             return;
         }
 
@@ -602,15 +596,12 @@ public:
         const auto telemetry = callbackTelemetry;
         const auto targetTimestamp = update.targetTimestamp;
         const auto targetPresentationTimestamp = update.targetPresentationTimestamp;
-        recordDisplayLinkCallback(*telemetry,
-                                  callbackHostTime,
-                                  targetTimestamp,
-                                  targetPresentationTimestamp);
+        recordDisplayLinkCallback(
+            *telemetry, callbackHostTime, targetTimestamp, targetPresentationTimestamp);
 
         const auto admission = acquireRenderBuffer();
 
-        if (admission.index >= renderBufferCount)
-        {
+        if (admission.index >= renderBufferCount) {
             telemetry->gpuBackpressureDrops.fetch_add(1, std::memory_order_relaxed);
             telemetry->skippedPresentations.fetch_add(1, std::memory_order_relaxed);
             return;
@@ -619,14 +610,14 @@ public:
         auto& slot = sharedState->slots[admission.index];
         const auto drawableAccessStart = Clock::now();
         id<CAMetalDrawable> drawable = update.drawable;
-        const auto drawableAccessNanoseconds = nanosecondsBetween(drawableAccessStart, Clock::now());
-        telemetry->lastProvidedDrawableAccessNanoseconds.store(drawableAccessNanoseconds,
-                                                               std::memory_order_relaxed);
-        updateMaximum(telemetry->maximumProvidedDrawableAccessNanoseconds,
-                      drawableAccessNanoseconds);
+        const auto drawableAccessNanoseconds
+            = nanosecondsBetween(drawableAccessStart, Clock::now());
+        telemetry->lastProvidedDrawableAccessNanoseconds.store(
+            drawableAccessNanoseconds, std::memory_order_relaxed);
+        updateMaximum(
+            telemetry->maximumProvidedDrawableAccessNanoseconds, drawableAccessNanoseconds);
 
-        if (drawable == nil || drawable.texture == nil)
-        {
+        if (drawable == nil || drawable.texture == nil) {
             recordSkippedPresentation(sharedState, admission, telemetry);
             releaseRenderBuffer(sharedState, admission);
             telemetry->drawableUnavailableDrops.fetch_add(1, std::memory_order_relaxed);
@@ -646,8 +637,7 @@ public:
 
         VisualizationFrame incomingFrame;
 
-        if (source.copyLatestVisualizationFrame(incomingFrame))
-        {
+        if (source.copyLatestVisualizationFrame(incomingFrame)) {
             telemetry->snapshotReads.fetch_add(1, std::memory_order_relaxed);
             acceptSnapshot(incomingFrame, *telemetry);
         }
@@ -669,18 +659,17 @@ public:
 
         id<MTLCommandBuffer> commandBuffer = [commandQueue commandBuffer];
 
-        if (commandBuffer == nil)
-        {
+        if (commandBuffer == nil) {
             recordSkippedPresentation(sharedState, admission, telemetry);
             releaseRenderBuffer(sharedState, admission);
             telemetry->gpuBackpressureDrops.fetch_add(1, std::memory_order_relaxed);
             return;
         }
 
-        id<MTLRenderCommandEncoder> encoder = [commandBuffer renderCommandEncoderWithDescriptor:descriptor];
+        id<MTLRenderCommandEncoder> encoder =
+            [commandBuffer renderCommandEncoderWithDescriptor:descriptor];
 
-        if (encoder == nil)
-        {
+        if (encoder == nil) {
             recordSkippedPresentation(sharedState, admission, telemetry);
             releaseRenderBuffer(sharedState, admission);
             telemetry->drawableUnavailableDrops.fetch_add(1, std::memory_order_relaxed);
@@ -693,37 +682,33 @@ public:
 
         if (batches.gridCount != 0)
             [encoder drawPrimitives:MTLPrimitiveTypeTriangle
-                       vertexStart:batches.gridStart
-                       vertexCount:batches.gridCount];
+                        vertexStart:batches.gridStart
+                        vertexCount:batches.gridCount];
 
         if (batches.spectrumCount >= 2)
             [encoder drawPrimitives:MTLPrimitiveTypeTriangleStrip
-                       vertexStart:batches.spectrumStart
-                       vertexCount:batches.spectrumCount];
+                        vertexStart:batches.spectrumStart
+                        vertexCount:batches.spectrumCount];
 
         if (batches.meterCount != 0)
             [encoder drawPrimitives:MTLPrimitiveTypeTriangle
-                       vertexStart:batches.meterStart
-                       vertexCount:batches.meterCount];
+                        vertexStart:batches.meterStart
+                        vertexCount:batches.meterCount];
 
         [encoder endEncoding];
 
         auto presentationState = sharedState;
         auto presentationTelemetry = telemetry;
         [drawable addPresentedHandler:^(id<MTLDrawable> presentedDrawable) {
-            recordPresentedDrawable(presentationState,
-                                    admission,
-                                    presentationTelemetry,
-                                    presentedDrawable,
-                                    targetPresentationTimestamp);
+            recordPresentedDrawable(presentationState, admission, presentationTelemetry,
+                presentedDrawable, targetPresentationTimestamp);
             releaseRenderBuffer(presentationState, admission);
         }];
 
         auto completionState = sharedState;
         auto completionTelemetry = telemetry;
         [commandBuffer addCompletedHandler:^(id<MTLCommandBuffer> completedBuffer) {
-            if (completedBuffer.status == MTLCommandBufferStatusError)
-            {
+            if (completedBuffer.status == MTLCommandBufferStatusError) {
                 completionTelemetry->commandBufferFailures.fetch_add(1, std::memory_order_relaxed);
                 recordSkippedPresentation(completionState, admission, completionTelemetry);
                 releaseRenderBuffer(completionState, admission);
@@ -733,22 +718,20 @@ public:
             const auto gpuStart = completedBuffer.GPUStartTime;
             const auto gpuEnd = completedBuffer.GPUEndTime;
 
-            if (gpuEnd >= gpuStart && gpuStart > 0.0)
-            {
+            if (gpuEnd >= gpuStart && gpuStart > 0.0) {
                 const auto gpuNanoseconds = positiveHostTimeDifference(gpuEnd, gpuStart);
-                completionTelemetry->lastGpuExecutionNanoseconds.store(gpuNanoseconds,
-                                                                        std::memory_order_relaxed);
+                completionTelemetry->lastGpuExecutionNanoseconds.store(
+                    gpuNanoseconds, std::memory_order_relaxed);
                 updateMaximum(completionTelemetry->maximumGpuExecutionNanoseconds, gpuNanoseconds);
 
-                const auto completionLateness = positiveHostTimeDifference(gpuEnd,
-                                                                            targetPresentationTimestamp);
+                const auto completionLateness
+                    = positiveHostTimeDifference(gpuEnd, targetPresentationTimestamp);
                 completionTelemetry->lastGpuCompletionLatenessNanoseconds.store(
-                    completionLateness,
-                    std::memory_order_relaxed);
+                    completionLateness, std::memory_order_relaxed);
 
                 if (completionLateness != 0)
-                    completionTelemetry->gpuCompletionDeadlineMisses.fetch_add(1,
-                                                                                std::memory_order_relaxed);
+                    completionTelemetry->gpuCompletionDeadlineMisses.fetch_add(
+                        1, std::memory_order_relaxed);
             }
 
             completionTelemetry->completedFrames.fetch_add(1, std::memory_order_relaxed);
@@ -762,9 +745,10 @@ public:
         [commandBuffer commit];
 
         const auto commitHostTime = CACurrentMediaTime();
-        const auto commitLateness = positiveHostTimeDifference(commitHostTime,
-                                                               targetPresentationTimestamp);
-        telemetry->lastCpuCommitLatenessNanoseconds.store(commitLateness, std::memory_order_relaxed);
+        const auto commitLateness
+            = positiveHostTimeDifference(commitHostTime, targetPresentationTimestamp);
+        telemetry->lastCpuCommitLatenessNanoseconds.store(
+            commitLateness, std::memory_order_relaxed);
 
         if (commitLateness != 0)
             telemetry->cpuCommitDeadlineMisses.fetch_add(1, std::memory_order_relaxed);
@@ -796,7 +780,7 @@ private:
     std::atomic<bool> hasShutDown { false };
 
     VisualizationFrame targetFrame;
-    std::array<float, spectrumBinCount> displayedSpectrum {};
+    std::array<float, spectrumBinCount> displayedSpectrum { };
     std::array<float, 2> displayedPeak { minimumDisplayDecibels, minimumDisplayDecibels };
     std::array<float, 2> displayedRms { minimumDisplayDecibels, minimumDisplayDecibels };
     std::uint64_t lastSpectrumSequence = 0;
@@ -811,37 +795,35 @@ private:
 
     void initialiseMetal()
     {
-        if (view == nil || view.device == nil)
-        {
+        if (view == nil || view.device == nil) {
             initializationError = "Metal is not available on this system.";
             return;
         }
 
         commandQueue = [view.device newCommandQueue];
 
-        if (commandQueue == nil)
-        {
+        if (commandQueue == nil) {
             initializationError = "Metal could not create a command queue.";
             return;
         }
 
         NSError* libraryError = nil;
         auto* sourceString = [NSString stringWithUTF8String:metalShaderSource];
-        id<MTLLibrary> library = [view.device newLibraryWithSource:sourceString options:nil error:&libraryError];
+        id<MTLLibrary> library = [view.device newLibraryWithSource:sourceString
+                                                           options:nil
+                                                             error:&libraryError];
 
-        if (library == nil)
-        {
+        if (library == nil) {
             initializationError = libraryError != nil
-                                    ? juce::String::fromUTF8(libraryError.localizedDescription.UTF8String)
-                                    : juce::String("Metal could not compile the visualization shader.");
+                ? juce::String::fromUTF8(libraryError.localizedDescription.UTF8String)
+                : juce::String("Metal could not compile the visualization shader.");
             return;
         }
 
         id<MTLFunction> vertexFunction = [library newFunctionWithName:@"audioInsightVertex"];
         id<MTLFunction> fragmentFunction = [library newFunctionWithName:@"audioInsightFragment"];
 
-        if (vertexFunction == nil || fragmentFunction == nil)
-        {
+        if (vertexFunction == nil || fragmentFunction == nil) {
             initializationError = "Metal could not load the visualization shader functions.";
             [vertexFunction release];
             [fragmentFunction release];
@@ -864,29 +846,28 @@ private:
         colourAttachment.destinationAlphaBlendFactor = MTLBlendFactorOneMinusSourceAlpha;
 
         NSError* pipelineError = nil;
-        pipelineState = [view.device newRenderPipelineStateWithDescriptor:descriptor error:&pipelineError];
+        pipelineState = [view.device newRenderPipelineStateWithDescriptor:descriptor
+                                                                    error:&pipelineError];
 
         [descriptor release];
         [vertexFunction release];
         [fragmentFunction release];
         [library release];
 
-        if (pipelineState == nil)
-        {
+        if (pipelineState == nil) {
             initializationError = pipelineError != nil
-                                    ? juce::String::fromUTF8(pipelineError.localizedDescription.UTF8String)
-                                    : juce::String("Metal could not create the visualization pipeline.");
+                ? juce::String::fromUTF8(pipelineError.localizedDescription.UTF8String)
+                : juce::String("Metal could not create the visualization pipeline.");
             return;
         }
 
-        for (auto& slot : sharedState->slots)
-        {
-            slot.vertexBuffer = [view.device newBufferWithLength:maximumVertexCount * sizeof(MetalVertex)
-                                                          options:MTLResourceStorageModeShared
-                                                                | MTLResourceCPUCacheModeWriteCombined];
+        for (auto& slot : sharedState->slots) {
+            slot.vertexBuffer =
+                [view.device newBufferWithLength:maximumVertexCount * sizeof(MetalVertex)
+                                         options:MTLResourceStorageModeShared |
+                    MTLResourceCPUCacheModeWriteCombined];
 
-            if (slot.vertexBuffer == nil)
-            {
+            if (slot.vertexBuffer == nil) {
                 initializationError = "Metal could not allocate the visualization buffers.";
                 return;
             }
@@ -914,27 +895,22 @@ private:
 
         auto pending = std::atomic_load_explicit(&pendingTelemetry, std::memory_order_acquire);
 
-        for (;;)
-        {
+        for (;;) {
             if (requestedTelemetryEpoch.load(std::memory_order_acquire) != epoch)
                 return;
 
             if (pending != nullptr && pending->epoch >= epoch)
                 return;
 
-            if (std::atomic_compare_exchange_weak_explicit(&pendingTelemetry,
-                                                           &pending,
-                                                           replacement,
-                                                           std::memory_order_release,
-                                                           std::memory_order_acquire))
-            {
+            if (std::atomic_compare_exchange_weak_explicit(&pendingTelemetry, &pending, replacement,
+                    std::memory_order_release, std::memory_order_acquire)) {
                 return;
             }
         }
     }
 
-    static void copyPersistentTelemetry(const AtomicRenderTelemetry& sourceTelemetry,
-                                        AtomicRenderTelemetry& destination) noexcept
+    static void copyPersistentTelemetry(
+        const AtomicRenderTelemetry& sourceTelemetry, AtomicRenderTelemetry& destination) noexcept
     {
         destination.drawableWidthPixels.store(
             sourceTelemetry.drawableWidthPixels.load(std::memory_order_relaxed),
@@ -946,9 +922,10 @@ private:
             sourceTelemetry.configuredMaximumFramesPerSecond.load(std::memory_order_relaxed),
             std::memory_order_relaxed);
         destination.backingScale.store(sourceTelemetry.backingScale.load(std::memory_order_relaxed),
-                                       std::memory_order_relaxed);
-        destination.metalAvailable.store(sourceTelemetry.metalAvailable.load(std::memory_order_relaxed),
-                                         std::memory_order_relaxed);
+            std::memory_order_relaxed);
+        destination.metalAvailable.store(
+            sourceTelemetry.metalAvailable.load(std::memory_order_relaxed),
+            std::memory_order_relaxed);
         destination.renderingRequested.store(
             sourceTelemetry.renderingRequested.load(std::memory_order_relaxed),
             std::memory_order_relaxed);
@@ -966,7 +943,7 @@ private:
 
     void resetRendererStateWhileDisplayLinkIsPaused() noexcept
     {
-        targetFrame = {};
+        targetFrame = { };
         displayedSpectrum.fill(minimumDisplayDecibels);
         displayedPeak.fill(minimumDisplayDecibels);
         displayedRms.fill(minimumDisplayDecibels);
@@ -974,23 +951,19 @@ private:
         lastSpectrumSequence = 0;
         lastCapturedFrameEnd = 0;
         hasDisplayFrame = false;
-        previousSmoothingTime = {};
+        previousSmoothingTime = { };
         resetTelemetryTimingAtCallbackBoundary();
     }
 
     void applyPendingStateAtDisplayCallbackBoundary()
     {
-        if (auto replacement = std::atomic_exchange_explicit(
-                &pendingTelemetry,
-                std::shared_ptr<AtomicRenderTelemetry> {},
-                std::memory_order_acq_rel);
-            replacement != nullptr && replacement->epoch > callbackTelemetry->epoch)
-        {
+        if (auto replacement = std::atomic_exchange_explicit(&pendingTelemetry,
+                std::shared_ptr<AtomicRenderTelemetry> { }, std::memory_order_acq_rel);
+            replacement != nullptr && replacement->epoch > callbackTelemetry->epoch) {
             copyPersistentTelemetry(*loadPublishedTelemetry(), *replacement);
             callbackTelemetry = std::move(replacement);
-            std::atomic_store_explicit(&publishedTelemetry,
-                                       callbackTelemetry,
-                                       std::memory_order_release);
+            std::atomic_store_explicit(
+                &publishedTelemetry, callbackTelemetry, std::memory_order_release);
             resetTelemetryTimingAtCallbackBoundary();
         }
     }
@@ -1002,17 +975,14 @@ private:
         if (effectiveActive.load(std::memory_order_acquire) == shouldBeActive)
             return;
 
-        if (shouldBeActive)
-        {
+        if (shouldBeActive) {
             // Keep the link paused until the coordinator has advanced its
             // generation and renderer state has been reset.
             source.setVisualizationActive(true);
             resetRendererStateWhileDisplayLinkIsPaused();
             queueTelemetryReset();
             effectiveActive.store(true, std::memory_order_release);
-            loadPublishedTelemetry()->effectivelyRendering.store(
-                true,
-                std::memory_order_relaxed);
+            loadPublishedTelemetry()->effectivelyRendering.store(true, std::memory_order_relaxed);
 
             if (view != nil)
                 [view setDisplayLinkPaused:NO];
@@ -1024,31 +994,24 @@ private:
             [view setDisplayLinkPaused:YES];
 
         effectiveActive.store(false, std::memory_order_release);
-        loadPublishedTelemetry()->effectivelyRendering.store(
-            false,
-            std::memory_order_relaxed);
+        loadPublishedTelemetry()->effectivelyRendering.store(false, std::memory_order_relaxed);
         source.setVisualizationActive(false);
     }
 
     void refreshEffectiveActivity()
     {
-        if (hasShutDown.load(std::memory_order_acquire) || view == nil)
-        {
+        if (hasShutDown.load(std::memory_order_acquire) || view == nil) {
             setEffectiveActive(false);
             return;
         }
 
         auto* window = view.window;
-        const auto windowIsVisible = window != nil
-                                     && window.visible
-                                     && ! window.miniaturized
-                                     && (window.occlusionState & NSWindowOcclusionStateVisible) != 0;
-        const auto nativeViewIsVisible = ! view.hiddenOrHasHiddenAncestor;
+        const auto windowIsVisible = window != nil && window.visible && !window.miniaturized
+            && (window.occlusionState & NSWindowOcclusionStateVisible) != 0;
+        const auto nativeViewIsVisible = !view.hiddenOrHasHiddenAncestor;
         const auto shouldRender = requestedActive.load(std::memory_order_relaxed)
-                                  && juceShowing.load(std::memory_order_relaxed)
-                                  && metalReady
-                                  && windowIsVisible
-                                  && nativeViewIsVisible;
+            && juceShowing.load(std::memory_order_relaxed) && metalReady && windowIsVisible
+            && nativeViewIsVisible;
 
         setEffectiveActive(shouldRender);
     }
@@ -1059,11 +1022,11 @@ private:
             return;
 
         auto* screen = view.window.screen;
-        const auto maximumFps = screen != nil ? std::max<NSInteger>(1, screen.maximumFramesPerSecond) : 60;
+        const auto maximumFps
+            = screen != nil ? std::max<NSInteger>(1, screen.maximumFramesPerSecond) : 60;
         [view setDisplayLinkMaximumFramesPerSecond:maximumFps];
         loadPublishedTelemetry()->configuredMaximumFramesPerSecond.store(
-            static_cast<std::uint32_t>(maximumFps),
-            std::memory_order_relaxed);
+            static_cast<std::uint32_t>(maximumFps), std::memory_order_relaxed);
         updateBackingScale();
     }
 
@@ -1075,10 +1038,10 @@ private:
         const auto backingSize = [view convertSizeToBacking:NSMakeSize(1.0, 1.0)];
         auto scale = static_cast<double>(backingSize.width);
 
-        if ((! std::isfinite(scale) || scale <= 0.0) && view.window != nil)
+        if ((!std::isfinite(scale) || scale <= 0.0) && view.window != nil)
             scale = static_cast<double>(view.window.backingScaleFactor);
 
-        if (! std::isfinite(scale) || scale <= 0.0)
+        if (!std::isfinite(scale) || scale <= 0.0)
             scale = 1.0;
 
         loadPublishedTelemetry()->backingScale.store(scale, std::memory_order_relaxed);
@@ -1086,35 +1049,29 @@ private:
 
     RenderBufferAdmission acquireRenderBuffer() noexcept
     {
-        for (std::size_t index = 0; index < sharedState->slots.size(); ++index)
-        {
-            auto expected = sharedState->slots[index].admissionState.load(std::memory_order_relaxed);
+        for (std::size_t index = 0; index < sharedState->slots.size(); ++index) {
+            auto expected
+                = sharedState->slots[index].admissionState.load(std::memory_order_relaxed);
 
             if ((expected & 1U) == 0U
                 && sharedState->slots[index].admissionState.compare_exchange_strong(
-                    expected,
-                    expected + 1,
-                    std::memory_order_acquire,
-                    std::memory_order_relaxed))
-            {
+                    expected, expected + 1, std::memory_order_acquire, std::memory_order_relaxed)) {
                 return { index, expected + 1 };
             }
         }
 
-        return {};
+        return { };
     }
 
     void recordDisplayLinkCallback(AtomicRenderTelemetry& telemetry,
-                                   CFTimeInterval callbackHostTime,
-                                   CFTimeInterval targetTimestamp,
-                                   CFTimeInterval targetPresentationTimestamp) noexcept
+        CFTimeInterval callbackHostTime, CFTimeInterval targetTimestamp,
+        CFTimeInterval targetPresentationTimestamp) noexcept
     {
         telemetry.displayLinkCallbacks.fetch_add(1, std::memory_order_relaxed);
-        telemetry.lastTargetTimestampNanoseconds.store(hostTimeNanoseconds(targetTimestamp),
-                                                       std::memory_order_relaxed);
+        telemetry.lastTargetTimestampNanoseconds.store(
+            hostTimeNanoseconds(targetTimestamp), std::memory_order_relaxed);
         telemetry.lastTargetPresentationTimestampNanoseconds.store(
-            hostTimeNanoseconds(targetPresentationTimestamp),
-            std::memory_order_relaxed);
+            hostTimeNanoseconds(targetPresentationTimestamp), std::memory_order_relaxed);
 
         if (previousDisplayCallbackHostTime > 0.0)
             telemetry.lastDisplayCallbackIntervalNanoseconds.store(
@@ -1128,12 +1085,14 @@ private:
 
         if (previousTargetPresentationTimestamp > 0.0)
             telemetry.lastTargetPresentationIntervalNanoseconds.store(
-                positiveHostTimeDifference(targetPresentationTimestamp,
-                                           previousTargetPresentationTimestamp),
+                positiveHostTimeDifference(
+                    targetPresentationTimestamp, previousTargetPresentationTimestamp),
                 std::memory_order_relaxed);
 
-        const auto callbackHostDelay = positiveHostTimeDifference(callbackHostTime, targetTimestamp);
-        telemetry.lastCallbackHostDelayNanoseconds.store(callbackHostDelay, std::memory_order_relaxed);
+        const auto callbackHostDelay
+            = positiveHostTimeDifference(callbackHostTime, targetTimestamp);
+        telemetry.lastCallbackHostDelayNanoseconds.store(
+            callbackHostDelay, std::memory_order_relaxed);
 
         if (callbackHostDelay != 0)
             telemetry.callbackAlreadyLateHostDelays.fetch_add(1, std::memory_order_relaxed);
@@ -1146,12 +1105,11 @@ private:
     void acceptSnapshot(const VisualizationFrame& incoming, AtomicRenderTelemetry& telemetry)
     {
         const auto generationChanged = incoming.generation != lastGeneration;
-        const auto isNew = ! hasDisplayFrame
-                           || generationChanged
-                           || incoming.spectrumSequence != lastSpectrumSequence
-                           || incoming.capturedFrameEnd != lastCapturedFrameEnd;
+        const auto isNew = !hasDisplayFrame || generationChanged
+            || incoming.spectrumSequence != lastSpectrumSequence
+            || incoming.capturedFrameEnd != lastCapturedFrameEnd;
 
-        if (! isNew)
+        if (!isNew)
             return;
 
         targetFrame = incoming;
@@ -1161,23 +1119,18 @@ private:
         telemetry.framesWithNewSnapshot.fetch_add(1, std::memory_order_relaxed);
         telemetry.lastSpectrumSequence.store(lastSpectrumSequence, std::memory_order_relaxed);
 
-        if (! hasDisplayFrame || generationChanged)
-        {
+        if (!hasDisplayFrame || generationChanged) {
             const auto settings = getSpectrumSettings();
 
             for (std::size_t index = 0; index < displayedSpectrum.size(); ++index)
                 displayedSpectrum[index] = sanitiseDecibels(targetFrame.spectrumDecibels[index],
-                                                            settings.floorDecibels,
-                                                            settings.ceilingDecibels);
+                    settings.floorDecibels, settings.ceilingDecibels);
 
-            for (std::size_t channel = 0; channel < 2; ++channel)
-            {
-                displayedPeak[channel] = sanitiseDecibels(targetFrame.peakDecibels[channel],
-                                                          minimumMeterDecibels,
-                                                          maximumMeterDecibels);
-                displayedRms[channel] = sanitiseDecibels(targetFrame.rmsDecibels[channel],
-                                                         minimumMeterDecibels,
-                                                         maximumMeterDecibels);
+            for (std::size_t channel = 0; channel < 2; ++channel) {
+                displayedPeak[channel] = sanitiseDecibels(
+                    targetFrame.peakDecibels[channel], minimumMeterDecibels, maximumMeterDecibels);
+                displayedRms[channel] = sanitiseDecibels(
+                    targetFrame.rmsDecibels[channel], minimumMeterDecibels, maximumMeterDecibels);
             }
 
             hasDisplayFrame = true;
@@ -1186,41 +1139,37 @@ private:
 
     void updateSmoothedDisplayValues(Clock::time_point now, SpectrumRenderSettings settings)
     {
-        if (! hasDisplayFrame)
+        if (!hasDisplayFrame)
             return;
 
-        const auto elapsed = previousSmoothingTime != Clock::time_point {}
-                                 ? std::chrono::duration<double>(now - previousSmoothingTime).count()
-                                 : 1.0 / 60.0;
+        const auto elapsed = previousSmoothingTime != Clock::time_point { }
+            ? std::chrono::duration<double>(now - previousSmoothingTime).count()
+            : 1.0 / 60.0;
         previousSmoothingTime = now;
 
         const auto smoothingShape = settings.smoothing * settings.smoothing;
         const auto spectrumRise = settings.smoothing <= 0.0F
-                                      ? 1.0F
-                                      : smoothingCoefficient(elapsed, 0.004 + (0.096 * smoothingShape));
+            ? 1.0F
+            : smoothingCoefficient(elapsed, 0.004 + (0.096 * smoothingShape));
         const auto spectrumFall = settings.smoothing <= 0.0F
-                                      ? 1.0F
-                                      : smoothingCoefficient(elapsed, 0.015 + (0.435 * smoothingShape));
+            ? 1.0F
+            : smoothingCoefficient(elapsed, 0.015 + (0.435 * smoothingShape));
         const auto meterRise = smoothingCoefficient(elapsed, 0.025);
         const auto meterFall = smoothingCoefficient(elapsed, 0.100);
 
-        for (std::size_t index = 0; index < displayedSpectrum.size(); ++index)
-        {
+        for (std::size_t index = 0; index < displayedSpectrum.size(); ++index) {
             const auto target = sanitiseDecibels(targetFrame.spectrumDecibels[index],
-                                                 settings.floorDecibels,
-                                                 settings.ceilingDecibels);
-            const auto coefficient = target >= displayedSpectrum[index] ? spectrumRise : spectrumFall;
+                settings.floorDecibels, settings.ceilingDecibels);
+            const auto coefficient
+                = target >= displayedSpectrum[index] ? spectrumRise : spectrumFall;
             displayedSpectrum[index] += coefficient * (target - displayedSpectrum[index]);
         }
 
-        for (std::size_t channel = 0; channel < 2; ++channel)
-        {
-            const auto peakTarget = sanitiseDecibels(targetFrame.peakDecibels[channel],
-                                                     minimumMeterDecibels,
-                                                     maximumMeterDecibels);
-            const auto rmsTarget = sanitiseDecibels(targetFrame.rmsDecibels[channel],
-                                                    minimumMeterDecibels,
-                                                    maximumMeterDecibels);
+        for (std::size_t channel = 0; channel < 2; ++channel) {
+            const auto peakTarget = sanitiseDecibels(
+                targetFrame.peakDecibels[channel], minimumMeterDecibels, maximumMeterDecibels);
+            const auto rmsTarget = sanitiseDecibels(
+                targetFrame.rmsDecibels[channel], minimumMeterDecibels, maximumMeterDecibels);
             const auto peakCoefficient = peakTarget >= displayedPeak[channel] ? 1.0F : meterFall;
             const auto rmsCoefficient = rmsTarget >= displayedRms[channel] ? meterRise : meterFall;
             displayedPeak[channel] += peakCoefficient * (peakTarget - displayedPeak[channel]);
@@ -1228,9 +1177,8 @@ private:
         }
     }
 
-    VertexBatches populateVertices(MetalVertex* vertices,
-                                   CGSize logicalSize,
-                                   SpectrumRenderSettings settings) const noexcept
+    VertexBatches populateVertices(
+        MetalVertex* vertices, CGSize logicalSize, SpectrumRenderSettings settings) const noexcept
     {
         VertexBatches batches;
 
@@ -1249,8 +1197,7 @@ private:
         const auto plotTop = height - std::clamp(height * 0.025F, 10.0F, 22.0F);
 
         const auto pointToClip = [width, height](float x, float y) noexcept {
-            return simd_make_float2((2.0F * x / width) - 1.0F,
-                                    (2.0F * y / height) - 1.0F);
+            return simd_make_float2((2.0F * x / width) - 1.0F, (2.0F * y / height) - 1.0F);
         };
 
         const auto appendVertex = [&](float x, float y, simd_float4 colour) noexcept {
@@ -1258,49 +1205,47 @@ private:
                 vertices[cursor++] = { pointToClip(x, y), colour };
         };
 
-        const auto appendQuad = [&](float left, float bottom, float right, float top, simd_float4 colour) noexcept {
-            const auto bottomLeft = pointToClip(left, bottom);
-            const auto bottomRight = pointToClip(right, bottom);
-            const auto topLeft = pointToClip(left, top);
-            const auto topRight = pointToClip(right, top);
+        const auto appendQuad
+            = [&](float left, float bottom, float right, float top, simd_float4 colour) noexcept {
+                  const auto bottomLeft = pointToClip(left, bottom);
+                  const auto bottomRight = pointToClip(right, bottom);
+                  const auto topLeft = pointToClip(left, top);
+                  const auto topRight = pointToClip(right, top);
 
-            if (cursor + 6 <= maximumVertexCount)
-            {
-                vertices[cursor++] = { bottomLeft, colour };
-                vertices[cursor++] = { bottomRight, colour };
-                vertices[cursor++] = { topLeft, colour };
-                vertices[cursor++] = { topLeft, colour };
-                vertices[cursor++] = { bottomRight, colour };
-                vertices[cursor++] = { topRight, colour };
-            }
-        };
+                  if (cursor + 6 <= maximumVertexCount) {
+                      vertices[cursor++] = { bottomLeft, colour };
+                      vertices[cursor++] = { bottomRight, colour };
+                      vertices[cursor++] = { topLeft, colour };
+                      vertices[cursor++] = { topLeft, colour };
+                      vertices[cursor++] = { bottomRight, colour };
+                      vertices[cursor++] = { topRight, colour };
+                  }
+              };
 
         const auto frequencyToX = [&](float frequency, float maximumFrequency) noexcept {
             const auto ratio = std::log(frequency / minimumSpectrumFrequency)
-                               / std::log(maximumFrequency / minimumSpectrumFrequency);
+                / std::log(maximumFrequency / minimumSpectrumFrequency);
             return plotLeft + std::clamp(ratio, 0.0F, 1.0F) * (plotRight - plotLeft);
         };
 
         const auto decibelsToY = [&](float decibels, float minimum, float maximum) noexcept {
-            const auto normalised = (sanitiseDecibels(decibels, minimum, maximum) - minimum)
-                                    / (maximum - minimum);
+            const auto normalised
+                = (sanitiseDecibels(decibels, minimum, maximum) - minimum) / (maximum - minimum);
             return plotBottom + normalised * (plotTop - plotBottom);
         };
 
         const auto nyquist = targetFrame.sampleRate > 0.0
-                                 ? static_cast<float>(targetFrame.sampleRate * 0.5)
-                                 : maximumSpectrumFrequency;
-        const auto maximumFrequency = std::clamp(nyquist,
-                                                 minimumSpectrumFrequency + 1.0F,
-                                                 maximumSpectrumFrequency);
+            ? static_cast<float>(targetFrame.sampleRate * 0.5)
+            : maximumSpectrumFrequency;
+        const auto maximumFrequency
+            = std::clamp(nyquist, minimumSpectrumFrequency + 1.0F, maximumSpectrumFrequency);
         constexpr auto gridColour = simd_float4 { 0.16F, 0.20F, 0.27F, 0.62F };
         constexpr std::array<float, 10> frequencyGrid { 20.0F, 50.0F, 100.0F, 200.0F, 500.0F,
-                                                       1'000.0F, 2'000.0F, 5'000.0F, 10'000.0F, 20'000.0F };
+            1'000.0F, 2'000.0F, 5'000.0F, 10'000.0F, 20'000.0F };
 
         batches.gridStart = cursor;
 
-        for (const auto frequency : frequencyGrid)
-        {
+        for (const auto frequency : frequencyGrid) {
             if (frequency > maximumFrequency)
                 continue;
 
@@ -1310,8 +1255,8 @@ private:
 
         auto decibels = static_cast<float>(std::ceil(settings.floorDecibels / 20.0F) * 20.0F);
 
-        for (std::size_t line = 0; line < 16 && decibels <= settings.ceilingDecibels; ++line, decibels += 20.0F)
-        {
+        for (std::size_t line = 0; line < 16 && decibels <= settings.ceilingDecibels;
+            ++line, decibels += 20.0F) {
             const auto y = decibelsToY(decibels, settings.floorDecibels, settings.ceilingDecibels);
             appendQuad(plotLeft, y - 0.5F, plotRight, y + 0.5F, gridColour);
         }
@@ -1319,27 +1264,30 @@ private:
         batches.gridCount = cursor - batches.gridStart;
         batches.spectrumStart = cursor;
 
-        if (hasDisplayFrame && targetFrame.spectrumValid && targetFrame.sampleRate > 0.0)
-        {
-            const auto binFrequency = static_cast<float>(targetFrame.sampleRate / static_cast<double>(fftSize));
-            const auto firstBin = std::max<std::size_t>(1, static_cast<std::size_t>(std::ceil(minimumSpectrumFrequency / binFrequency)));
+        if (hasDisplayFrame && targetFrame.spectrumValid && targetFrame.sampleRate > 0.0) {
+            const auto binFrequency
+                = static_cast<float>(targetFrame.sampleRate / static_cast<double>(fftSize));
+            const auto firstBin = std::max<std::size_t>(
+                1, static_cast<std::size_t>(std::ceil(minimumSpectrumFrequency / binFrequency)));
             const auto finalBin = std::min<std::size_t>(spectrumBinCount - 1,
-                                                       static_cast<std::size_t>(std::floor(maximumFrequency / binFrequency)));
+                static_cast<std::size_t>(std::floor(maximumFrequency / binFrequency)));
             constexpr auto spectrumColour = simd_float4 { 0.18F, 0.90F, 0.85F, 1.0F };
             constexpr auto spectrumHalfWidthPoints = 0.75F;
             std::array<simd_float2, spectrumBinCount> spectrumPoints;
             std::size_t pointCount = 0;
 
-            for (auto bin = firstBin; bin <= finalBin && pointCount < spectrumPoints.size(); ++bin)
-            {
-                const auto frequency = std::max(minimumSpectrumFrequency, static_cast<float>(bin) * binFrequency);
-                spectrumPoints[pointCount++] = simd_make_float2(
-                    frequencyToX(frequency, maximumFrequency),
-                    decibelsToY(displayedSpectrum[bin], settings.floorDecibels, settings.ceilingDecibels));
+            for (auto bin = firstBin; bin <= finalBin && pointCount < spectrumPoints.size();
+                ++bin) {
+                const auto frequency
+                    = std::max(minimumSpectrumFrequency, static_cast<float>(bin) * binFrequency);
+                spectrumPoints[pointCount++]
+                    = simd_make_float2(frequencyToX(frequency, maximumFrequency),
+                        decibelsToY(displayedSpectrum[bin], settings.floorDecibels,
+                            settings.ceilingDecibels));
             }
 
-            for (std::size_t index = 0; index < pointCount && cursor + 2 <= maximumVertexCount; ++index)
-            {
+            for (std::size_t index = 0; index < pointCount && cursor + 2 <= maximumVertexCount;
+                ++index) {
                 const auto previous = spectrumPoints[index == 0 ? index : index - 1];
                 const auto next = spectrumPoints[index + 1 < pointCount ? index + 1 : index];
                 const auto deltaX = next.x - previous.x;
@@ -1349,12 +1297,10 @@ private:
                 const auto normalX = -deltaY * inverseLength * spectrumHalfWidthPoints;
                 const auto normalY = deltaX * inverseLength * spectrumHalfWidthPoints;
 
-                appendVertex(spectrumPoints[index].x + normalX,
-                             spectrumPoints[index].y + normalY,
-                             spectrumColour);
-                appendVertex(spectrumPoints[index].x - normalX,
-                             spectrumPoints[index].y - normalY,
-                             spectrumColour);
+                appendVertex(spectrumPoints[index].x + normalX, spectrumPoints[index].y + normalY,
+                    spectrumColour);
+                appendVertex(spectrumPoints[index].x - normalX, spectrumPoints[index].y - normalY,
+                    spectrumColour);
             }
         }
 
@@ -1368,25 +1314,21 @@ private:
         constexpr auto rmsColour = simd_float4 { 0.12F, 0.58F, 0.78F, 1.0F };
         constexpr auto peakColour = simd_float4 { 1.0F, 0.72F, 0.20F, 1.0F };
 
-        for (std::size_t channel = 0; channel < 2; ++channel)
-        {
+        for (std::size_t channel = 0; channel < 2; ++channel) {
             const auto left = meterLeft + static_cast<float>(channel) * (channelWidth + channelGap);
             const auto right = left + channelWidth;
             appendQuad(left, plotBottom, right, plotTop, meterTrackColour);
 
-            if (hasDisplayFrame)
-            {
-                const auto rmsTop = decibelsToY(displayedRms[channel],
-                                                minimumMeterDecibels,
-                                                maximumMeterDecibels);
+            if (hasDisplayFrame) {
+                const auto rmsTop = decibelsToY(
+                    displayedRms[channel], minimumMeterDecibels, maximumMeterDecibels);
                 appendQuad(left + 1.0F, plotBottom + 1.0F, right - 1.0F, rmsTop, rmsColour);
 
-                const auto peakY = decibelsToY(displayedPeak[channel],
-                                               minimumMeterDecibels,
-                                               maximumMeterDecibels);
+                const auto peakY = decibelsToY(
+                    displayedPeak[channel], minimumMeterDecibels, maximumMeterDecibels);
                 const auto displayedPeakColour = displayedPeak[channel] > 0.0F
-                                                     ? simd_float4 { 1.0F, 0.20F, 0.12F, 1.0F }
-                                                     : peakColour;
+                    ? simd_float4 { 1.0F, 0.20F, 0.12F, 1.0F }
+                    : peakColour;
                 appendQuad(left, peakY - 1.0F, right, peakY + 1.0F, displayedPeakColour);
             }
         }
@@ -1405,10 +1347,9 @@ private:
     self.delegate = nil;
     self.paused = YES;
 
-    if ([self.layer isKindOfClass:[CAMetalLayer class]])
-    {
-        metalDisplayLink = [[CAMetalDisplayLink alloc]
-            initWithMetalLayer:static_cast<CAMetalLayer*>(self.layer)];
+    if ([self.layer isKindOfClass:[CAMetalLayer class]]) {
+        metalDisplayLink =
+            [[CAMetalDisplayLink alloc] initWithMetalLayer:static_cast<CAMetalLayer*>(self.layer)];
         metalDisplayLink.delegate = self;
         metalDisplayLink.preferredFrameLatency = 1.0F;
         metalDisplayLink.paused = YES;
@@ -1421,8 +1362,7 @@ private:
     self.paused = YES;
     self.delegate = nil;
 
-    if (metalDisplayLink != nil)
-    {
+    if (metalDisplayLink != nil) {
         metalDisplayLink.paused = YES;
         metalDisplayLink.delegate = nil;
         [metalDisplayLink invalidate];
@@ -1468,15 +1408,11 @@ private:
     [super viewWillMoveToWindow:newWindow];
     observedWindow = newWindow;
 
-    if (observedWindow != nil)
-    {
+    if (observedWindow != nil) {
         const std::array<NSNotificationName, 6> notificationNames {
-            NSWindowDidChangeOcclusionStateNotification,
-            NSWindowDidChangeScreenNotification,
-            NSWindowDidChangeBackingPropertiesNotification,
-            NSWindowDidMiniaturizeNotification,
-            NSWindowDidDeminiaturizeNotification,
-            NSWindowDidResizeNotification
+            NSWindowDidChangeOcclusionStateNotification, NSWindowDidChangeScreenNotification,
+            NSWindowDidChangeBackingPropertiesNotification, NSWindowDidMiniaturizeNotification,
+            NSWindowDidDeminiaturizeNotification, NSWindowDidResizeNotification
         };
 
         for (const auto notificationName : notificationNames)
@@ -1540,10 +1476,8 @@ private:
 
 @end
 
-namespace audio_insight
-{
-struct MetalVisualization::Impl
-{
+namespace audio_insight {
+struct MetalVisualization::Impl {
     Impl(MetalVisualization& componentToUse, VisualizationDataSource& dataSource)
         : component(componentToUse)
     {

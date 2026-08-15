@@ -11,8 +11,7 @@
 #include <cstddef>
 #include <cstdint>
 
-namespace audio_insight
-{
+namespace audio_insight {
 /**
     Streaming 4096-point Hann-window spectrum analysis.
 
@@ -25,11 +24,9 @@ namespace audio_insight
     change invalidates the current spectrum and clears all overlap state before
     accepting the new chunk.
 */
-class HannSpectrumAnalyzer final
-{
+class HannSpectrumAnalyzer final {
 public:
-    struct Statistics
-    {
+    struct Statistics {
         std::uint64_t inputChunks = 0;
         std::uint64_t transforms = 0;
         std::uint64_t temporalResets = 0;
@@ -45,8 +42,8 @@ public:
         Consumes one captured chunk and updates destination for every completed
         transform. Returns true if at least one new spectrum was produced.
     */
-    [[nodiscard]] bool process(const CapturedStereoChunkView& chunk,
-                               VisualizationFrame& destination) noexcept;
+    [[nodiscard]] bool process(
+        const CapturedStereoChunkView& chunk, VisualizationFrame& destination) noexcept;
 
     /** Explicit lifecycle reset. The next full FFT window starts a fresh stream. */
     void reset(VisualizationFrame* destinationToInvalidate = nullptr) noexcept;
@@ -67,8 +64,7 @@ public:
 private:
     static constexpr std::size_t transformWorkspaceSize = fftSize * 2;
 
-    enum class ResetReason
-    {
+    enum class ResetReason {
         explicitReset,
         generationChange,
         sequenceGap,
@@ -79,17 +75,17 @@ private:
     void resetTemporalState(ResetReason reason, VisualizationFrame* destination) noexcept;
     void configureSampleRate(double sampleRate) noexcept;
     void runTransform(std::uint64_t generation, std::uint64_t capturedFrameEnd,
-                      VisualizationFrame& destination) noexcept;
+        VisualizationFrame& destination) noexcept;
     void prepareChannelTransform(const std::array<float, fftSize>& ring,
-                                 std::array<float, transformWorkspaceSize>& workspace) noexcept;
+        std::array<float, transformWorkspaceSize>& workspace) noexcept;
     [[nodiscard]] static float magnitudeToDecibels(float magnitude) noexcept;
 
-    juce::dsp::FFT fft_{static_cast<int>(fftOrder)};
-    std::array<float, fftSize> hannWindow_{};
-    std::array<float, fftSize> leftRing_{};
-    std::array<float, fftSize> rightRing_{};
-    std::array<float, transformWorkspaceSize> leftWorkspace_{};
-    std::array<float, transformWorkspaceSize> rightWorkspace_{};
+    juce::dsp::FFT fft_ { static_cast<int>(fftOrder) };
+    std::array<float, fftSize> hannWindow_ { };
+    std::array<float, fftSize> leftRing_ { };
+    std::array<float, fftSize> rightRing_ { };
+    std::array<float, transformWorkspaceSize> leftWorkspace_ { };
+    std::array<float, transformWorkspaceSize> rightWorkspace_ { };
 
     double targetUpdatesPerSecond_ = 60.0;
     double sampleRate_ = 0.0;
@@ -105,6 +101,6 @@ private:
     std::uint64_t previousChunkSequence_ = 0;
     std::uint64_t previousCapturedFrameEnd_ = 0;
     std::uint64_t nextSpectrumSequence_ = 1;
-    Statistics statistics_{};
+    Statistics statistics_ { };
 };
 } // namespace audio_insight

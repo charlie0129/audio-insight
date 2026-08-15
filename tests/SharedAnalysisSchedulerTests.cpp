@@ -16,22 +16,18 @@
 #include <utility>
 #include <vector>
 
-namespace audio_insight::tests
-{
-namespace
-{
+namespace audio_insight::tests {
+namespace {
 
 using namespace std::chrono_literals;
 using Scheduler = SharedAnalysisScheduler;
 
 template <typename Predicate>
-bool waitFor(Predicate&& predicate,
-             const std::chrono::milliseconds timeout = 2000ms)
+bool waitFor(Predicate&& predicate, const std::chrono::milliseconds timeout = 2000ms)
 {
     const auto deadline = std::chrono::steady_clock::now() + timeout;
 
-    while (! predicate())
-    {
+    while (!predicate()) {
         if (std::chrono::steady_clock::now() >= deadline)
             return false;
 
@@ -41,14 +37,12 @@ bool waitFor(Predicate&& predicate,
     return true;
 }
 
-class BlockingFirstJob final : public Scheduler::JobClient
-{
+class BlockingFirstJob final : public Scheduler::JobClient {
 public:
-    explicit BlockingFirstJob(std::string labelToUse = {},
-                              std::shared_ptr<std::vector<std::string>> orderToUse = {},
-                              std::shared_ptr<std::mutex> orderMutexToUse = {})
-        : label(std::move(labelToUse)),
-          order(std::move(orderToUse)),
+    explicit BlockingFirstJob(std::string labelToUse = { },
+        std::shared_ptr<std::vector<std::string>> orderToUse = { },
+        std::shared_ptr<std::mutex> orderMutexToUse = { })
+        : label(std::move(labelToUse)), order(std::move(orderToUse)),
           orderMutex(std::move(orderMutexToUse))
     {
     }
@@ -64,16 +58,14 @@ public:
                 firstStarted = true;
         }
 
-        if (order && orderMutex)
-        {
+        if (order && orderMutex) {
             std::lock_guard lock(*orderMutex);
             order->push_back(label);
         }
 
         condition.notify_all();
 
-        if (invocation == 1)
-        {
+        if (invocation == 1) {
             std::unique_lock lock(mutex);
             condition.wait(lock, [this] { return releaseFirst; });
         }
@@ -113,14 +105,11 @@ private:
     bool releaseFirst { false };
 };
 
-class RecordingJob final : public Scheduler::JobClient
-{
+class RecordingJob final : public Scheduler::JobClient {
 public:
-    RecordingJob(std::string labelToUse,
-                 std::shared_ptr<std::vector<std::string>> orderToUse,
-                 std::shared_ptr<std::mutex> orderMutexToUse)
-        : label(std::move(labelToUse)),
-          order(std::move(orderToUse)),
+    RecordingJob(std::string labelToUse, std::shared_ptr<std::vector<std::string>> orderToUse,
+        std::shared_ptr<std::mutex> orderMutexToUse)
+        : label(std::move(labelToUse)), order(std::move(orderToUse)),
           orderMutex(std::move(orderMutexToUse))
     {
     }
@@ -146,8 +135,7 @@ private:
     std::atomic<std::uint64_t> calls { 0 };
 };
 
-class CooperativeGenerationJob final : public Scheduler::JobClient
-{
+class CooperativeGenerationJob final : public Scheduler::JobClient {
 public:
     void execute(const Scheduler::JobContext& context) override
     {
@@ -162,8 +150,7 @@ public:
         if (invocation != 1)
             return;
 
-        while (! context.stopRequested())
-        {
+        while (!context.stopRequested()) {
             std::unique_lock lock(mutex);
             condition.wait_for(lock, 1ms);
         }
@@ -174,9 +161,8 @@ public:
 
     [[nodiscard]] bool waitForCalls(const std::uint64_t expected)
     {
-        return waitFor([this, expected] {
-            return calls.load(std::memory_order_relaxed) >= expected;
-        });
+        return waitFor(
+            [this, expected] { return calls.load(std::memory_order_relaxed) >= expected; });
     }
 
     [[nodiscard]] std::vector<Scheduler::Generation> recordedGenerations() const
@@ -198,8 +184,7 @@ private:
     std::vector<Scheduler::Generation> generations;
 };
 
-class CountingJob final : public Scheduler::JobClient
-{
+class CountingJob final : public Scheduler::JobClient {
 public:
     void execute(const Scheduler::JobContext&) override
     {
@@ -215,14 +200,13 @@ private:
     std::atomic<std::uint64_t> calls { 0 };
 };
 
-class ShutdownJob final : public Scheduler::JobClient
-{
+class ShutdownJob final : public Scheduler::JobClient {
 public:
     void execute(const Scheduler::JobContext& context) override
     {
         started.store(true, std::memory_order_release);
 
-        while (! context.stopRequested())
+        while (!context.stopRequested())
             std::this_thread::sleep_for(1ms);
 
         stopped.store(true, std::memory_order_release);
@@ -243,11 +227,9 @@ private:
     std::atomic<bool> stopped { false };
 };
 
-class SharedAnalysisSchedulerTests final : public juce::UnitTest
-{
+class SharedAnalysisSchedulerTests final : public juce::UnitTest {
 public:
-    SharedAnalysisSchedulerTests()
-        : juce::UnitTest("Shared analysis scheduler", "audio-insight")
+    SharedAnalysisSchedulerTests() : juce::UnitTest("Shared analysis scheduler", "audio-insight")
     {
     }
 
@@ -293,7 +275,7 @@ private:
 
         job->release();
         expect(waitFor([&job] { return job->callCount() == 2; }),
-               "The coalesced follow-up did not execute");
+            "The coalesced follow-up did not execute");
         expect(client->waitUntilIdle());
 
         const auto counters = client->counters();
@@ -314,10 +296,8 @@ private:
         auto scheduler = Scheduler::acquire(1);
         auto order = std::make_shared<std::vector<std::string>>();
         auto orderMutex = std::make_shared<std::mutex>();
-        auto hotJob =
-            std::make_shared<BlockingFirstJob>("hot", order, orderMutex);
-        auto peerJob =
-            std::make_shared<RecordingJob>("peer", order, orderMutex);
+        auto hotJob = std::make_shared<BlockingFirstJob>("hot", order, orderMutex);
+        auto peerJob = std::make_shared<RecordingJob>("peer", order, orderMutex);
         auto hotClient = scheduler->createClient(hotJob);
         auto peerClient = scheduler->createClient(peerJob);
 
@@ -329,7 +309,8 @@ private:
 
         expect(waitFor([&hotJob, &peerJob] {
             return hotJob->callCount() == 2 && peerJob->callCount() == 1;
-        }), "Both clients did not receive worker time");
+        }),
+            "Both clients did not receive worker time");
         expect(hotClient->waitUntilIdle());
         expect(peerClient->waitUntilIdle());
 
@@ -341,7 +322,7 @@ private:
 
         const std::vector<std::string> expectedOrder { "hot", "peer", "hot" };
         expect(observedOrder == expectedOrder,
-               "A follow-up must join the FIFO tail instead of starving peers");
+            "A follow-up must join the FIFO tail instead of starving peers");
 
         expect(hotClient->cancelAndWait());
         expect(peerClient->cancelAndWait());
@@ -365,7 +346,7 @@ private:
         expect(generationClient->cancelAndAdvanceGeneration() == 2);
         expect(generationClient->waitUntilIdle());
         expect(generationJob->observedStop(),
-               "The running job did not observe generation cancellation");
+            "The running job did not observe generation cancellation");
 
         expect(generationClient->request());
         expect(generationJob->waitForCalls(2), "The new-generation job did not execute");
@@ -391,8 +372,8 @@ private:
             });
 
         std::this_thread::sleep_for(20ms);
-        expect(! destructionFinished.load(std::memory_order_acquire),
-               "Client destruction returned while its job still used client state");
+        expect(!destructionFinished.load(std::memory_order_acquire),
+            "Client destruction returned while its job still used client state");
 
         blockingJob->release();
         destroyer.join();
@@ -448,18 +429,17 @@ private:
 
         expect(runningClient->request());
         expect(waitFor([&runningJob] { return runningJob->hasStarted(); }),
-               "The shutdown test job did not start");
+            "The shutdown test job did not start");
         expect(queuedClient->request());
 
         scheduler.reset();
 
         expect(runningJob->hasStopped(),
-               "Service destruction returned before the running job stopped");
-        expect(queuedJob->callCount() == 0,
-               "Queued work ran during final-owner shutdown");
+            "Service destruction returned before the running job stopped");
+        expect(queuedJob->callCount() == 0, "Queued work ran during final-owner shutdown");
         expect(queuedClient->counters().cancelled == 1);
-        expect(! runningClient->request());
-        expect(! queuedClient->request());
+        expect(!runningClient->request());
+        expect(!queuedClient->request());
 
         runningClient.reset();
         queuedClient.reset();

@@ -8,8 +8,7 @@
 #include <memory>
 #include <utility>
 
-namespace audio_insight
-{
+namespace audio_insight {
 
 /**
  * A process-local, non-real-time worker pool shared by plugin instances.
@@ -23,17 +22,14 @@ namespace audio_insight
  * real-time thread. request(), cancellation, registration, and destruction may
  * all take locks, notify condition variables, or wait for worker threads.
  */
-class SharedAnalysisScheduler final
-    : public std::enable_shared_from_this<SharedAnalysisScheduler>
-{
+class SharedAnalysisScheduler final : public std::enable_shared_from_this<SharedAnalysisScheduler> {
 private:
     struct Impl;
 
 public:
     using Generation = std::uint64_t;
 
-    class JobContext final
-    {
+    class JobContext final {
     public:
         [[nodiscard]] Generation generation() const noexcept
         {
@@ -43,18 +39,15 @@ public:
         [[nodiscard]] bool stopRequested() const noexcept
         {
             return schedulerStop_->load(std::memory_order_acquire)
-                   || generationStop_->load(std::memory_order_acquire);
+                || generationStop_->load(std::memory_order_acquire);
         }
 
     private:
         friend struct SharedAnalysisScheduler::Impl;
 
-        JobContext(
-            Generation generation,
-            std::shared_ptr<const std::atomic<bool>> schedulerStop,
+        JobContext(Generation generation, std::shared_ptr<const std::atomic<bool>> schedulerStop,
             std::shared_ptr<const std::atomic<bool>> generationStop) noexcept
-            : generation_(generation),
-              schedulerStop_(std::move(schedulerStop)),
+            : generation_(generation), schedulerStop_(std::move(schedulerStop)),
               generationStop_(std::move(generationStop))
         {
         }
@@ -73,15 +66,13 @@ public:
      * must not capture raw processor/editor pointers, and should check
      * context.stopRequested() at sensible interruption points.
      */
-    class JobClient
-    {
+    class JobClient {
     public:
         virtual ~JobClient() = default;
         virtual void execute(const JobContext& context) = 0;
     };
 
-    struct Counters final
-    {
+    struct Counters final {
         // Accepted request() calls, including requests later coalesced.
         std::uint64_t submitted { 0 };
 
@@ -94,8 +85,7 @@ public:
         std::uint64_t cancelled { 0 };
     };
 
-    class Client final
-    {
+    class Client final {
     public:
         ~Client();
 
@@ -152,7 +142,7 @@ public:
         struct State;
 
         Client(std::weak_ptr<SharedAnalysisScheduler> scheduler,
-               std::shared_ptr<State> state) noexcept;
+            std::shared_ptr<State> state) noexcept;
 
         std::weak_ptr<SharedAnalysisScheduler> scheduler_;
         std::shared_ptr<State> state_;
@@ -178,8 +168,7 @@ public:
      * Registers a weak job target. The returned client does not own the module
      * service; the plugin instance must retain the Ptr returned by acquire().
      */
-    [[nodiscard]] std::shared_ptr<Client>
-    createClient(std::weak_ptr<JobClient> target);
+    [[nodiscard]] std::shared_ptr<Client> createClient(std::weak_ptr<JobClient> target);
 
     [[nodiscard]] std::size_t workerCount() const noexcept;
 
@@ -187,8 +176,8 @@ private:
     explicit SharedAnalysisScheduler(std::size_t workerCount);
 
     [[nodiscard]] bool request(const std::shared_ptr<Client::State>& state);
-    [[nodiscard]] Generation
-    cancelAndAdvanceGeneration(const std::shared_ptr<Client::State>& state);
+    [[nodiscard]] Generation cancelAndAdvanceGeneration(
+        const std::shared_ptr<Client::State>& state);
     [[nodiscard]] bool waitUntilIdle(const std::shared_ptr<Client::State>& state);
     [[nodiscard]] bool cancelAndWait(const std::shared_ptr<Client::State>& state);
 

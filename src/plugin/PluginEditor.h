@@ -2,16 +2,15 @@
 
 #pragma once
 
-#include "PluginProcessor.h"
 #include "../core/VisualizationDataSource.h"
 #include "../ui/MetalVisualization.h"
+#include "PluginProcessor.h"
 
 #include <juce_gui_basics/juce_gui_basics.h>
 
 #include <memory>
 
-namespace audio_insight
-{
+namespace audio_insight {
 /**
     Resizable first-release editor containing spectrum controls, the native
     Metal visualization, and an in-editor About/Legal view.
@@ -20,8 +19,7 @@ namespace audio_insight
 */
 class PluginEditor final : public juce::AudioProcessorEditor,
                            private juce::ComponentMovementWatcher,
-                           private juce::Slider::Listener
-{
+                           private juce::Slider::Listener {
 public:
     PluginEditor(PluginProcessor& processor, VisualizationDataSource& dataSource);
     ~PluginEditor() override;
@@ -38,10 +36,8 @@ private:
     void componentPeerChanged() override;
     void componentVisibilityChanged() override;
 
-    void configureParameterControl(juce::Label& label,
-                                   juce::Slider& slider,
-                                   const juce::String& labelText,
-                                   const juce::String& accessibilityDescription);
+    void configureParameterControl(juce::Label& label, juce::Slider& slider,
+        const juce::String& labelText, const juce::String& accessibilityDescription);
     void updateSpectrumSettings() noexcept;
     void updateRenderingState();
     void setMainControlsVisible(bool shouldBeVisible);

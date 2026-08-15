@@ -4,10 +4,8 @@
 
 #include "VisualizationFrame.h"
 
-namespace audio_insight
-{
-class VisualizationDataSource
-{
+namespace audio_insight {
+class VisualizationDataSource {
 public:
     virtual ~VisualizationDataSource() = default;
 
@@ -19,6 +17,7 @@ public:
     virtual void setVisualizationActive(bool shouldBeActive) noexcept = 0;
 
     // Copies the most recent complete immutable frame without waiting.
-    [[nodiscard]] virtual bool copyLatestVisualizationFrame(VisualizationFrame& destination) const noexcept = 0;
+    [[nodiscard]] virtual bool copyLatestVisualizationFrame(
+        VisualizationFrame& destination) const noexcept = 0;
 };
 } // namespace audio_insight

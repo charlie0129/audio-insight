@@ -15,13 +15,10 @@
 #include <pthread.h>
 #endif
 
-namespace audio_insight
-{
+namespace audio_insight {
 
-struct SharedAnalysisScheduler::Client::State final
-{
-    explicit State(std::weak_ptr<JobClient> targetToUse) noexcept
-        : target(std::move(targetToUse))
+struct SharedAnalysisScheduler::Client::State final {
+    explicit State(std::weak_ptr<JobClient> targetToUse) noexcept : target(std::move(targetToUse))
     {
     }
 
@@ -43,21 +40,17 @@ struct SharedAnalysisScheduler::Client::State final
     std::atomic<std::uint64_t> cancelled { 0 };
 };
 
-struct SharedAnalysisScheduler::Impl final
-{
+struct SharedAnalysisScheduler::Impl final {
     explicit Impl(const std::size_t requestedWorkerCount)
         : configuredWorkerCount(requestedWorkerCount),
           schedulerStopFlag(std::make_shared<std::atomic<bool>>(false))
     {
         workers.reserve(configuredWorkerCount);
 
-        try
-        {
+        try {
             for (std::size_t index = 0; index < configuredWorkerCount; ++index)
                 workers.emplace_back([this] { workerLoop(); });
-        }
-        catch (...)
-        {
+        } catch (...) {
             {
                 std::lock_guard lock(mutex);
                 stopping = true;
@@ -83,20 +76,18 @@ struct SharedAnalysisScheduler::Impl final
     {
         std::erase_if(readyQueue, [&state](const auto& queuedState) {
             const auto candidate = queuedState.lock();
-            return ! candidate || candidate == state;
+            return !candidate || candidate == state;
         });
     }
 
     static void cancelQueued(Client::State& state) noexcept
     {
-        if (state.queued)
-        {
+        if (state.queued) {
             state.queued = false;
             state.cancelled.fetch_add(1, std::memory_order_relaxed);
         }
 
-        if (state.followUpRequested)
-        {
+        if (state.followUpRequested) {
             state.followUpRequested = false;
             state.cancelled.fetch_add(1, std::memory_order_relaxed);
         }
@@ -104,7 +95,7 @@ struct SharedAnalysisScheduler::Impl final
 
     [[nodiscard]] static bool isIdle(const Client::State& state) noexcept
     {
-        return ! state.queued && ! state.running && ! state.followUpRequested;
+        return !state.queued && !state.running && !state.followUpRequested;
     }
 
     void workerLoop()
@@ -115,8 +106,7 @@ struct SharedAnalysisScheduler::Impl final
         static_cast<void>(pthread_set_qos_class_self_np(QOS_CLASS_UTILITY, 0));
 #endif
 
-        for (;;)
-        {
+        for (;;) {
             std::shared_ptr<Client::State> state;
             std::shared_ptr<JobClient> target;
             Generation jobGeneration = 0;
@@ -124,40 +114,34 @@ struct SharedAnalysisScheduler::Impl final
 
             {
                 std::unique_lock lock(mutex);
-                readyCondition.wait(lock, [this] {
-                    return stopping || ! readyQueue.empty();
-                });
+                readyCondition.wait(lock, [this] { return stopping || !readyQueue.empty(); });
 
                 if (stopping)
                     return;
 
-                while (! readyQueue.empty() && ! state)
-                {
+                while (!readyQueue.empty() && !state) {
                     state = readyQueue.front().lock();
                     readyQueue.pop_front();
 
-                    if (! state || ! state->queued)
+                    if (!state || !state->queued)
                         state.reset();
                 }
 
-                if (! state)
+                if (!state)
                     continue;
 
                 state->queued = false;
                 jobGeneration = state->queuedGeneration;
 
-                if (! state->accepting
-                    || jobGeneration
-                           != state->currentGeneration.load(std::memory_order_acquire))
-                {
+                if (!state->accepting
+                    || jobGeneration != state->currentGeneration.load(std::memory_order_acquire)) {
                     state->cancelled.fetch_add(1, std::memory_order_relaxed);
                     idleCondition.notify_all();
                     continue;
                 }
 
                 target = state->target.lock();
-                if (! target)
-                {
+                if (!target) {
                     state->accepting = false;
                     state->cancelled.fetch_add(1, std::memory_order_relaxed);
                     idleCondition.notify_all();
@@ -166,21 +150,16 @@ struct SharedAnalysisScheduler::Impl final
 
                 state->running = true;
                 state->runningThread = std::this_thread::get_id();
-                state->runningStopFlag =
-                    std::make_shared<std::atomic<bool>>(false);
+                state->runningStopFlag = std::make_shared<std::atomic<bool>>(false);
                 generationStopFlag = state->runningStopFlag;
                 state->executed.fetch_add(1, std::memory_order_relaxed);
             }
 
-            const JobContext context(
-                jobGeneration, schedulerStopFlag, generationStopFlag);
+            const JobContext context(jobGeneration, schedulerStopFlag, generationStopFlag);
 
-            try
-            {
+            try {
                 target->execute(context);
-            }
-            catch (...)
-            {
+            } catch (...) {
                 // A plugin analysis failure must not silently retire a shared
                 // worker and starve every other plugin instance.
             }
@@ -188,29 +167,23 @@ struct SharedAnalysisScheduler::Impl final
             {
                 std::lock_guard lock(mutex);
                 state->running = false;
-                state->runningThread = {};
+                state->runningThread = { };
                 state->runningStopFlag.reset();
 
-                if (! stopping && state->accepting && state->followUpRequested)
-                {
+                if (!stopping && state->accepting && state->followUpRequested) {
                     const auto followUpGeneration = state->followUpGeneration;
                     state->followUpRequested = false;
 
                     if (followUpGeneration
-                        == state->currentGeneration.load(std::memory_order_acquire))
-                    {
+                        == state->currentGeneration.load(std::memory_order_acquire)) {
                         state->queued = true;
                         state->queuedGeneration = followUpGeneration;
                         readyQueue.emplace_back(state);
                         readyCondition.notify_one();
-                    }
-                    else
-                    {
+                    } else {
                         state->cancelled.fetch_add(1, std::memory_order_relaxed);
                     }
-                }
-                else if (state->followUpRequested)
-                {
+                } else if (state->followUpRequested) {
                     state->followUpRequested = false;
                     state->cancelled.fetch_add(1, std::memory_order_relaxed);
                 }
@@ -234,10 +207,8 @@ struct SharedAnalysisScheduler::Impl final
             stopping = true;
             schedulerStopFlag->store(true, std::memory_order_release);
 
-            for (auto& weakState : clients)
-            {
-                if (const auto state = weakState.lock())
-                {
+            for (auto& weakState : clients) {
+                if (const auto state = weakState.lock()) {
                     state->accepting = false;
                     cancelQueued(*state);
 
@@ -252,8 +223,7 @@ struct SharedAnalysisScheduler::Impl final
         readyCondition.notify_all();
         idleCondition.notify_all();
 
-        for (auto& worker : workers)
-        {
+        for (auto& worker : workers) {
             if (worker.joinable())
                 worker.join();
         }
@@ -272,11 +242,9 @@ struct SharedAnalysisScheduler::Impl final
     bool stopping { false };
 };
 
-namespace
-{
+namespace {
 
-struct ServiceRegistry final
-{
+struct ServiceRegistry final {
     std::mutex mutex;
     std::weak_ptr<SharedAnalysisScheduler> service;
 };
@@ -290,8 +258,7 @@ ServiceRegistry& serviceRegistry()
 } // namespace
 
 SharedAnalysisScheduler::Client::Client(
-    std::weak_ptr<SharedAnalysisScheduler> scheduler,
-    std::shared_ptr<State> state) noexcept
+    std::weak_ptr<SharedAnalysisScheduler> scheduler, std::shared_ptr<State> state) noexcept
     : scheduler_(std::move(scheduler)), state_(std::move(state))
 {
 }
@@ -309,8 +276,7 @@ bool SharedAnalysisScheduler::Client::request()
     return false;
 }
 
-SharedAnalysisScheduler::Generation
-SharedAnalysisScheduler::Client::cancelAndAdvanceGeneration()
+SharedAnalysisScheduler::Generation SharedAnalysisScheduler::Client::cancelAndAdvanceGeneration()
 {
     if (const auto scheduler = scheduler_.lock())
         return scheduler->cancelAndAdvanceGeneration(state_);
@@ -334,14 +300,12 @@ bool SharedAnalysisScheduler::Client::cancelAndWait()
     return true;
 }
 
-SharedAnalysisScheduler::Generation
-SharedAnalysisScheduler::Client::generation() const noexcept
+SharedAnalysisScheduler::Generation SharedAnalysisScheduler::Client::generation() const noexcept
 {
     return state_->currentGeneration.load(std::memory_order_acquire);
 }
 
-SharedAnalysisScheduler::Counters
-SharedAnalysisScheduler::Client::counters() const noexcept
+SharedAnalysisScheduler::Counters SharedAnalysisScheduler::Client::counters() const noexcept
 {
     return {
         state_->submitted.load(std::memory_order_relaxed),
@@ -350,8 +314,7 @@ SharedAnalysisScheduler::Client::counters() const noexcept
     };
 }
 
-SharedAnalysisScheduler::Ptr
-SharedAnalysisScheduler::acquire(const std::size_t workerCount)
+SharedAnalysisScheduler::Ptr SharedAnalysisScheduler::acquire(const std::size_t workerCount)
 {
     if (workerCount == 0)
         throw std::invalid_argument("SharedAnalysisScheduler needs at least one worker");
@@ -374,8 +337,8 @@ SharedAnalysisScheduler::SharedAnalysisScheduler(const std::size_t workerCount)
 
 SharedAnalysisScheduler::~SharedAnalysisScheduler() = default;
 
-std::shared_ptr<SharedAnalysisScheduler::Client>
-SharedAnalysisScheduler::createClient(std::weak_ptr<JobClient> target)
+std::shared_ptr<SharedAnalysisScheduler::Client> SharedAnalysisScheduler::createClient(
+    std::weak_ptr<JobClient> target)
 {
     if (target.expired())
         throw std::invalid_argument("analysis job target must still be alive");
@@ -387,14 +350,11 @@ SharedAnalysisScheduler::createClient(std::weak_ptr<JobClient> target)
         if (impl_->stopping)
             throw std::runtime_error("analysis scheduler is stopping");
 
-        std::erase_if(impl_->clients, [](const auto& client) {
-            return client.expired();
-        });
+        std::erase_if(impl_->clients, [](const auto& client) { return client.expired(); });
         impl_->clients.emplace_back(state);
     }
 
-    return std::shared_ptr<Client>(
-        new Client(weak_from_this(), std::move(state)));
+    return std::shared_ptr<Client>(new Client(weak_from_this(), std::move(state)));
 }
 
 std::size_t SharedAnalysisScheduler::workerCount() const noexcept
@@ -406,19 +366,16 @@ bool SharedAnalysisScheduler::request(const std::shared_ptr<Client::State>& stat
 {
     std::lock_guard lock(impl_->mutex);
 
-    if (impl_->stopping || ! state->accepting || state->target.expired())
-    {
+    if (impl_->stopping || !state->accepting || state->target.expired()) {
         if (state->target.expired())
             state->accepting = false;
         return false;
     }
 
-    const auto requestGeneration =
-        state->currentGeneration.load(std::memory_order_acquire);
+    const auto requestGeneration = state->currentGeneration.load(std::memory_order_acquire);
     state->submitted.fetch_add(1, std::memory_order_relaxed);
 
-    if (state->running)
-    {
+    if (state->running) {
         if (state->followUpRequested)
             state->cancelled.fetch_add(1, std::memory_order_relaxed);
 
@@ -427,8 +384,7 @@ bool SharedAnalysisScheduler::request(const std::shared_ptr<Client::State>& stat
         return true;
     }
 
-    if (state->queued)
-    {
+    if (state->queued) {
         state->cancelled.fetch_add(1, std::memory_order_relaxed);
         state->queuedGeneration = requestGeneration;
         return true;
@@ -441,14 +397,12 @@ bool SharedAnalysisScheduler::request(const std::shared_ptr<Client::State>& stat
     return true;
 }
 
-SharedAnalysisScheduler::Generation
-SharedAnalysisScheduler::cancelAndAdvanceGeneration(
+SharedAnalysisScheduler::Generation SharedAnalysisScheduler::cancelAndAdvanceGeneration(
     const std::shared_ptr<Client::State>& state)
 {
     std::lock_guard lock(impl_->mutex);
 
-    const auto newGeneration =
-        state->currentGeneration.load(std::memory_order_relaxed) + 1;
+    const auto newGeneration = state->currentGeneration.load(std::memory_order_relaxed) + 1;
     state->currentGeneration.store(newGeneration, std::memory_order_release);
 
     Impl::cancelQueued(*state);
@@ -461,22 +415,18 @@ SharedAnalysisScheduler::cancelAndAdvanceGeneration(
     return newGeneration;
 }
 
-bool SharedAnalysisScheduler::waitUntilIdle(
-    const std::shared_ptr<Client::State>& state)
+bool SharedAnalysisScheduler::waitUntilIdle(const std::shared_ptr<Client::State>& state)
 {
     std::unique_lock lock(impl_->mutex);
 
     if (state->running && state->runningThread == std::this_thread::get_id())
         return false;
 
-    impl_->idleCondition.wait(lock, [&state] {
-        return Impl::isIdle(*state);
-    });
+    impl_->idleCondition.wait(lock, [&state] { return Impl::isIdle(*state); });
     return true;
 }
 
-bool SharedAnalysisScheduler::cancelAndWait(
-    const std::shared_ptr<Client::State>& state)
+bool SharedAnalysisScheduler::cancelAndWait(const std::shared_ptr<Client::State>& state)
 {
     std::unique_lock lock(impl_->mutex);
     state->accepting = false;
@@ -492,9 +442,7 @@ bool SharedAnalysisScheduler::cancelAndWait(
     if (state->running && state->runningThread == std::this_thread::get_id())
         return false;
 
-    impl_->idleCondition.wait(lock, [&state] {
-        return Impl::isIdle(*state);
-    });
+    impl_->idleCondition.wait(lock, [&state] { return Impl::isIdle(*state); });
     return true;
 }
 

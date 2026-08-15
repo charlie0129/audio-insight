@@ -5,10 +5,8 @@
 
 #include <iostream>
 
-namespace
-{
-class ConsoleUnitTestRunner final : public juce::UnitTestRunner
-{
+namespace {
+class ConsoleUnitTestRunner final : public juce::UnitTestRunner {
 protected:
     void logMessage(const juce::String& message) override
     {
@@ -27,8 +25,7 @@ int main()
 
     auto failures = 0;
 
-    for (auto index = 0; index < runner.getNumResults(); ++index)
-    {
+    for (auto index = 0; index < runner.getNumResults(); ++index) {
         if (const auto* result = runner.getResult(index))
             failures += result->failures;
     }

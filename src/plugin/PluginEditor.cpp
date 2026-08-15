@@ -6,10 +6,8 @@
 #include <functional>
 #include <utility>
 
-namespace audio_insight
-{
-namespace
-{
+namespace audio_insight {
+namespace {
 constexpr auto spectrumFloorParameter = "spectrumFloor";
 constexpr auto spectrumCeilingParameter = "spectrumCeiling";
 constexpr auto spectrumSmoothingParameter = "spectrumSmoothing";
@@ -27,9 +25,7 @@ const auto primaryText = juce::Colour { 0xffedf4fc };
 const auto secondaryText = juce::Colour { 0xffa9b8ca };
 const auto accent = juce::Colour { 0xff55c7e8 };
 
-void layoutParameterControl(juce::Rectangle<int> area,
-                            juce::Label& label,
-                            juce::Slider& slider)
+void layoutParameterControl(juce::Rectangle<int> area, juce::Label& label, juce::Slider& slider)
 {
     constexpr int labelWidth = 52;
 
@@ -38,8 +34,7 @@ void layoutParameterControl(juce::Rectangle<int> area,
 }
 } // namespace
 
-class PluginEditor::AboutOverlay final : public juce::Component
-{
+class PluginEditor::AboutOverlay final : public juce::Component {
 public:
     explicit AboutOverlay(std::function<void()> closeActionToUse)
         : closeAction(std::move(closeActionToUse)),
@@ -57,18 +52,17 @@ public:
         titleLabel.setInterceptsMouseClicks(false, false);
         addAndMakeVisible(titleLabel);
 
-        legalLabel.setText(
-            "License: GNU Affero General Public License v3.0 or later "
-            "(AGPL-3.0-or-later). You may redistribute and modify the project-owned "
-            "code under those terms.\n\n"
-            "Audio Insight is distributed in the hope that it will be useful, but "
-            "WITHOUT ANY WARRANTY; without even the implied warranty of "
-            "MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.\n\n"
-            "The canonical license text, corresponding source, and third-party "
-            "notices are available in the project repository. Built with JUCE 9.0.1 "
-            "under JUCE's upstream AGPLv3 terms; JUCE and bundled third-party "
-            "components retain their own notices and licenses.\n\n"
-            "Copyright holder: to be confirmed.",
+        legalLabel.setText("License: GNU Affero General Public License v3.0 or later "
+                           "(AGPL-3.0-or-later). You may redistribute and modify the project-owned "
+                           "code under those terms.\n\n"
+                           "Audio Insight is distributed in the hope that it will be useful, but "
+                           "WITHOUT ANY WARRANTY; without even the implied warranty of "
+                           "MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.\n\n"
+                           "The canonical license text, corresponding source, and third-party "
+                           "notices are available in the project repository. Built with JUCE 9.0.1 "
+                           "under JUCE's upstream AGPLv3 terms; JUCE and bundled third-party "
+                           "components retain their own notices and licenses.\n\n"
+                           "Copyright holder: to be confirmed.",
             juce::dontSendNotification);
         legalLabel.setFont(juce::Font { juce::FontOptions { 14.0F } });
         legalLabel.setColour(juce::Label::textColourId, secondaryText);
@@ -86,18 +80,16 @@ public:
         sponsorMessage.setInterceptsMouseClicks(false, false);
         addAndMakeVisible(sponsorMessage);
 
-        sourceLink.setFont(juce::Font { juce::FontOptions { 13.0F } },
-                           false,
-                           juce::Justification::centredLeft);
+        sourceLink.setFont(
+            juce::Font { juce::FontOptions { 13.0F } }, false, juce::Justification::centredLeft);
         sourceLink.setColour(juce::HyperlinkButton::textColourId, accent);
         sourceLink.setTooltip("Open the Audio Insight source repository in your browser");
         sourceLink.setWantsKeyboardFocus(true);
         sourceLink.setExplicitFocusOrder(2);
         addAndMakeVisible(sourceLink);
 
-        sponsorLink.setFont(juce::Font { juce::FontOptions { 13.0F } },
-                            false,
-                            juce::Justification::centredRight);
+        sponsorLink.setFont(
+            juce::Font { juce::FontOptions { 13.0F } }, false, juce::Justification::centredRight);
         sponsorLink.setColour(juce::HyperlinkButton::textColourId, accent);
         sponsorLink.setTooltip("Open the Audio Insight sponsorship page in your browser");
         sponsorLink.setWantsKeyboardFocus(true);
@@ -107,8 +99,7 @@ public:
         closeButton.setTooltip("Return to the visualization");
         closeButton.setWantsKeyboardFocus(true);
         closeButton.setExplicitFocusOrder(1);
-        closeButton.onClick = [this]
-        {
+        closeButton.onClick = [this] {
             if (closeAction)
                 closeAction();
         };
@@ -122,7 +113,7 @@ public:
 
     void clearCloseAction()
     {
-        closeAction = {};
+        closeAction = { };
     }
 
     void focusInitialControl()
@@ -133,7 +124,7 @@ public:
 
     bool keyPressed(const juce::KeyPress& key) override
     {
-        if (! key.isKeyCode(juce::KeyPress::escapeKey))
+        if (!key.isKeyCode(juce::KeyPress::escapeKey))
             return false;
 
         if (closeAction)
@@ -195,14 +186,13 @@ private:
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR(AboutOverlay)
 };
 
-PluginEditor::PluginEditor(PluginProcessor& processorToUse,
-                           VisualizationDataSource& dataSource)
-    : AudioProcessorEditor(processorToUse),
-      ComponentMovementWatcher(this),
+PluginEditor::PluginEditor(PluginProcessor& processorToUse, VisualizationDataSource& dataSource)
+    : AudioProcessorEditor(processorToUse), ComponentMovementWatcher(this),
       visualization(dataSource),
       floorAttachment(processorToUse.getParameters(), spectrumFloorParameter, floorSlider),
       ceilingAttachment(processorToUse.getParameters(), spectrumCeilingParameter, ceilingSlider),
-      smoothingAttachment(processorToUse.getParameters(), spectrumSmoothingParameter, smoothingSlider),
+      smoothingAttachment(
+          processorToUse.getParameters(), spectrumSmoothingParameter, smoothingSlider),
       aboutOverlay(std::make_unique<AboutOverlay>([this] { setAboutVisible(false); }))
 {
     setName("Audio Insight editor");
@@ -212,18 +202,12 @@ PluginEditor::PluginEditor(PluginProcessor& processorToUse,
 
     addAndMakeVisible(visualization);
 
-    configureParameterControl(floorLabel,
-                              floorSlider,
-                              "Floor",
-                              "Lower decibel limit of the spectrum display");
-    configureParameterControl(ceilingLabel,
-                              ceilingSlider,
-                              "Ceiling",
-                              "Upper decibel limit of the spectrum display");
-    configureParameterControl(smoothingLabel,
-                              smoothingSlider,
-                              "Smooth",
-                              "Temporal smoothing of the spectrum display");
+    configureParameterControl(
+        floorLabel, floorSlider, "Floor", "Lower decibel limit of the spectrum display");
+    configureParameterControl(
+        ceilingLabel, ceilingSlider, "Ceiling", "Upper decibel limit of the spectrum display");
+    configureParameterControl(
+        smoothingLabel, smoothingSlider, "Smooth", "Temporal smoothing of the spectrum display");
 
     aboutButton.setTooltip("Show license, source, third-party, and sponsorship information");
     aboutButton.onClick = [this] { setAboutVisible(true); };
@@ -262,18 +246,11 @@ void PluginEditor::paint(juce::Graphics& graphics)
 
     graphics.setColour(primaryText);
     graphics.setFont(juce::Font { juce::FontOptions { 15.0F, juce::Font::bold } });
-    graphics.drawText("AUDIO INSIGHT",
-                      14,
-                      0,
-                      112,
-                      controlStripHeight,
-                      juce::Justification::centredLeft,
-                      false);
+    graphics.drawText(
+        "AUDIO INSIGHT", 14, 0, 112, controlStripHeight, juce::Justification::centredLeft, false);
 
     graphics.setColour(panelOutline);
-    graphics.drawHorizontalLine(controlStripHeight - 1,
-                                0.0F,
-                                static_cast<float>(getWidth()));
+    graphics.drawHorizontalLine(controlStripHeight - 1, 0.0F, static_cast<float>(getWidth()));
 }
 
 void PluginEditor::resized()
@@ -324,10 +301,8 @@ void PluginEditor::componentVisibilityChanged()
     updateRenderingState();
 }
 
-void PluginEditor::configureParameterControl(juce::Label& label,
-                                             juce::Slider& slider,
-                                             const juce::String& labelText,
-                                             const juce::String& accessibilityDescription)
+void PluginEditor::configureParameterControl(juce::Label& label, juce::Slider& slider,
+    const juce::String& labelText, const juce::String& accessibilityDescription)
 {
     label.setText(labelText, juce::dontSendNotification);
     label.setFont(juce::Font { juce::FontOptions { 12.0F } });
@@ -353,10 +328,8 @@ void PluginEditor::configureParameterControl(juce::Label& label,
 void PluginEditor::updateSpectrumSettings() noexcept
 {
     visualization.setSpectrumSettings(SpectrumRenderSettings {
-        static_cast<float>(floorSlider.getValue()),
-        static_cast<float>(ceilingSlider.getValue()),
-        static_cast<float>(smoothingSlider.getValue())
-    });
+        static_cast<float>(floorSlider.getValue()), static_cast<float>(ceilingSlider.getValue()),
+        static_cast<float>(smoothingSlider.getValue()) });
 }
 
 void PluginEditor::updateRenderingState()
@@ -365,10 +338,8 @@ void PluginEditor::updateRenderingState()
     editorIsAttached = getPeer() != nullptr;
 
     const auto aboutIsVisible = aboutOverlay != nullptr && aboutOverlay->isVisible();
-    visualization.setRenderingActive(! shuttingDown
-                                     && editorIsShowing
-                                     && editorIsAttached
-                                     && ! aboutIsVisible);
+    visualization.setRenderingActive(
+        !shuttingDown && editorIsShowing && editorIsAttached && !aboutIsVisible);
 }
 
 void PluginEditor::setMainControlsVisible(const bool shouldBeVisible)
@@ -387,16 +358,13 @@ void PluginEditor::setAboutVisible(bool shouldBeVisible)
     if (aboutOverlay->isVisible() == shouldBeVisible)
         return;
 
-    if (shouldBeVisible)
-    {
+    if (shouldBeVisible) {
         visualization.setVisible(false);
         setMainControlsVisible(false);
         aboutOverlay->setVisible(true);
         aboutOverlay->toFront(false);
         aboutOverlay->focusInitialControl();
-    }
-    else
-    {
+    } else {
         aboutOverlay->setVisible(false);
         visualization.setVisible(true);
         setMainControlsVisible(true);
