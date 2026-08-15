@@ -12,6 +12,8 @@
 #include <cstdint>
 #include <limits>
 #include <numbers>
+#include <random>
+#include <span>
 #include <thread>
 #include <vector>
 
@@ -23,6 +25,44 @@ constexpr double referenceToneFrequency = 1'000.0;
 double energyForLufs(const double loudness)
 {
     return std::pow(10.0, (loudness - LoudnessAnalyzer::loudnessOffsetLufs) / 10.0);
+}
+
+struct IndexedGateEvaluation final {
+    LoudnessAnalyzer::IntegratedGateResult result;
+    IntegratedLoudnessIndex::Statistics statistics;
+    bool insertedEveryValue = true;
+};
+
+IndexedGateEvaluation evaluateIndexedGate(const std::span<const double> energies)
+{
+    IntegratedLoudnessIndex index(std::max<std::size_t>(energies.size(), 1));
+    const auto absoluteThreshold = energyForLufs(LoudnessAnalyzer::absoluteGateLufs);
+    auto absoluteSum = 0.0;
+    auto absoluteCount = std::uint64_t { 0 };
+    auto insertedEveryValue = true;
+    for (const auto energy : energies) {
+        if (std::isfinite(energy) && energy > absoluteThreshold) {
+            insertedEveryValue = index.insert(energy) && insertedEveryValue;
+            absoluteSum += energy;
+            ++absoluteCount;
+        }
+    }
+
+    LoudnessAnalyzer::IntegratedGateResult result;
+    result.absoluteGatedBlockCount = absoluteCount;
+    if (absoluteCount != 0 && std::isfinite(absoluteSum) && absoluteSum > 0.0) {
+        const auto relativeThreshold = (absoluteSum / static_cast<double>(absoluteCount)) * 0.1;
+        result.relativeGateLufs
+            = LoudnessAnalyzer::loudnessOffsetLufs + (10.0 * std::log10(relativeThreshold));
+        const auto relative
+            = index.queryGreaterThan(std::max(absoluteThreshold, relativeThreshold));
+        result.relativeGatedBlockCount = relative.count;
+        if (relative.count != 0 && std::isfinite(relative.sum) && relative.sum > 0.0) {
+            result.integratedLufs = LoudnessAnalyzer::loudnessOffsetLufs
+                + (10.0 * std::log10(relative.sum / static_cast<double>(relative.count)));
+        }
+    }
+    return { result, index.statistics(), insertedEveryValue };
 }
 
 struct ReferenceBiquadState final {
@@ -164,6 +204,8 @@ public:
     {
         testPublishedCoefficientsAndAlignmentTone();
         testExactGateReducer();
+        testIndexedGateEquivalence();
+        testIndexedGateStructureAndCapacity();
         testStartupValidityAndCadence();
         testExactMonoSummation();
         testArbitraryRateAndPartitionInvariance();
@@ -176,6 +218,24 @@ public:
     }
 
 private:
+    void expectMatchingGateResults(const LoudnessAnalyzer::IntegratedGateResult& indexed,
+        const LoudnessAnalyzer::IntegratedGateResult& bruteForce,
+        const double loudnessTolerance = 1.0e-10)
+    {
+        expect(indexed.absoluteGatedBlockCount == bruteForce.absoluteGatedBlockCount);
+        expect(indexed.relativeGatedBlockCount == bruteForce.relativeGatedBlockCount);
+
+        const auto expectMatchingLoudness
+            = [this, loudnessTolerance](const double actual, const double expected) {
+                  if (std::isfinite(expected))
+                      expectWithinAbsoluteError(actual, expected, loudnessTolerance);
+                  else
+                      expect(std::isinf(actual) && std::signbit(actual) == std::signbit(expected));
+              };
+        expectMatchingLoudness(indexed.relativeGateLufs, bruteForce.relativeGateLufs);
+        expectMatchingLoudness(indexed.integratedLufs, bruteForce.integratedLufs);
+    }
+
     void testPublishedCoefficientsAndAlignmentTone()
     {
         beginTest("Published BS.1770-5 48 kHz K-weighting coefficients are reproduced");
@@ -220,6 +280,17 @@ private:
         expect(statistics.integrationBlockCompletions == 197);
         expect(statistics.absoluteGatedBlocks == 197);
         expect(statistics.relativeGatedBlocks == 197);
+        expect(statistics.integrationIndexReservedBytes < 8ULL * 1024ULL * 1024ULL);
+        expect(statistics.integrationIndexLeafNodes == 1);
+        expect(statistics.integrationIndexInternalNodes == 0);
+        expect(statistics.integrationIndexTreeHeight == 1);
+        expect(statistics.integrationIndexQueries == 197);
+        expect(statistics.integrationIndexLastNodeVisits == 1);
+        expect(statistics.integrationIndexMaximumNodeVisits == 1);
+        expect(statistics.integrationIndexLastAggregateReads == 0);
+        expect(statistics.integrationIndexMaximumAggregateReads == 0);
+        expect(statistics.integrationIndexLastBoundaryValueReads <= 197);
+        expect(statistics.integrationIndexMaximumBoundaryValueReads <= 197);
     }
 
     void testExactGateReducer()
@@ -282,6 +353,165 @@ private:
         expect(extreme.absoluteGatedBlockCount == 1);
         expect(extreme.relativeGatedBlockCount == 1);
         expectWithinAbsoluteError(extreme.integratedLufs, 150.0, 1.0e-12);
+    }
+
+    void testIndexedGateEquivalence()
+    {
+        beginTest("Indexed Integrated gating matches randomized brute-force histories");
+        std::mt19937_64 generator(0x1770'5EB0'0129ULL);
+        std::uniform_int_distribution<std::size_t> historyLength(1, 4'096);
+        std::uniform_real_distribution<double> loudness(-100.0, 180.0);
+        for (auto iteration = 0; iteration < 64; ++iteration) {
+            std::vector<double> history(historyLength(generator));
+            for (auto index = std::size_t { 0 }; index < history.size(); ++index) {
+                history[index] = energyForLufs(loudness(generator));
+                if (index % 127 == 0)
+                    history[index] = energyForLufs(LoudnessAnalyzer::absoluteGateLufs);
+                else if (index % 211 == 0)
+                    history[index] = std::numeric_limits<double>::quiet_NaN();
+                else if (index % 307 == 0)
+                    history[index] = std::numeric_limits<double>::infinity();
+                else if (index % 401 == 0)
+                    history[index] = -1.0;
+            }
+
+            const auto indexed = evaluateIndexedGate(history);
+            const auto bruteForce = LoudnessAnalyzer::reduceIntegratedBlockEnergies(history);
+            expect(indexed.insertedEveryValue);
+            expectMatchingGateResults(indexed.result, bruteForce);
+            expect(indexed.statistics.lastQueryBoundaryValueReads
+                <= IntegratedLoudnessIndex::leafValueCapacity);
+        }
+
+        beginTest("Indexed gates preserve strict threshold equality and exact extremes");
+        const auto absoluteThreshold = energyForLufs(LoudnessAnalyzer::absoluteGateLufs);
+        const std::array thresholdEdges {
+            absoluteThreshold,
+            std::nextafter(absoluteThreshold, std::numeric_limits<double>::infinity()),
+            19.0,
+            1.0,
+            energyForLufs(150.0),
+        };
+        auto indexed = evaluateIndexedGate(thresholdEdges);
+        auto bruteForce = LoudnessAnalyzer::reduceIntegratedBlockEnergies(thresholdEdges);
+        expect(indexed.insertedEveryValue);
+        expectMatchingGateResults(indexed.result, bruteForce);
+
+        constexpr std::array<double, 2> relativeEquality { 19.0, 1.0 };
+        indexed = evaluateIndexedGate(relativeEquality);
+        bruteForce = LoudnessAnalyzer::reduceIntegratedBlockEnergies(relativeEquality);
+        expect(indexed.result.relativeGatedBlockCount == 1);
+        expectMatchingGateResults(indexed.result, bruteForce, 1.0e-14);
+
+        std::array<double, 100> formerQuantizationCounterexample { };
+        formerQuantizationCounterexample.fill(energyForLufs(-20.01));
+        formerQuantizationCounterexample.back() = energyForLufs(9.525);
+        indexed = evaluateIndexedGate(formerQuantizationCounterexample);
+        bruteForce
+            = LoudnessAnalyzer::reduceIntegratedBlockEnergies(formerQuantizationCounterexample);
+        expect(indexed.result.relativeGatedBlockCount == formerQuantizationCounterexample.size());
+        expectMatchingGateResults(indexed.result, bruteForce);
+
+        beginTest("Ascending, descending, duplicate, and alternating orders remain equivalent");
+        std::vector<double> ascending(32'768);
+        for (auto index = std::size_t { 0 }; index < ascending.size(); ++index) {
+            ascending[index]
+                = energyForLufs(-69.0 + (120.0 * static_cast<double>(index) / ascending.size()));
+        }
+        auto descending = ascending;
+        std::reverse(descending.begin(), descending.end());
+
+        std::vector<double> duplicates(ascending.size());
+        const std::array duplicateValues {
+            energyForLufs(-69.0),
+            energyForLufs(-40.0),
+            energyForLufs(-23.0),
+            energyForLufs(-13.0),
+            energyForLufs(-3.0),
+        };
+        for (auto index = std::size_t { 0 }; index < duplicates.size(); ++index)
+            duplicates[index] = duplicateValues[index % duplicateValues.size()];
+
+        std::vector<double> alternating;
+        alternating.reserve(ascending.size());
+        for (auto index = std::size_t { 0 }; index < ascending.size() / 2; ++index) {
+            alternating.push_back(ascending[index]);
+            alternating.push_back(ascending[ascending.size() - 1 - index]);
+        }
+
+        for (const auto* history : { &ascending, &descending, &duplicates, &alternating }) {
+            indexed = evaluateIndexedGate(*history);
+            bruteForce = LoudnessAnalyzer::reduceIntegratedBlockEnergies(*history);
+            expect(indexed.insertedEveryValue);
+            expectMatchingGateResults(indexed.result, bruteForce);
+        }
+    }
+
+    void testIndexedGateStructureAndCapacity()
+    {
+        beginTest("The full 24-hour index stays bounded in time and reserved memory");
+        IntegratedLoudnessIndex index(
+            static_cast<std::size_t>(LoudnessAnalyzer::integrationBlockCapacity));
+        const auto initial = index.statistics();
+        expect(initial.reservedBytes < 8ULL * 1024ULL * 1024ULL);
+        expect(initial.leafNodeCount == 1);
+        expect(initial.internalNodeCount == 0);
+
+        auto expectedSum = 0.0;
+        auto expectedCount = std::uint64_t { 0 };
+        constexpr auto threshold = 1.4321;
+        auto insertedEveryBlock = true;
+        for (auto block = std::uint64_t { 0 }; block < LoudnessAnalyzer::integrationBlockCapacity;
+            ++block) {
+            const auto value = 1.0 + (static_cast<double>(block) * 1.0e-6);
+            insertedEveryBlock = index.insert(value) && insertedEveryBlock;
+            if (value > threshold) {
+                expectedSum += value;
+                ++expectedCount;
+            }
+        }
+        expect(insertedEveryBlock);
+        const auto beforeRejectedInsert = index.queryGreaterThan(threshold);
+        const auto structureBeforeRejectedInsert = index.statistics();
+        expect(!index.insert(2.0));
+
+        const auto reduced = index.queryGreaterThan(threshold);
+        const auto full = index.statistics();
+        expect(reduced.count == beforeRejectedInsert.count);
+        expectWithinAbsoluteError(reduced.sum, beforeRejectedInsert.sum, 0.0);
+        expect(full.valueCount == structureBeforeRejectedInsert.valueCount);
+        expect(full.leafNodeCount == structureBeforeRejectedInsert.leafNodeCount);
+        expect(full.internalNodeCount == structureBeforeRejectedInsert.internalNodeCount);
+        expect(full.treeHeight == structureBeforeRejectedInsert.treeHeight);
+        expect(reduced.count == expectedCount);
+        expectWithinAbsoluteError(
+            reduced.sum, expectedSum, std::numeric_limits<double>::epsilon() * expectedSum * 32.0);
+        expect(full.valueCount == LoudnessAnalyzer::integrationBlockCapacity);
+        expect(full.reservedBytes == initial.reservedBytes);
+        expect(full.reservedBytes < 8ULL * 1024ULL * 1024ULL);
+        expect(full.leafNodeCount <= full.leafNodeCapacity);
+        expect(full.internalNodeCount <= full.internalNodeCapacity);
+        expect(full.treeHeight <= 4);
+        expect(full.lastQueryNodeVisits == full.treeHeight);
+        expect(full.lastQueryAggregateReads
+            <= IntegratedLoudnessIndex::internalChildCapacity * (full.treeHeight - 1));
+        expect(full.lastQueryBoundaryValueReads <= IntegratedLoudnessIndex::leafValueCapacity);
+
+        beginTest("Reset retains the arena and clears every indexed value");
+        index.clear();
+        const auto cleared = index.statistics();
+        expect(cleared.valueCount == 0);
+        expect(cleared.queryCount == 0);
+        expect(cleared.leafNodeCount == 1);
+        expect(cleared.internalNodeCount == 0);
+        expect(cleared.treeHeight == 1);
+        expect(cleared.leafNodeCapacity == initial.leafNodeCapacity);
+        expect(cleared.internalNodeCapacity == initial.internalNodeCapacity);
+        expect(cleared.reservedBytes == initial.reservedBytes);
+        expect(index.insert(3.0));
+        expect(index.insert(3.0));
+        const auto duplicateQuery = index.queryGreaterThan(3.0);
+        expect(duplicateQuery.count == 0);
     }
 
     void testStartupValidityAndCadence()

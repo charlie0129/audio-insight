@@ -25,9 +25,10 @@ constexpr double maximumSupportedSampleRate = 768'000.0;
 } // namespace
 
 LoudnessAnalyzer::LoudnessAnalyzer()
+    : integrationEnergyIndex_(static_cast<std::size_t>(integrationBlockCapacity))
 {
-    integrationBlockEnergies_.reserve(static_cast<std::size_t>(integrationBlockCapacity));
     output_.integrationBlockCapacity = integrationBlockCapacity;
+    publishIntegrationIndexStatistics();
 }
 
 LoudnessAnalyzer::ProcessResult LoudnessAnalyzer::process(
@@ -159,6 +160,32 @@ LoudnessAnalyzer::Statistics LoudnessAnalyzer::statistics() const noexcept
         = telemetryIntegrationBlocksSinceReset_.load(std::memory_order_relaxed);
     result.absoluteGatedBlocks = telemetryAbsoluteGatedBlocks_.load(std::memory_order_relaxed);
     result.relativeGatedBlocks = telemetryRelativeGatedBlocks_.load(std::memory_order_relaxed);
+    result.integrationIndexReservedBytes
+        = telemetryIntegrationIndexReservedBytes_.load(std::memory_order_relaxed);
+    result.integrationIndexLeafNodes
+        = telemetryIntegrationIndexLeafNodes_.load(std::memory_order_relaxed);
+    result.integrationIndexInternalNodes
+        = telemetryIntegrationIndexInternalNodes_.load(std::memory_order_relaxed);
+    result.integrationIndexLeafCapacity
+        = telemetryIntegrationIndexLeafCapacity_.load(std::memory_order_relaxed);
+    result.integrationIndexInternalCapacity
+        = telemetryIntegrationIndexInternalCapacity_.load(std::memory_order_relaxed);
+    result.integrationIndexTreeHeight
+        = telemetryIntegrationIndexTreeHeight_.load(std::memory_order_relaxed);
+    result.integrationIndexQueries
+        = telemetryIntegrationIndexQueries_.load(std::memory_order_relaxed);
+    result.integrationIndexLastNodeVisits
+        = telemetryIntegrationIndexLastNodeVisits_.load(std::memory_order_relaxed);
+    result.integrationIndexMaximumNodeVisits
+        = telemetryIntegrationIndexMaximumNodeVisits_.load(std::memory_order_relaxed);
+    result.integrationIndexLastAggregateReads
+        = telemetryIntegrationIndexLastAggregateReads_.load(std::memory_order_relaxed);
+    result.integrationIndexMaximumAggregateReads
+        = telemetryIntegrationIndexMaximumAggregateReads_.load(std::memory_order_relaxed);
+    result.integrationIndexLastBoundaryValueReads
+        = telemetryIntegrationIndexLastBoundaryValueReads_.load(std::memory_order_relaxed);
+    result.integrationIndexMaximumBoundaryValueReads
+        = telemetryIntegrationIndexMaximumBoundaryValueReads_.load(std::memory_order_relaxed);
     result.stateSequence = telemetryStateSequence_.load(std::memory_order_relaxed);
     result.capturedFrameEnd = telemetryCapturedFrameEnd_.load(std::memory_order_relaxed);
     result.integrationBlockCapacity
@@ -448,7 +475,7 @@ void LoudnessAnalyzer::clearMeasurementState() noexcept
 void LoudnessAnalyzer::clearIntegrationState() noexcept
 {
     integrationHops_.fill({ });
-    integrationBlockEnergies_.clear();
+    integrationEnergyIndex_.clear();
     integrationHopWriteIndex_ = 0;
     integrationHopCount_ = 0;
     partialIntegrationHop_ = { };
@@ -456,6 +483,7 @@ void LoudnessAnalyzer::clearIntegrationState() noexcept
         resetPeriodScheduler(integrationPeriodScheduler_, integrationFramesUntilCompletion_);
     else
         integrationFramesUntilCompletion_ = 0;
+    absoluteGatedEnergySum_ = 0.0;
     absoluteGatedBlockCount_ = 0;
     relativeGatedBlockCount_ = 0;
     integrationBlockCount_ = 0;
@@ -474,6 +502,35 @@ void LoudnessAnalyzer::clearIntegrationState() noexcept
     output_.integratedCapturedFrameEnd = 0;
     output_.integrationBlockCapacity = effectiveIntegrationBlockCapacity_;
     output_.integrationCapacityExceeded = false;
+    publishIntegrationIndexStatistics();
+}
+
+void LoudnessAnalyzer::publishIntegrationIndexStatistics() noexcept
+{
+    const auto statistics = integrationEnergyIndex_.statistics();
+    telemetryIntegrationIndexReservedBytes_.store(
+        statistics.reservedBytes, std::memory_order_relaxed);
+    telemetryIntegrationIndexLeafNodes_.store(statistics.leafNodeCount, std::memory_order_relaxed);
+    telemetryIntegrationIndexInternalNodes_.store(
+        statistics.internalNodeCount, std::memory_order_relaxed);
+    telemetryIntegrationIndexLeafCapacity_.store(
+        statistics.leafNodeCapacity, std::memory_order_relaxed);
+    telemetryIntegrationIndexInternalCapacity_.store(
+        statistics.internalNodeCapacity, std::memory_order_relaxed);
+    telemetryIntegrationIndexTreeHeight_.store(statistics.treeHeight, std::memory_order_relaxed);
+    telemetryIntegrationIndexQueries_.store(statistics.queryCount, std::memory_order_relaxed);
+    telemetryIntegrationIndexLastNodeVisits_.store(
+        statistics.lastQueryNodeVisits, std::memory_order_relaxed);
+    telemetryIntegrationIndexMaximumNodeVisits_.store(
+        statistics.maximumQueryNodeVisits, std::memory_order_relaxed);
+    telemetryIntegrationIndexLastAggregateReads_.store(
+        statistics.lastQueryAggregateReads, std::memory_order_relaxed);
+    telemetryIntegrationIndexMaximumAggregateReads_.store(
+        statistics.maximumQueryAggregateReads, std::memory_order_relaxed);
+    telemetryIntegrationIndexLastBoundaryValueReads_.store(
+        statistics.lastQueryBoundaryValueReads, std::memory_order_relaxed);
+    telemetryIntegrationIndexMaximumBoundaryValueReads_.store(
+        statistics.maximumQueryBoundaryValueReads, std::memory_order_relaxed);
 }
 
 void LoudnessAnalyzer::publishStateChange() noexcept
@@ -694,7 +751,7 @@ void LoudnessAnalyzer::addIntegrationBlock(
     if (integrationCapacityExceeded_)
         return;
 
-    if (integrationBlockEnergies_.size() >= effectiveIntegrationBlockCapacity_) {
+    if (integrationBlockCount_ > effectiveIntegrationBlockCapacity_) {
         integrationCapacityExceeded_ = true;
         output_.integrationCapacityExceeded = true;
         output_.integratedValid = false;
@@ -705,21 +762,51 @@ void LoudnessAnalyzer::addIntegrationBlock(
         return;
     }
 
-    integrationBlockEnergies_.push_back(meanSquare);
+    const auto absoluteThreshold = lufsToEnergy(absoluteGateLufs);
+    if (std::isfinite(meanSquare) && meanSquare > absoluteThreshold) {
+        if (!integrationEnergyIndex_.insert(meanSquare)) {
+            integrationCapacityExceeded_ = true;
+            output_.integrationCapacityExceeded = true;
+            output_.integratedValid = false;
+            output_.integratedLufs = -std::numeric_limits<double>::infinity();
+            output_.relativeGateLufs = -std::numeric_limits<double>::infinity();
+            telemetryIntegrationCapacityExceeded_.store(1, std::memory_order_relaxed);
+            telemetryIntegrationCapacityOverflows_.fetch_add(1, std::memory_order_relaxed);
+            return;
+        }
+        absoluteGatedEnergySum_ += meanSquare;
+        absoluteGatedBlockCount_ = incrementWithoutWrap(absoluteGatedBlockCount_);
+    }
     updateIntegratedOutput();
 }
 
 void LoudnessAnalyzer::updateIntegratedOutput() noexcept
 {
-    const auto reduced = reduceIntegratedBlockEnergies(integrationBlockEnergies_);
-    absoluteGatedBlockCount_ = reduced.absoluteGatedBlockCount;
-    relativeGatedBlockCount_ = reduced.relativeGatedBlockCount;
-    output_.integratedValid = !integrationBlockEnergies_.empty();
-    output_.integratedLufs = reduced.integratedLufs;
-    output_.relativeGateLufs = reduced.relativeGateLufs;
-    output_.absoluteGatedBlockCount = reduced.absoluteGatedBlockCount;
-    output_.relativeGatedBlockCount = reduced.relativeGatedBlockCount;
-    telemetryAbsoluteGatedBlocks_.store(reduced.absoluteGatedBlockCount, std::memory_order_relaxed);
-    telemetryRelativeGatedBlocks_.store(reduced.relativeGatedBlockCount, std::memory_order_relaxed);
+    auto integratedLufs = -std::numeric_limits<double>::infinity();
+    auto relativeGateLufs = -std::numeric_limits<double>::infinity();
+    relativeGatedBlockCount_ = 0;
+
+    if (absoluteGatedBlockCount_ != 0 && std::isfinite(absoluteGatedEnergySum_)
+        && absoluteGatedEnergySum_ > 0.0) {
+        const auto absoluteMean
+            = absoluteGatedEnergySum_ / static_cast<double>(absoluteGatedBlockCount_);
+        const auto relativeThreshold = absoluteMean * 0.1;
+        relativeGateLufs = energyToLufs(relativeThreshold);
+        const auto threshold = std::max(lufsToEnergy(absoluteGateLufs), relativeThreshold);
+        const auto relative = integrationEnergyIndex_.queryGreaterThan(threshold);
+        relativeGatedBlockCount_ = relative.count;
+        if (relative.count != 0 && std::isfinite(relative.sum) && relative.sum > 0.0) {
+            integratedLufs = energyToLufs(relative.sum / static_cast<double>(relative.count));
+        }
+    }
+
+    output_.integratedValid = integrationBlockCount_ != 0;
+    output_.integratedLufs = integratedLufs;
+    output_.relativeGateLufs = relativeGateLufs;
+    output_.absoluteGatedBlockCount = absoluteGatedBlockCount_;
+    output_.relativeGatedBlockCount = relativeGatedBlockCount_;
+    telemetryAbsoluteGatedBlocks_.store(absoluteGatedBlockCount_, std::memory_order_relaxed);
+    telemetryRelativeGatedBlocks_.store(relativeGatedBlockCount_, std::memory_order_relaxed);
+    publishIntegrationIndexStatistics();
 }
 } // namespace audio_insight

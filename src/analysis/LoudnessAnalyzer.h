@@ -2,6 +2,7 @@
 
 #pragma once
 
+#include "IntegratedLoudnessIndex.h"
 #include "StereoSampleCapture.h"
 
 #include <array>
@@ -10,7 +11,6 @@
 #include <cstdint>
 #include <limits>
 #include <span>
-#include <vector>
 
 namespace audio_insight {
 /** One immutable worker-side Loudness endpoint. */
@@ -110,6 +110,19 @@ public:
         std::uint64_t integrationBlocksSinceReset = 0;
         std::uint64_t absoluteGatedBlocks = 0;
         std::uint64_t relativeGatedBlocks = 0;
+        std::uint64_t integrationIndexReservedBytes = 0;
+        std::uint64_t integrationIndexLeafNodes = 0;
+        std::uint64_t integrationIndexInternalNodes = 0;
+        std::uint64_t integrationIndexLeafCapacity = 0;
+        std::uint64_t integrationIndexInternalCapacity = 0;
+        std::uint64_t integrationIndexTreeHeight = 0;
+        std::uint64_t integrationIndexQueries = 0;
+        std::uint64_t integrationIndexLastNodeVisits = 0;
+        std::uint64_t integrationIndexMaximumNodeVisits = 0;
+        std::uint64_t integrationIndexLastAggregateReads = 0;
+        std::uint64_t integrationIndexMaximumAggregateReads = 0;
+        std::uint64_t integrationIndexLastBoundaryValueReads = 0;
+        std::uint64_t integrationIndexMaximumBoundaryValueReads = 0;
         std::uint64_t stateSequence = 0;
         std::uint64_t capturedFrameEnd = 0;
         std::uint64_t integrationBlockCapacity = 0;
@@ -237,6 +250,7 @@ private:
     void clearFiltersAndPartialHops() noexcept;
     void clearMeasurementState() noexcept;
     void clearIntegrationState() noexcept;
+    void publishIntegrationIndexStatistics() noexcept;
     void publishStateChange() noexcept;
     void resetPeriodScheduler(
         PeriodScheduler& scheduler, std::uint64_t& framesUntilCompletion) const noexcept;
@@ -260,11 +274,12 @@ private:
     std::array<ChannelFilterState, 2> filterStates_ { };
     std::array<EnergyHop, measurementHopCapacity> measurementHops_ { };
     std::array<EnergyHop, integrationHopCapacity> integrationHops_ { };
-    std::vector<double> integrationBlockEnergies_;
+    IntegratedLoudnessIndex integrationEnergyIndex_;
 
     LoudnessMeasurement output_;
     EnergyHop partialMeasurementHop_;
     EnergyHop partialIntegrationHop_;
+    double absoluteGatedEnergySum_ = 0.0;
     std::uint64_t absoluteGatedBlockCount_ = 0;
     std::uint64_t relativeGatedBlockCount_ = 0;
     std::uint64_t integrationBlockCount_ = 0;
@@ -308,6 +323,19 @@ private:
     std::atomic<std::uint64_t> telemetryIntegrationBlocksSinceReset_ { 0 };
     std::atomic<std::uint64_t> telemetryAbsoluteGatedBlocks_ { 0 };
     std::atomic<std::uint64_t> telemetryRelativeGatedBlocks_ { 0 };
+    std::atomic<std::uint64_t> telemetryIntegrationIndexReservedBytes_ { 0 };
+    std::atomic<std::uint64_t> telemetryIntegrationIndexLeafNodes_ { 0 };
+    std::atomic<std::uint64_t> telemetryIntegrationIndexInternalNodes_ { 0 };
+    std::atomic<std::uint64_t> telemetryIntegrationIndexLeafCapacity_ { 0 };
+    std::atomic<std::uint64_t> telemetryIntegrationIndexInternalCapacity_ { 0 };
+    std::atomic<std::uint64_t> telemetryIntegrationIndexTreeHeight_ { 0 };
+    std::atomic<std::uint64_t> telemetryIntegrationIndexQueries_ { 0 };
+    std::atomic<std::uint64_t> telemetryIntegrationIndexLastNodeVisits_ { 0 };
+    std::atomic<std::uint64_t> telemetryIntegrationIndexMaximumNodeVisits_ { 0 };
+    std::atomic<std::uint64_t> telemetryIntegrationIndexLastAggregateReads_ { 0 };
+    std::atomic<std::uint64_t> telemetryIntegrationIndexMaximumAggregateReads_ { 0 };
+    std::atomic<std::uint64_t> telemetryIntegrationIndexLastBoundaryValueReads_ { 0 };
+    std::atomic<std::uint64_t> telemetryIntegrationIndexMaximumBoundaryValueReads_ { 0 };
     std::atomic<std::uint64_t> telemetryStateSequence_ { 0 };
     std::atomic<std::uint64_t> telemetryCapturedFrameEnd_ { 0 };
     std::atomic<std::uint64_t> telemetryIntegrationBlockCapacity_ { integrationBlockCapacity };

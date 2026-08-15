@@ -192,6 +192,8 @@ target_sources(AudioInsight
         src/analysis/AnalysisCoordinator.h
         src/analysis/AudioCallbackMetrics.cpp
         src/analysis/AudioCallbackMetrics.h
+        src/analysis/IntegratedLoudnessIndex.cpp
+        src/analysis/IntegratedLoudnessIndex.h
         src/analysis/LoudnessAnalyzer.cpp
         src/analysis/LoudnessAnalyzer.h
         src/analysis/SpectrogramColumnMapper.cpp
@@ -274,6 +276,8 @@ source_group(TREE "${CMAKE_CURRENT_SOURCE_DIR}" FILES
     src/analysis/AnalysisCoordinator.h
     src/analysis/AudioCallbackMetrics.cpp
     src/analysis/AudioCallbackMetrics.h
+    src/analysis/IntegratedLoudnessIndex.cpp
+    src/analysis/IntegratedLoudnessIndex.h
     src/analysis/LoudnessAnalyzer.cpp
     src/analysis/LoudnessAnalyzer.h
     src/analysis/SpectrogramColumnMapper.cpp
@@ -339,6 +343,8 @@ if(BUILD_TESTING)
             src/analysis/AnalysisCoordinator.h
             src/analysis/AudioCallbackMetrics.cpp
             src/analysis/AudioCallbackMetrics.h
+            src/analysis/IntegratedLoudnessIndex.cpp
+            src/analysis/IntegratedLoudnessIndex.h
             src/analysis/LoudnessAnalyzer.cpp
             src/analysis/LoudnessAnalyzer.h
             src/analysis/SpectrogramColumnMapper.cpp
@@ -454,6 +460,8 @@ if(BUILD_TESTING)
         src/analysis/AnalysisCoordinator.h
         src/analysis/AudioCallbackMetrics.cpp
         src/analysis/AudioCallbackMetrics.h
+        src/analysis/IntegratedLoudnessIndex.cpp
+        src/analysis/IntegratedLoudnessIndex.h
         src/analysis/LoudnessAnalyzer.cpp
         src/analysis/LoudnessAnalyzer.h
         src/analysis/SpectrogramColumnMapper.cpp
