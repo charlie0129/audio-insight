@@ -890,9 +890,12 @@ SpectrogramRingAdvance SpectrogramHistoryRing::append(
 
     auto gapCount = std::uint64_t { 0 };
     if (hasTimeline_) {
-        const auto timestampGap = timelineSlot - lastTimelineSlot_ - 1;
-        const auto sequenceGap = sequence - lastSequence_ - 1;
-        gapCount = std::max(timestampGap, sequenceGap);
+        // Timeline slots, not publication sequences, define visible time. A
+        // missing sequence may have occupied the same rounded slot as a
+        // retained column, so treating it as one missing time interval would
+        // manufacture a black gap even though the requested-rate timeline is
+        // contiguous.
+        gapCount = timelineSlot - lastTimelineSlot_ - 1;
 
         if (gapCount >= columnCount_) {
             validity_.fill(0);

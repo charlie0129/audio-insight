@@ -132,6 +132,14 @@ public:
         expect(ring.nextWriteColumn() == 1);
         expect(ring.timelineSpan() == 1);
 
+        detail::SpectrogramHistoryRing coalescedSameSlotRing;
+        coalescedSameSlotRing.configure(5);
+        expect(coalescedSameSlotRing.append(10, 1).accepted);
+        const auto adjacentAfterDroppedSameSlot = coalescedSameSlotRing.append(11, 3);
+        expect(adjacentAfterDroppedSameSlot.accepted);
+        expect(adjacentAfterDroppedSameSlot.gapColumnCount == 0);
+        expect(coalescedSameSlotRing.timelineSpan() == 2);
+
         const auto adjacentColumn = ring.append(11, 3);
         expect(adjacentColumn.accepted);
         expect(adjacentColumn.gapColumnCount == 0);
