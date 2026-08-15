@@ -66,6 +66,12 @@ juce_add_plugin(AudioInsight
 
 target_sources(AudioInsight
     PRIVATE
+        src/analysis/HannSpectrumAnalyzer.cpp
+        src/analysis/HannSpectrumAnalyzer.h
+        src/analysis/StereoMeterAccumulator.cpp
+        src/analysis/StereoMeterAccumulator.h
+        src/analysis/StereoSampleCapture.cpp
+        src/analysis/StereoSampleCapture.h
         src/core/VisualizationDataSource.h
         src/core/VisualizationFrame.h
         src/plugin/PluginProcessor.cpp
@@ -96,6 +102,12 @@ target_link_libraries(AudioInsight
 )
 
 source_group(TREE "${CMAKE_CURRENT_SOURCE_DIR}" FILES
+    src/analysis/HannSpectrumAnalyzer.cpp
+    src/analysis/HannSpectrumAnalyzer.h
+    src/analysis/StereoMeterAccumulator.cpp
+    src/analysis/StereoMeterAccumulator.h
+    src/analysis/StereoSampleCapture.cpp
+    src/analysis/StereoSampleCapture.h
     src/core/VisualizationDataSource.h
     src/core/VisualizationFrame.h
     src/plugin/PluginProcessor.cpp
@@ -111,10 +123,17 @@ if(BUILD_TESTING)
 
     target_sources(AudioInsightTests
         PRIVATE
+            src/analysis/HannSpectrumAnalyzer.cpp
+            src/analysis/HannSpectrumAnalyzer.h
+            src/analysis/StereoMeterAccumulator.cpp
+            src/analysis/StereoMeterAccumulator.h
+            src/analysis/StereoSampleCapture.cpp
+            src/analysis/StereoSampleCapture.h
             src/core/VisualizationDataSource.h
             src/core/VisualizationFrame.h
             src/plugin/PluginProcessor.cpp
             src/plugin/PluginProcessor.h
+            tests/AnalysisCoreTests.cpp
             tests/PluginProcessorTests.cpp
             tests/TestMain.cpp
     )
@@ -146,10 +165,17 @@ if(BUILD_TESTING)
     add_test(NAME AudioInsightTests COMMAND AudioInsightTests)
 
     source_group(TREE "${CMAKE_CURRENT_SOURCE_DIR}" FILES
+        src/analysis/HannSpectrumAnalyzer.cpp
+        src/analysis/HannSpectrumAnalyzer.h
+        src/analysis/StereoMeterAccumulator.cpp
+        src/analysis/StereoMeterAccumulator.h
+        src/analysis/StereoSampleCapture.cpp
+        src/analysis/StereoSampleCapture.h
         src/core/VisualizationDataSource.h
         src/core/VisualizationFrame.h
         src/plugin/PluginProcessor.cpp
         src/plugin/PluginProcessor.h
+        tests/AnalysisCoreTests.cpp
         tests/PluginProcessorTests.cpp
         tests/TestMain.cpp
     )
