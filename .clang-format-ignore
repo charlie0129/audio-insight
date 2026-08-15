@@ -1,0 +1,7 @@
+# SPDX-License-Identifier: AGPL-3.0-or-later
+
+# Third-party source and generated build trees are outside the project style.
+external/**
+build/**
+cmake-build-*/**
+out/**

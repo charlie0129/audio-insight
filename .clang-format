@@ -1,0 +1,28 @@
+# SPDX-License-Identifier: AGPL-3.0-or-later
+
+---
+Language: Cpp
+BasedOnStyle: WebKit
+
+# WebKit keeps function-definition braces on the following line while attaching
+# control-flow braces: `if (...) {`, `for (...) {`, and `while (...) {`.
+BreakBeforeBraces: WebKit
+AllowShortFunctionsOnASingleLine: None
+
+Standard: c++20
+ColumnLimit: 100
+IndentWidth: 4
+ContinuationIndentWidth: 4
+TabWidth: 4
+UseTab: Never
+
+# Preserve the layout already used by project-owned code.
+NamespaceIndentation: None
+AccessModifierOffset: -4
+PointerAlignment: Left
+ReferenceAlignment: Pointer
+SpaceBeforeCpp11BracedList: true
+
+# Prefer conventional trailing commas in multiline initializer lists over the
+# leading-comma layout from the stock WebKit preset.
+BreakConstructorInitializers: BeforeColon
