@@ -3,7 +3,9 @@
 #include "PluginProcessor.h"
 #include "PluginEditor.h"
 
+#include <cmath>
 #include <memory>
+#include <optional>
 
 namespace audio_insight {
 namespace {
@@ -13,6 +15,50 @@ constexpr auto spectrumCeilingParameter = "spectrumCeiling";
 constexpr auto spectrumSmoothingParameter = "spectrumSmoothing";
 constexpr auto performanceMetricsParameter = "performanceMetrics";
 constexpr auto legacyMetalPerformanceHudParameter = "metalPerformanceHud";
+
+std::optional<double> readLegacyParameterValue(
+    const juce::ValueTree& state, const char* parameterId)
+{
+    const auto parameterState = state.getChildWithProperty("id", parameterId);
+    if (!parameterState.isValid() || !parameterState.hasProperty("value"))
+        return std::nullopt;
+
+    const auto value = parameterState.getProperty("value");
+    auto number = 0.0;
+    if (value.isInt() || value.isInt64() || value.isDouble()) {
+        number = static_cast<double>(value);
+    } else if (value.isString()) {
+        const auto text = value.toString();
+        if (text.isEmpty() || text != text.trim() || !text.containsAnyOf("0123456789"))
+            return std::nullopt;
+
+        auto cursor = text.getCharPointer();
+        const auto start = cursor;
+        number = juce::CharacterFunctions::readDoubleValue(cursor);
+        if (cursor == start || !cursor.isEmpty())
+            return std::nullopt;
+    } else {
+        return std::nullopt;
+    }
+
+    return std::isfinite(number) ? std::optional<double> { number } : std::nullopt;
+}
+
+int countAnalyzerConfigurationChildren(const juce::ValueTree& state)
+{
+    auto count = 0;
+    for (const auto& child : state)
+        count += child.hasType(AnalyzerConfigurationCodec::treeType()) ? 1 : 0;
+    return count;
+}
+
+void removeAnalyzerConfigurationChildren(juce::ValueTree& state)
+{
+    for (auto childIndex = state.getNumChildren() - 1; childIndex >= 0; --childIndex) {
+        if (state.getChild(childIndex).hasType(AnalyzerConfigurationCodec::treeType()))
+            state.removeChild(childIndex, nullptr);
+    }
+}
 } // namespace
 
 PluginProcessor::PluginProcessor()
@@ -124,7 +170,11 @@ void PluginProcessor::changeProgramName(int, const juce::String&)
 
 void PluginProcessor::getStateInformation(juce::MemoryBlock& destinationData)
 {
-    if (const auto state = parameters.copyState(); auto xml = state.createXml())
+    auto state = parameters.copyState();
+    removeAnalyzerConfigurationChildren(state);
+    state.addChild(AnalyzerConfigurationCodec::encode(getAnalyzerConfiguration()), -1, nullptr);
+
+    if (auto xml = state.createXml())
         copyXmlToBinary(*xml, destinationData);
 }
 
@@ -133,6 +183,23 @@ void PluginProcessor::setStateInformation(const void* data, int sizeInBytes)
     if (auto xml = getXmlFromBinary(data, sizeInBytes); xml != nullptr) {
         if (xml->hasTagName(parameters.state.getType())) {
             auto restoredState = juce::ValueTree::fromXml(*xml);
+            const auto analyzerConfigurationCount
+                = countAnalyzerConfigurationChildren(restoredState);
+            auto restoredAnalyzerConfiguration = AnalyzerConfigurationCodec::defaults();
+
+            if (analyzerConfigurationCount == 1) {
+                restoredAnalyzerConfiguration = AnalyzerConfigurationCodec::decodeOrDefault(
+                    restoredState.getChildWithName(AnalyzerConfigurationCodec::treeType()));
+            } else if (analyzerConfigurationCount == 0) {
+                restoredAnalyzerConfiguration
+                    = AnalyzerConfigurationCodec::migrateLegacy(LegacySpectrumSettings {
+                        readLegacyParameterValue(restoredState, spectrumFloorParameter),
+                        readLegacyParameterValue(restoredState, spectrumCeilingParameter),
+                        readLegacyParameterValue(restoredState, spectrumSmoothingParameter),
+                    });
+            }
+
+            removeAnalyzerConfigurationChildren(restoredState);
             const auto currentMetricsState
                 = restoredState.getChildWithProperty("id", performanceMetricsParameter);
             auto legacyMetricsState
@@ -159,6 +226,7 @@ void PluginProcessor::setStateInformation(const void* data, int sizeInBytes)
             }
 
             parameters.replaceState(restoredState);
+            setAnalyzerConfiguration(restoredAnalyzerConfiguration);
         }
     }
 }
@@ -166,6 +234,19 @@ void PluginProcessor::setStateInformation(const void* data, int sizeInBytes)
 juce::AudioProcessorValueTreeState& PluginProcessor::getParameters() noexcept
 {
     return parameters;
+}
+
+AnalyzerConfiguration PluginProcessor::getAnalyzerConfiguration() const
+{
+    const std::scoped_lock lock(analyzerConfigurationMutex);
+    return analyzerConfiguration;
+}
+
+void PluginProcessor::setAnalyzerConfiguration(AnalyzerConfiguration configuration)
+{
+    configuration = AnalyzerConfigurationCodec::sanitize(configuration);
+    const std::scoped_lock lock(analyzerConfigurationMutex);
+    analyzerConfiguration = configuration;
 }
 
 AnalysisTelemetry PluginProcessor::getAnalysisTelemetry() const noexcept
@@ -195,16 +276,17 @@ juce::AudioProcessorValueTreeState::ParameterLayout PluginProcessor::createParam
     layout.add(
         std::make_unique<juce::AudioParameterFloat>(juce::ParameterID { spectrumFloorParameter, 1 },
             "Spectrum floor", juce::NormalisableRange<float> { -120.0F, -40.0F, 1.0F }, -90.0F,
-            juce::AudioParameterFloatAttributes().withLabel("dB")));
+            juce::AudioParameterFloatAttributes().withLabel("dB").withAutomatable(false)));
 
     layout.add(std::make_unique<juce::AudioParameterFloat>(
         juce::ParameterID { spectrumCeilingParameter, 1 }, "Spectrum ceiling",
         juce::NormalisableRange<float> { -24.0F, 12.0F, 1.0F }, 0.0F,
-        juce::AudioParameterFloatAttributes().withLabel("dB")));
+        juce::AudioParameterFloatAttributes().withLabel("dB").withAutomatable(false)));
 
     layout.add(std::make_unique<juce::AudioParameterFloat>(
         juce::ParameterID { spectrumSmoothingParameter, 1 }, "Spectrum smoothing",
-        juce::NormalisableRange<float> { 0.0F, 1.0F, 0.01F }, 0.40F));
+        juce::NormalisableRange<float> { 0.0F, 1.0F, 0.01F }, 0.40F,
+        juce::AudioParameterFloatAttributes().withAutomatable(false)));
 
     layout.add(std::make_unique<juce::AudioParameterBool>(
         juce::ParameterID { performanceMetricsParameter, 1 }, "Performance metrics", false,

@@ -3,8 +3,11 @@
 #pragma once
 
 #include "analysis/AnalysisCoordinator.h"
+#include "state/AnalyzerConfiguration.h"
 
 #include <juce_audio_processors/juce_audio_processors.h>
+
+#include <mutex>
 
 namespace audio_insight {
 class PluginProcessor final : public juce::AudioProcessor, public VisualizationDataSource {
@@ -37,6 +40,10 @@ public:
     void setStateInformation(const void* data, int sizeInBytes) override;
 
     [[nodiscard]] juce::AudioProcessorValueTreeState& getParameters() noexcept;
+
+    /** Non-audio-thread access to the versioned per-instance analyzer state. */
+    [[nodiscard]] AnalyzerConfiguration getAnalyzerConfiguration() const;
+    void setAnalyzerConfiguration(AnalyzerConfiguration configuration);
     [[nodiscard]] AnalysisTelemetry getAnalysisTelemetry() const noexcept;
 
     void requestAnalysis() noexcept override;
@@ -49,6 +56,8 @@ private:
 
     juce::AudioProcessorValueTreeState parameters;
     AnalysisCoordinator analysisCoordinator;
+    mutable std::mutex analyzerConfigurationMutex;
+    AnalyzerConfiguration analyzerConfiguration;
     double currentSampleRate = 0.0;
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR(PluginProcessor)

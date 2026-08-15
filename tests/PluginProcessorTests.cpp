@@ -99,6 +99,8 @@ public:
 
             expectWithinAbsoluteError(smoothing->getValue(), 0.40F, 0.0001F);
             expectWithinAbsoluteError(metrics->getValue(), 0.0F, 0.0001F);
+            expect(!floor->isAutomatable());
+            expect(!smoothing->isAutomatable());
             expect(!metrics->isMetaParameter());
             expect(!metrics->isAutomatable());
 
@@ -123,6 +125,148 @@ public:
 
             if (restoredMetrics != nullptr)
                 expectWithinAbsoluteError(restoredMetrics->getValue(), 1.0F, 0.0001F);
+        });
+
+        testCase("Analyzer configuration round-trips beside compatibility parameters", [this] {
+            PluginProcessor source;
+            auto configuration = source.getAnalyzerConfiguration();
+            configuration.sharedAnalysis.fftSize = 8192;
+            configuration.sharedAnalysis.frequencySpacing = 0.35;
+            configuration.spectrum.floorDb = -132.0;
+            configuration.spectrum.ceilingDb = 6.0;
+            configuration.spectrum.temporalAveraging.enabled = false;
+            configuration.spectrum.temporalAveraging.milliseconds = 250.0;
+            configuration.spectrogram.historyDurationSeconds = 30;
+            configuration.loudness.referenceLufs = -14.5;
+            source.setAnalyzerConfiguration(configuration);
+
+            juce::MemoryBlock state;
+            source.getStateInformation(state);
+            auto xml = juce::AudioProcessor::getXmlFromBinary(
+                state.getData(), static_cast<int>(state.getSize()));
+            expect(xml != nullptr);
+
+            if (xml != nullptr) {
+                const auto tree = juce::ValueTree::fromXml(*xml);
+                auto analyzerChildren = 0;
+                for (const auto& child : tree) {
+                    analyzerChildren
+                        += child.hasType(AnalyzerConfigurationCodec::treeType()) ? 1 : 0;
+                }
+                expectEquals(analyzerChildren, 1);
+            }
+
+            PluginProcessor restored;
+            restored.setStateInformation(state.getData(), static_cast<int>(state.getSize()));
+            const auto actual = restored.getAnalyzerConfiguration();
+            expectEquals(actual.sharedAnalysis.fftSize, 8192);
+            expectWithinAbsoluteError(actual.sharedAnalysis.frequencySpacing, 0.35, 1.0e-12);
+            expectWithinAbsoluteError(actual.spectrum.floorDb, -132.0, 1.0e-12);
+            expectWithinAbsoluteError(actual.spectrum.ceilingDb, 6.0, 1.0e-12);
+            expect(!actual.spectrum.temporalAveraging.enabled);
+            expectWithinAbsoluteError(
+                actual.spectrum.temporalAveraging.milliseconds, 250.0, 1.0e-12);
+            expectEquals(actual.spectrogram.historyDurationSeconds, 30);
+            expectWithinAbsoluteError(actual.loudness.referenceLufs, -14.5, 1.0e-12);
+        });
+
+        testCase("Fresh state uses responsive time-based averaging defaults", [this] {
+            PluginProcessor processor;
+            const auto configuration = processor.getAnalyzerConfiguration();
+            expect(configuration.spectrum.temporalAveraging.enabled);
+            expectWithinAbsoluteError(
+                configuration.spectrum.temporalAveraging.milliseconds, 75.0, 1.0e-12);
+        });
+
+        testCase("Legacy Spectrum parameters migrate only when configuration is absent", [this] {
+            PluginProcessor source;
+            auto* floor = source.getParameters().getParameter("spectrumFloor");
+            auto* ceiling = source.getParameters().getParameter("spectrumCeiling");
+            auto* smoothing = source.getParameters().getParameter("spectrumSmoothing");
+            expect(floor != nullptr);
+            expect(ceiling != nullptr);
+            expect(smoothing != nullptr);
+            if (floor == nullptr || ceiling == nullptr || smoothing == nullptr)
+                return;
+
+            floor->setValueNotifyingHost(floor->convertTo0to1(-100.0F));
+            ceiling->setValueNotifyingHost(ceiling->convertTo0to1(6.0F));
+            smoothing->setValueNotifyingHost(0.40F);
+
+            auto legacyTree = source.getParameters().copyState();
+            expect(!legacyTree.getChildWithName(AnalyzerConfigurationCodec::treeType()).isValid());
+            juce::MemoryBlock legacyState;
+            if (auto xml = legacyTree.createXml())
+                juce::AudioProcessor::copyXmlToBinary(*xml, legacyState);
+
+            PluginProcessor restored;
+            restored.setStateInformation(
+                legacyState.getData(), static_cast<int>(legacyState.getSize()));
+            const auto migrated = restored.getAnalyzerConfiguration();
+            expectWithinAbsoluteError(migrated.spectrum.floorDb, -100.0, 1.0e-12);
+            expectWithinAbsoluteError(migrated.spectrum.ceilingDb, 6.0, 1.0e-12);
+            expectWithinAbsoluteError(
+                migrated.spectrum.temporalAveraging.milliseconds, 84.6, 1.0e-5);
+
+            juce::MemoryBlock currentState;
+            restored.getStateInformation(currentState);
+            auto currentXml = juce::AudioProcessor::getXmlFromBinary(
+                currentState.getData(), static_cast<int>(currentState.getSize()));
+            expect(currentXml != nullptr);
+            if (currentXml != nullptr) {
+                const auto currentTree = juce::ValueTree::fromXml(*currentXml);
+                expect(
+                    currentTree.getChildWithName(AnalyzerConfigurationCodec::treeType()).isValid());
+            }
+        });
+
+        testCase("Current analyzer configuration wins over compatibility shims", [this] {
+            PluginProcessor source;
+            auto stateTree = source.getParameters().copyState();
+            auto configuration = AnalyzerConfigurationCodec::defaults();
+            configuration.spectrum.floorDb = -144.0;
+            configuration.spectrum.temporalAveraging.milliseconds = 125.0;
+            stateTree.addChild(AnalyzerConfigurationCodec::encode(configuration), -1, nullptr);
+
+            auto floorState = stateTree.getChildWithProperty("id", "spectrumFloor");
+            auto smoothingState = stateTree.getChildWithProperty("id", "spectrumSmoothing");
+            floorState.setProperty("value", "-72", nullptr);
+            smoothingState.setProperty("value", "1", nullptr);
+
+            juce::MemoryBlock encoded;
+            if (auto xml = stateTree.createXml())
+                juce::AudioProcessor::copyXmlToBinary(*xml, encoded);
+
+            PluginProcessor restored;
+            restored.setStateInformation(encoded.getData(), static_cast<int>(encoded.getSize()));
+            const auto actual = restored.getAnalyzerConfiguration();
+            expectWithinAbsoluteError(actual.spectrum.floorDb, -144.0, 1.0e-12);
+            expectWithinAbsoluteError(
+                actual.spectrum.temporalAveraging.milliseconds, 125.0, 1.0e-12);
+        });
+
+        testCase("Malformed existing analyzer state defaults instead of legacy migration", [this] {
+            PluginProcessor source;
+            auto stateTree = source.getParameters().copyState();
+            auto floorState = stateTree.getChildWithProperty("id", "spectrumFloor");
+            auto smoothingState = stateTree.getChildWithProperty("id", "spectrumSmoothing");
+            floorState.setProperty("value", "-120", nullptr);
+            smoothingState.setProperty("value", "1", nullptr);
+
+            auto malformed = AnalyzerConfigurationCodec::encode({ });
+            malformed.setProperty("version", "999", nullptr);
+            stateTree.addChild(malformed, -1, nullptr);
+
+            juce::MemoryBlock encoded;
+            if (auto xml = stateTree.createXml())
+                juce::AudioProcessor::copyXmlToBinary(*xml, encoded);
+
+            PluginProcessor restored;
+            restored.setStateInformation(encoded.getData(), static_cast<int>(encoded.getSize()));
+            const auto actual = restored.getAnalyzerConfiguration();
+            expectWithinAbsoluteError(actual.spectrum.floorDb, -90.0, 1.0e-12);
+            expectWithinAbsoluteError(
+                actual.spectrum.temporalAveraging.milliseconds, 75.0, 1.0e-12);
         });
 
         testCase("The legacy Metal HUD state migrates to the metrics panel", [this] {
