@@ -82,6 +82,218 @@ public:
 
         expectEquals(detail::mapFrequencyToUnit({ 20.0F, 20.0F, 1.0F }, 20.0F), 0.0F);
 
+        beginTest("Spectrogram history dimensions and timestamps are bounded and audio-derived");
+
+        expect(detail::calculateSpectrogramHistoryColumnCount(10, 60) == 600);
+        expect(detail::calculateSpectrogramHistoryColumnCount(60, 120) == 7'200);
+        expect(detail::calculateSpectrogramHistoryColumnCount(3, 60) == 0);
+        expect(detail::calculateSpectrogramHistoryColumnCount(10, 90) == 0);
+        expect(detail::calculateSpectrogramTimelineSlot(4'096, 48'000.0, 60) == 5);
+        expect(detail::calculateSpectrogramTimelineSlot(4'896, 48'000.0, 60) == 6);
+        expect(detail::calculateSpectrogramTimelineSlot(0, 48'000.0, 60) == 0);
+        expect(detail::calculateSpectrogramTimelineSlot(
+                   1, std::numeric_limits<double>::quiet_NaN(), 60)
+            == 0);
+
+        beginTest("Spectrogram ring preserves timestamp gaps and both history interpretations");
+
+        detail::SpectrogramHistoryRing ring;
+        ring.configure(5);
+        const auto firstColumn = ring.append(10, 1);
+        expect(firstColumn.accepted);
+        expect(firstColumn.writeColumn == 0);
+        expect(ring.timelineSpan() == 1);
+        expect(!ring.physicalColumnForScreenColumn(3, detail::SpectrogramRenderHistoryMode::scroll)
+                .has_value());
+        expect(*ring.physicalColumnForScreenColumn(4, detail::SpectrogramRenderHistoryMode::scroll)
+            == 0);
+
+        const auto adjacentColumn = ring.append(11, 2);
+        expect(adjacentColumn.accepted);
+        expect(adjacentColumn.gapColumnCount == 0);
+        const auto gappedColumn = ring.append(14, 4);
+        expect(gappedColumn.accepted);
+        expect(gappedColumn.gapColumnCount == 2);
+        expect(gappedColumn.writeColumn == 4);
+        expect(ring.timelineSpan() == 5);
+        expect(ring.isColumnValid(0));
+        expect(ring.isColumnValid(1));
+        expect(!ring.isColumnValid(2));
+        expect(!ring.isColumnValid(3));
+        expect(ring.isColumnValid(4));
+        for (std::uint32_t screen = 0; screen < 5; ++screen) {
+            expect(*ring.physicalColumnForScreenColumn(
+                       screen, detail::SpectrogramRenderHistoryMode::scroll)
+                == screen);
+            expect(*ring.physicalColumnForScreenColumn(
+                       screen, detail::SpectrogramRenderHistoryMode::overwrite)
+                == screen);
+        }
+
+        const auto staleColumn = ring.append(14, 5);
+        expect(!staleColumn.accepted);
+        const auto wrappedColumn = ring.append(15, 5);
+        expect(wrappedColumn.accepted);
+        expect(wrappedColumn.writeColumn == 0);
+        expect(ring.nextWriteColumn() == 1);
+        expect(*ring.physicalColumnForScreenColumn(4, detail::SpectrogramRenderHistoryMode::scroll)
+            == 0);
+
+        const auto hugeGap = ring.append(30, 20);
+        expect(hugeGap.accepted);
+        expect(hugeGap.discardedPreviousSpan);
+        expect(hugeGap.gapColumnCount == 14);
+        expect(ring.timelineSpan() == 5);
+        auto validAfterHugeGap = 0;
+        for (std::uint32_t column = 0; column < 5; ++column)
+            validAfterHugeGap += ring.isColumnValid(column) ? 1 : 0;
+        expectEquals(validAfterHugeGap, 1);
+
+        ring.configure(3);
+        expect(ring.columnCount() == 3);
+        expect(ring.timelineSpan() == 0);
+        expect(!ring.physicalColumnForScreenColumn(0, detail::SpectrogramRenderHistoryMode::scroll)
+                .has_value());
+
+        beginTest("Spectrogram upload gate publishes failure before admitting another callback");
+
+        detail::SpectrogramUploadGate uploadGate;
+        expect(!uploadGate.isUploadInFlight());
+        expect(!uploadGate.consumeFailure());
+
+        uploadGate.beginUpload();
+        expect(uploadGate.isUploadInFlight());
+        expect(!uploadGate.consumeFailure());
+        uploadGate.completeUpload(true);
+        expect(!uploadGate.isUploadInFlight());
+        expect(!uploadGate.consumeFailure());
+
+        uploadGate.beginUpload();
+        expect(uploadGate.isUploadInFlight());
+        uploadGate.completeUpload(false);
+        expect(!uploadGate.isUploadInFlight());
+        expect(uploadGate.consumeFailure());
+        expect(!uploadGate.consumeFailure());
+
+        beginTest("Spectrogram invalidation scopes distinguish clears from reallocations");
+
+        const detail::SpectrogramHistorySignature baseSignature { 1, 2, 3, 4, 4096, 1024, 600, 60,
+            48'000.0 };
+        const auto initialTransition
+            = detail::spectrogramHistoryTransition(std::nullopt, baseSignature);
+        expect(initialTransition.clear);
+        expect(initialTransition.reallocate);
+        const auto unchangedTransition
+            = detail::spectrogramHistoryTransition(baseSignature, baseSignature);
+        expect(!unchangedTransition.clear);
+        expect(!unchangedTransition.reallocate);
+
+        auto mappingChanged = baseSignature;
+        ++mappingChanged.mappingGeneration;
+        const auto mappingTransition
+            = detail::spectrogramHistoryTransition(baseSignature, mappingChanged);
+        expect(mappingTransition.clear);
+        expect(!mappingTransition.reallocate);
+
+        auto windowChanged = baseSignature;
+        ++windowChanged.fftGeneration;
+        const auto windowTransition
+            = detail::spectrogramHistoryTransition(baseSignature, windowChanged);
+        expect(windowTransition.clear);
+        expect(!windowTransition.reallocate);
+
+        auto rowsChanged = baseSignature;
+        rowsChanged.rowCount = 426;
+        const auto rowTransition = detail::spectrogramHistoryTransition(baseSignature, rowsChanged);
+        expect(rowTransition.clear);
+        expect(rowTransition.reallocate);
+
+        auto durationChanged = baseSignature;
+        durationChanged.columnCount = 1'200;
+        const auto durationTransition
+            = detail::spectrogramHistoryTransition(baseSignature, durationChanged);
+        expect(durationTransition.clear);
+        expect(durationTransition.reallocate);
+
+        auto resetChanged = baseSignature;
+        ++resetChanged.resetEpoch;
+        const auto resetTransition
+            = detail::spectrogramHistoryTransition(baseSignature, resetChanged);
+        expect(resetTransition.clear);
+        expect(!resetTransition.reallocate);
+
+        auto sliceRateChanged = baseSignature;
+        sliceRateChanged.requestedSliceRateHz = 120;
+        sliceRateChanged.columnCount = 1'200;
+        const auto sliceRateTransition
+            = detail::spectrogramHistoryTransition(baseSignature, sliceRateChanged);
+        expect(sliceRateTransition.clear);
+        expect(sliceRateTransition.reallocate);
+
+        auto invalidSignature = baseSignature;
+        invalidSignature.rowCount = 0;
+        const auto invalidTransition
+            = detail::spectrogramHistoryTransition(baseSignature, invalidSignature);
+        expect(!invalidTransition.clear);
+        expect(!invalidTransition.reallocate);
+
+        beginTest("Spectrogram response and palettes preserve literal black and luminance order");
+
+        expectEquals(detail::spectrogramPaletteCoordinate(-120.0F, -120.0F, 0.0F, 0.0F), 0.0F);
+        expectEquals(detail::spectrogramPaletteCoordinate(0.0F, -120.0F, 0.0F, 0.0F), 1.0F);
+        expectWithinAbsoluteError(
+            detail::spectrogramPaletteCoordinate(-60.0F, -120.0F, 0.0F, 0.0F), 0.5F, 0.000001F);
+        expect(detail::spectrogramPaletteCoordinate(-90.0F, -120.0F, 0.0F, -2.0F)
+            > detail::spectrogramPaletteCoordinate(-90.0F, -120.0F, 0.0F, 2.0F));
+        expectEquals(detail::spectrogramPaletteCoordinate(
+                         std::numeric_limits<float>::quiet_NaN(), -120.0F, 0.0F, 0.0F),
+            0.0F);
+
+        constexpr std::array palettes { detail::SpectrogramRenderPalette::blueFire,
+            detail::SpectrogramRenderPalette::inferno, detail::SpectrogramRenderPalette::viridis,
+            detail::SpectrogramRenderPalette::grayscale };
+        for (const auto palette : palettes) {
+            const auto black = detail::spectrogramPaletteColour(palette, 0.0F);
+            expectEquals(black.red, 0.0F);
+            expectEquals(black.green, 0.0F);
+            expectEquals(black.blue, 0.0F);
+            auto previousLuminance = 0.0F;
+            auto previousQuantizedLuminance = 0.0F;
+            for (auto index = 0; index <= 256; ++index) {
+                const auto colour
+                    = detail::spectrogramPaletteColour(palette, static_cast<float>(index) / 256.0F);
+                const auto luminance = detail::spectrogramPerceivedLuminance(colour);
+                expect(luminance + 0.000001F >= previousLuminance);
+                previousLuminance = luminance;
+
+                if (index < 256) {
+                    const auto quantize = [](const float component) noexcept {
+                        return std::round(std::clamp(component, 0.0F, 1.0F) * 255.0F) / 255.0F;
+                    };
+                    const auto lutColour = detail::spectrogramPaletteColour(
+                        palette, static_cast<float>(index) / 255.0F);
+                    const detail::SpectrogramPaletteColour quantizedColour {
+                        quantize(lutColour.red),
+                        quantize(lutColour.green),
+                        quantize(lutColour.blue),
+                    };
+                    const auto quantizedLuminance
+                        = detail::spectrogramPerceivedLuminance(quantizedColour);
+                    expect(quantizedLuminance + 0.000001F >= previousQuantizedLuminance,
+                        "Quantized palette " + juce::String(static_cast<int>(palette))
+                            + " at LUT index " + juce::String(index));
+                    previousQuantizedLuminance = quantizedLuminance;
+                }
+            }
+        }
+
+        expectEquals(detail::spectrogramFrequencyCoordinate(1.0F), 0.0F);
+        expectEquals(detail::spectrogramFrequencyCoordinate(0.0F), 1.0F);
+        expectWithinAbsoluteError(detail::spectrogramLogicalPixelWidth(1.0F), 1.0F, 0.000001F);
+        expectWithinAbsoluteError(
+            detail::spectrogramLogicalPixelWidth(1.5F), 2.0F / 3.0F, 0.000001F);
+        expectWithinAbsoluteError(detail::spectrogramLogicalPixelWidth(2.0F), 0.5F, 0.000001F);
+
         beginTest("Frequency labels are compact, locale-independent, and bounded");
 
         struct LabelCase final {
@@ -427,7 +639,7 @@ public:
         beginTest("Axis and meter geometry remain within the fixed Metal vertex buffer");
 
         expectEquals(detail::MetalVisualizationGeometryLimits::maximumGeneratedVertices,
-            std::size_t { 53'550 });
+            std::size_t { 53'446 });
         expect(detail::MetalVisualizationGeometryLimits::maximumGeneratedVertices
             <= detail::MetalVisualizationGeometryLimits::vertexCapacity);
         expectEquals(
@@ -491,6 +703,17 @@ public:
         expectEquals(afterReset.frameLatencyComponentTimingUnavailableSamples, std::uint64_t { 0 });
         expectEquals(afterReset.frameLatencyHistoryDiscardedSamples, std::uint64_t { 0 });
         expectEquals(afterReset.frameLatencyHistoryCount, std::size_t { 0 });
+        expect(afterReset.spectrogramColumnsRead == 0);
+        expect(afterReset.spectrogramColumnsUploaded == 0);
+        expect(afterReset.spectrogramColumnsRejected == 0);
+        expect(afterReset.spectrogramGapColumns == 0);
+        expect(afterReset.spectrogramHistoryClears == 0);
+        expect(afterReset.spectrogramTextureReallocations == 0);
+        expect(afterReset.spectrogramTextureAllocationFailures == 0);
+        expect(afterReset.spectrogramUploadBackpressureDrops == 0);
+        expect(afterReset.spectrogramUploadCommands == 0);
+        expect(afterReset.spectrogramUploadBytes == 0);
+        expect(afterReset.spectrogramLastColumnSequence == 0);
         expect(afterReset.metalAvailable == beforeReset.metalAvailable);
         expect(afterReset.renderingRequested == beforeReset.renderingRequested);
         expect(afterReset.effectivelyRendering == beforeReset.effectivelyRendering);
@@ -555,6 +778,40 @@ public:
         expectWithinAbsoluteError(defaultedSettings.frequencySpacing, 1.0F, 0.0001F);
         expectWithinAbsoluteError(defaultedSettings.fillOpacity, 0.18F, 0.0001F);
         expect(defaultedSettings.traceColourRgb == 0x55c7e8U);
+
+        beginTest("Spectrogram render settings sanitize and publish one coherent snapshot");
+
+        visualization.setSpectrogramSettings({ detail::SpectrogramRenderPalette::viridis, 1.25F,
+            -144.0F, -6.0F, 30, detail::SpectrogramRenderHistoryMode::overwrite, 120 });
+        const auto spectrogramSettings = visualization.getSpectrogramSettings();
+        expect(spectrogramSettings.palette == detail::SpectrogramRenderPalette::viridis);
+        expectWithinAbsoluteError(spectrogramSettings.colorResponse, 1.25F, 0.0001F);
+        expectWithinAbsoluteError(spectrogramSettings.colorFloorDecibels, -144.0F, 0.001F);
+        expectWithinAbsoluteError(spectrogramSettings.colorCeilingDecibels, -6.0F, 0.001F);
+        expectEquals(spectrogramSettings.historyDurationSeconds, 30);
+        expect(spectrogramSettings.historyMode == detail::SpectrogramRenderHistoryMode::overwrite);
+        expectEquals(spectrogramSettings.requestedSliceRateHz, 120);
+
+        visualization.setSpectrogramSettings(
+            { static_cast<detail::SpectrogramRenderPalette>(255), 9.0F, -36.0F, -24.0F, 999,
+                static_cast<detail::SpectrogramRenderHistoryMode>(255), -99 });
+        const auto boundedSpectrogramSettings = visualization.getSpectrogramSettings();
+        expect(boundedSpectrogramSettings.palette == detail::SpectrogramRenderPalette::blueFire);
+        expectWithinAbsoluteError(boundedSpectrogramSettings.colorResponse, 2.0F, 0.0001F);
+        expectWithinAbsoluteError(boundedSpectrogramSettings.colorFloorDecibels, -48.0F, 0.001F);
+        expectWithinAbsoluteError(boundedSpectrogramSettings.colorCeilingDecibels, -24.0F, 0.001F);
+        expectEquals(boundedSpectrogramSettings.historyDurationSeconds, 60);
+        expect(
+            boundedSpectrogramSettings.historyMode == detail::SpectrogramRenderHistoryMode::scroll);
+        expectEquals(boundedSpectrogramSettings.requestedSliceRateHz, 15);
+
+        visualization.setSpectrogramSettings({ detail::SpectrogramRenderPalette::inferno, notFinite,
+            notFinite, notFinite, 10, detail::SpectrogramRenderHistoryMode::scroll, 60 });
+        const auto defaultedSpectrogramSettings = visualization.getSpectrogramSettings();
+        expect(defaultedSpectrogramSettings.palette == detail::SpectrogramRenderPalette::inferno);
+        expectWithinAbsoluteError(defaultedSpectrogramSettings.colorResponse, 0.0F, 0.0001F);
+        expectWithinAbsoluteError(defaultedSpectrogramSettings.colorFloorDecibels, -120.0F, 0.001F);
+        expectWithinAbsoluteError(defaultedSpectrogramSettings.colorCeilingDecibels, 0.0F, 0.001F);
 
         visualization.setEffectiveActivityCallback({ });
     }

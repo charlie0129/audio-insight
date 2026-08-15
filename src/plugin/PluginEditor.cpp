@@ -45,6 +45,35 @@ float spectrumSlopeDecibelsPerOctave(const SpectrumSlope slope) noexcept
     return 0.0F;
 }
 
+detail::SpectrogramRenderPalette spectrogramRenderPalette(const SpectrogramPalette palette) noexcept
+{
+    switch (palette) {
+    case SpectrogramPalette::blueFire:
+        return detail::SpectrogramRenderPalette::blueFire;
+    case SpectrogramPalette::inferno:
+        return detail::SpectrogramRenderPalette::inferno;
+    case SpectrogramPalette::viridis:
+        return detail::SpectrogramRenderPalette::viridis;
+    case SpectrogramPalette::grayscale:
+        return detail::SpectrogramRenderPalette::grayscale;
+    }
+
+    return detail::SpectrogramRenderPalette::blueFire;
+}
+
+detail::SpectrogramRenderHistoryMode spectrogramRenderHistoryMode(
+    const SpectrogramHistoryMode mode) noexcept
+{
+    switch (mode) {
+    case SpectrogramHistoryMode::scroll:
+        return detail::SpectrogramRenderHistoryMode::scroll;
+    case SpectrogramHistoryMode::overwrite:
+        return detail::SpectrogramRenderHistoryMode::overwrite;
+    }
+
+    return detail::SpectrogramRenderHistoryMode::scroll;
+}
+
 } // namespace
 
 class PluginEditor::AboutOverlay final : public juce::Component {
@@ -222,7 +251,7 @@ PluginEditor::PluginEditor(PluginProcessor& processorToUse, VisualizationDataSou
           processorToUse.getAnalyzerConfiguration(),
           [this](const AnalyzerConfiguration& configuration) {
               processor_.setAnalyzerConfiguration(configuration);
-              updateSpectrumSettings(configuration);
+              updateAnalyzerRenderSettings(configuration);
           },
           [this] { setSettingsVisible(false); }),
       aboutOverlay(std::make_unique<AboutOverlay>([this] { setAboutVisible(false); }))
@@ -304,7 +333,7 @@ PluginEditor::PluginEditor(PluginProcessor& processorToUse, VisualizationDataSou
         = processor_.getParameters().getRawParameterValue(performanceMetricsParameter);
     processor_.addAnalyzerConfigurationListener(this);
 
-    updateSpectrumSettings(processor_.getAnalyzerConfiguration());
+    updateAnalyzerRenderSettings(processor_.getAnalyzerConfiguration());
     synchronizeMetricsRequestedFromParameter();
     updateUtilityPresentation();
     setSize(1200, 800);
@@ -430,7 +459,7 @@ void PluginEditor::timerCallback()
     if (analyzerConfigurationUpdatePending.exchange(false, std::memory_order_acq_rel)) {
         const auto configuration = processor_.getAnalyzerConfiguration();
         settingsPanel.setConfiguration(configuration);
-        updateSpectrumSettings(configuration);
+        updateAnalyzerRenderSettings(configuration);
     }
 }
 
@@ -449,7 +478,7 @@ void PluginEditor::componentVisibilityChanged()
     updateRenderingState();
 }
 
-void PluginEditor::updateSpectrumSettings(const AnalyzerConfiguration& configuration) noexcept
+void PluginEditor::updateAnalyzerRenderSettings(const AnalyzerConfiguration& configuration) noexcept
 {
     const auto sanitized = AnalyzerConfigurationCodec::sanitize(configuration);
     visualization.setSpectrumSettings(SpectrumRenderSettings {
@@ -459,6 +488,15 @@ void PluginEditor::updateSpectrumSettings(const AnalyzerConfiguration& configura
         static_cast<float>(sanitized.sharedAnalysis.frequencySpacing),
         static_cast<float>(sanitized.spectrum.fillOpacity),
         sanitized.spectrum.traceColor.packedRgb(),
+    });
+    visualization.setSpectrogramSettings(SpectrogramRenderSettings {
+        spectrogramRenderPalette(sanitized.spectrogram.palette),
+        static_cast<float>(sanitized.spectrogram.colorResponse),
+        static_cast<float>(sanitized.spectrogram.colorFloorDb),
+        static_cast<float>(sanitized.spectrogram.colorCeilingDb),
+        sanitized.spectrogram.historyDurationSeconds,
+        spectrogramRenderHistoryMode(sanitized.spectrogram.historyMode),
+        sanitized.sharedAnalysis.requestedFftSliceRateHz,
     });
 }
 

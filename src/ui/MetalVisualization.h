@@ -10,10 +10,12 @@
 #include <juce_gui_extra/juce_gui_extra.h>
 
 #include <array>
+#include <atomic>
 #include <cstddef>
 #include <cstdint>
 #include <functional>
 #include <memory>
+#include <optional>
 
 namespace audio_insight {
 namespace detail {
@@ -33,6 +35,144 @@ inline constexpr std::array<float, frequencyAxisTickCandidateCount> frequencyAxi
 inline constexpr std::size_t maximumFrequencyAxisTickCount = frequencyAxisTickCandidateCount + 1;
 inline constexpr std::size_t maximumFrequencyAxisLabelGlyphs = 10;
 inline constexpr std::size_t frequencyAxisLabelStorage = maximumFrequencyAxisLabelGlyphs + 1;
+
+inline constexpr std::size_t maximumSpectrogramHistoryColumnCount = 8'192;
+inline constexpr std::size_t maximumSpectrogramColumnsDrainedPerFrame = 32;
+
+enum class SpectrogramRenderPalette : std::uint8_t {
+    blueFire,
+    inferno,
+    viridis,
+    grayscale,
+};
+
+enum class SpectrogramRenderHistoryMode : std::uint8_t {
+    scroll,
+    overwrite,
+};
+
+struct SpectrogramPaletteColour final {
+    float red = 0.0F;
+    float green = 0.0F;
+    float blue = 0.0F;
+};
+
+struct SpectrogramHistorySignature final {
+    std::uint64_t captureGeneration = 0;
+    std::uint64_t fftGeneration = 0;
+    std::uint64_t mappingGeneration = 0;
+    std::uint64_t resetEpoch = 0;
+    std::uint32_t fftSize = 0;
+    std::uint32_t rowCount = 0;
+    std::uint32_t columnCount = 0;
+    std::uint32_t requestedSliceRateHz = 0;
+    double sampleRate = 0.0;
+};
+
+struct SpectrogramHistoryTransition final {
+    bool clear = false;
+    bool reallocate = false;
+};
+
+struct SpectrogramRingAdvance final {
+    std::uint32_t writeColumn = 0;
+    std::uint64_t gapColumnCount = 0;
+    bool accepted = false;
+    bool discardedPreviousSpan = false;
+};
+
+/** Fixed-capacity logical state for the renderer-owned circular history texture. */
+class SpectrogramHistoryRing final {
+public:
+    void configure(std::uint32_t columnCount) noexcept;
+    void clear() noexcept;
+
+    [[nodiscard]] SpectrogramRingAdvance append(
+        std::uint64_t timelineSlot, std::uint64_t sequence) noexcept;
+    [[nodiscard]] std::optional<std::uint32_t> physicalColumnForScreenColumn(
+        std::uint32_t screenColumn, SpectrogramRenderHistoryMode mode) const noexcept;
+
+    [[nodiscard]] std::uint32_t columnCount() const noexcept
+    {
+        return columnCount_;
+    }
+    [[nodiscard]] std::uint32_t nextWriteColumn() const noexcept
+    {
+        return nextWriteColumn_;
+    }
+    [[nodiscard]] std::uint32_t timelineSpan() const noexcept
+    {
+        return timelineSpan_;
+    }
+    [[nodiscard]] bool isColumnValid(std::uint32_t physicalColumn) const noexcept;
+    [[nodiscard]] const std::array<std::uint8_t, maximumSpectrogramHistoryColumnCount>&
+    validity() const noexcept
+    {
+        return validity_;
+    }
+
+private:
+    void appendGap() noexcept;
+
+    std::array<std::uint8_t, maximumSpectrogramHistoryColumnCount> validity_ { };
+    std::uint32_t columnCount_ = 0;
+    std::uint32_t nextWriteColumn_ = 0;
+    std::uint32_t timelineSpan_ = 0;
+    std::uint64_t lastTimelineSlot_ = 0;
+    std::uint64_t lastSequence_ = 0;
+    bool hasTimeline_ = false;
+};
+
+/** Serializes upload-bearing command buffers without blocking the display callback. */
+class SpectrogramUploadGate final {
+public:
+    [[nodiscard]] bool isUploadInFlight() const noexcept
+    {
+        return uploadInFlight_.load(std::memory_order_acquire);
+    }
+
+    void beginUpload() noexcept
+    {
+        jassert(!uploadInFlight_.load(std::memory_order_relaxed));
+        uploadInFlight_.store(true, std::memory_order_release);
+    }
+
+    void completeUpload(bool succeeded) noexcept
+    {
+        if (!succeeded)
+            uploadFailed_.store(true, std::memory_order_release);
+
+        // The release of the gate follows failure publication. A callback
+        // which observes the open gate with acquire semantics must therefore
+        // also observe and consume that failure before touching ring state.
+        uploadInFlight_.store(false, std::memory_order_release);
+    }
+
+    [[nodiscard]] bool consumeFailure() noexcept
+    {
+        return uploadFailed_.exchange(false, std::memory_order_acq_rel);
+    }
+
+private:
+    std::atomic<bool> uploadInFlight_ { false };
+    std::atomic<bool> uploadFailed_ { false };
+};
+
+[[nodiscard]] std::uint32_t calculateSpectrogramHistoryColumnCount(
+    int historyDurationSeconds, int requestedSliceRateHz) noexcept;
+[[nodiscard]] std::uint64_t calculateSpectrogramTimelineSlot(
+    std::uint64_t capturedFrameEnd, double sampleRate, std::uint32_t requestedSliceRateHz) noexcept;
+[[nodiscard]] SpectrogramHistoryTransition spectrogramHistoryTransition(
+    const std::optional<SpectrogramHistorySignature>& previous,
+    const SpectrogramHistorySignature& next) noexcept;
+[[nodiscard]] float spectrogramPaletteCoordinate(
+    float decibels, float floorDecibels, float ceilingDecibels, float response) noexcept;
+[[nodiscard]] SpectrogramPaletteColour spectrogramPaletteColour(
+    SpectrogramRenderPalette palette, float coordinate) noexcept;
+[[nodiscard]] float spectrogramPerceivedLuminance(const SpectrogramPaletteColour& colour) noexcept;
+/** Converts the top-origin quad coordinate used by Metal vertices to low-to-high row order. */
+[[nodiscard]] float spectrogramFrequencyCoordinate(float topOriginCoordinate) noexcept;
+[[nodiscard]] float spectrogramLogicalPixelWidth(float backingScale) noexcept;
 
 inline constexpr std::array<int, 4> spectrumDecibelTickSteps { 6, 12, 24, 48 };
 inline constexpr float minimumSpectrumDecibelLabelSpacing = 28.0F;
@@ -243,11 +383,12 @@ struct MetalVisualizationGeometryLimits final {
     // Fill, held trace, and live trace each require two vertices per FFT bin;
     // the Spectrum CLEAR target adds one fill quad plus its four border quads.
     static constexpr std::size_t maximumSpectrumVertices = (6 * maximumSpectrumBinCount) + (5 * 6);
+    static constexpr std::size_t maximumSpectrogramVertices = 4 + 6;
     // Eight scale ticks, one five-quad CLEAR target, and four quads (track,
     // RMS, live sample peak, held sample peak) for each of two channels.
     static constexpr std::size_t maximumMeterVertices
         = (peakRmsMajorDecibelTicks.size() + 5 + (2 * 4)) * 6;
-    static constexpr std::size_t maximumFixedTextGlyphs = 114;
+    static constexpr std::size_t maximumFixedTextGlyphs = 95;
     static constexpr std::size_t maximumDecibelLabelGlyphs = 7;
     // CLEAR, two channel labels, two OVER labels, two six-glyph readouts,
     // and every fixed scale label.
@@ -262,7 +403,7 @@ struct MetalVisualizationGeometryLimits final {
         * 6;
     static constexpr std::size_t maximumGeneratedVertices = maximumShellVertices
         + maximumDashboardSplitterVertices + maximumGridVertices + maximumSpectrumVertices
-        + maximumMeterVertices + maximumTextVertices;
+        + maximumSpectrogramVertices + maximumMeterVertices + maximumTextVertices;
 };
 } // namespace detail
 
@@ -307,6 +448,19 @@ struct MetalRenderTelemetry {
     std::uint64_t snapshotReads = 0;
     std::uint64_t framesWithNewSnapshot = 0;
     std::uint64_t lastSpectrumSequence = 0;
+    std::uint64_t spectrogramColumnsRead = 0;
+    std::uint64_t spectrogramColumnsUploaded = 0;
+    std::uint64_t spectrogramColumnsRejected = 0;
+    std::uint64_t spectrogramGapColumns = 0;
+    std::uint64_t spectrogramHistoryClears = 0;
+    std::uint64_t spectrogramTextureReallocations = 0;
+    std::uint64_t spectrogramTextureAllocationFailures = 0;
+    std::uint64_t spectrogramUploadBackpressureDrops = 0;
+    // One command per encoded column copy; completion success is counted
+    // separately by spectrogramColumnsUploaded.
+    std::uint64_t spectrogramUploadCommands = 0;
+    std::uint64_t spectrogramUploadBytes = 0;
+    std::uint64_t spectrogramLastColumnSequence = 0;
 
     std::uint64_t lastCpuEncodeNanoseconds = 0;
     std::uint64_t maximumCpuEncodeNanoseconds = 0;
@@ -344,6 +498,9 @@ struct MetalRenderTelemetry {
     std::uint32_t drawableWidthPixels = 0;
     std::uint32_t drawableHeightPixels = 0;
     std::uint32_t configuredMaximumFramesPerSecond = 0;
+    std::uint32_t spectrogramTextureRows = 0;
+    std::uint32_t spectrogramTextureColumns = 0;
+    std::uint64_t spectrogramTextureBytes = 0;
     double backingScale = 1.0;
 
     bool metalAvailable = false;
@@ -360,6 +517,17 @@ struct SpectrumRenderSettings {
     float frequencySpacing = 1.0F;
     float fillOpacity = 0.18F;
     std::uint32_t traceColourRgb = 0x55c7e8U;
+};
+
+/** Coherently packed presentation and bounded-history settings for Spectrogram. */
+struct SpectrogramRenderSettings {
+    detail::SpectrogramRenderPalette palette = detail::SpectrogramRenderPalette::blueFire;
+    float colorResponse = 0.0F;
+    float colorFloorDecibels = -120.0F;
+    float colorCeilingDecibels = 0.0F;
+    int historyDurationSeconds = 10;
+    detail::SpectrogramRenderHistoryMode historyMode = detail::SpectrogramRenderHistoryMode::scroll;
+    int requestedSliceRateHz = 60;
 };
 
 /**
@@ -401,6 +569,10 @@ public:
     */
     void setSpectrumSettings(SpectrumRenderSettings settings) noexcept;
     [[nodiscard]] SpectrumRenderSettings getSpectrumSettings() const noexcept;
+
+    /** Updates Spectrogram presentation/history settings as one coherent snapshot. */
+    void setSpectrogramSettings(SpectrogramRenderSettings settings) noexcept;
+    [[nodiscard]] SpectrogramRenderSettings getSpectrogramSettings() const noexcept;
 
     /**
         Publishes the four validated dashboard split indices. Invalid input is

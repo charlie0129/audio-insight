@@ -19,6 +19,7 @@
 #include <cmath>
 #include <cstddef>
 #include <cstdint>
+#include <cstring>
 #include <limits>
 #include <memory>
 #include <optional>
@@ -583,10 +584,290 @@ float srgbComponentToLinear(const float component) noexcept
 }
 
 namespace {
+struct PaletteStop final {
+    float coordinate;
+    SpectrogramPaletteColour colour;
+};
+
+template <std::size_t Size>
+SpectrogramPaletteColour interpolatePalette(
+    const std::array<PaletteStop, Size>& stops, const float coordinate) noexcept
+{
+    const auto bounded = std::clamp(std::isfinite(coordinate) ? coordinate : 0.0F, 0.0F, 1.0F);
+    for (std::size_t index = 1; index < stops.size(); ++index) {
+        if (bounded > stops[index].coordinate)
+            continue;
+
+        const auto& lower = stops[index - 1];
+        const auto& upper = stops[index];
+        const auto span = upper.coordinate - lower.coordinate;
+        const auto amount = span > 0.0F ? (bounded - lower.coordinate) / span : 0.0F;
+        return { lower.colour.red + (amount * (upper.colour.red - lower.colour.red)),
+            lower.colour.green + (amount * (upper.colour.green - lower.colour.green)),
+            lower.colour.blue + (amount * (upper.colour.blue - lower.colour.blue)) };
+    }
+
+    return stops.back().colour;
+}
+} // namespace
+
+void SpectrogramHistoryRing::configure(const std::uint32_t columnCount) noexcept
+{
+    const auto bounded = std::min<std::uint32_t>(
+        columnCount, static_cast<std::uint32_t>(maximumSpectrogramHistoryColumnCount));
+    if (bounded == columnCount_)
+        return;
+
+    columnCount_ = bounded;
+    clear();
+}
+
+void SpectrogramHistoryRing::clear() noexcept
+{
+    validity_.fill(0);
+    nextWriteColumn_ = 0;
+    timelineSpan_ = 0;
+    lastTimelineSlot_ = 0;
+    lastSequence_ = 0;
+    hasTimeline_ = false;
+}
+
+void SpectrogramHistoryRing::appendGap() noexcept
+{
+    if (columnCount_ == 0)
+        return;
+
+    validity_[nextWriteColumn_] = 0;
+    nextWriteColumn_ = (nextWriteColumn_ + 1) % columnCount_;
+    timelineSpan_ = std::min(columnCount_, timelineSpan_ + 1);
+}
+
+SpectrogramRingAdvance SpectrogramHistoryRing::append(
+    const std::uint64_t timelineSlot, const std::uint64_t sequence) noexcept
+{
+    SpectrogramRingAdvance result;
+    if (columnCount_ == 0 || timelineSlot == 0 || sequence == 0)
+        return result;
+
+    if (hasTimeline_ && (timelineSlot <= lastTimelineSlot_ || sequence <= lastSequence_))
+        return result;
+
+    auto gapCount = std::uint64_t { 0 };
+    if (hasTimeline_) {
+        const auto timestampGap = timelineSlot - lastTimelineSlot_ - 1;
+        const auto sequenceGap = sequence - lastSequence_ - 1;
+        gapCount = std::max(timestampGap, sequenceGap);
+
+        if (gapCount >= columnCount_) {
+            validity_.fill(0);
+            nextWriteColumn_ = static_cast<std::uint32_t>(
+                (nextWriteColumn_ + (gapCount % columnCount_)) % columnCount_);
+            timelineSpan_ = columnCount_ - 1;
+            result.discardedPreviousSpan = true;
+        } else {
+            for (auto missing = std::uint64_t { 0 }; missing < gapCount; ++missing)
+                appendGap();
+        }
+    }
+
+    result.writeColumn = nextWriteColumn_;
+    result.gapColumnCount = gapCount;
+    result.accepted = true;
+    validity_[nextWriteColumn_] = 1;
+    nextWriteColumn_ = (nextWriteColumn_ + 1) % columnCount_;
+    timelineSpan_ = std::min(columnCount_, timelineSpan_ + 1);
+    lastTimelineSlot_ = timelineSlot;
+    lastSequence_ = sequence;
+    hasTimeline_ = true;
+    return result;
+}
+
+std::optional<std::uint32_t> SpectrogramHistoryRing::physicalColumnForScreenColumn(
+    const std::uint32_t screenColumn, const SpectrogramRenderHistoryMode mode) const noexcept
+{
+    if (columnCount_ == 0 || screenColumn >= columnCount_)
+        return std::nullopt;
+
+    if (mode == SpectrogramRenderHistoryMode::overwrite)
+        return screenColumn;
+
+    const auto emptyColumns = columnCount_ - timelineSpan_;
+    if (screenColumn < emptyColumns)
+        return std::nullopt;
+
+    const auto oldest = (nextWriteColumn_ + columnCount_ - timelineSpan_) % columnCount_;
+    return (oldest + (screenColumn - emptyColumns)) % columnCount_;
+}
+
+bool SpectrogramHistoryRing::isColumnValid(const std::uint32_t physicalColumn) const noexcept
+{
+    return physicalColumn < columnCount_ && validity_[physicalColumn] != 0;
+}
+
+std::uint32_t calculateSpectrogramHistoryColumnCount(
+    const int historyDurationSeconds, const int requestedSliceRateHz) noexcept
+{
+    constexpr std::array supportedDurations { 2, 5, 10, 20, 30, 60 };
+    constexpr std::array supportedRates { 15, 30, 60, 120 };
+    if (std::find(supportedDurations.begin(), supportedDurations.end(), historyDurationSeconds)
+            == supportedDurations.end()
+        || std::find(supportedRates.begin(), supportedRates.end(), requestedSliceRateHz)
+            == supportedRates.end()) {
+        return 0;
+    }
+
+    const auto requested = static_cast<std::uint64_t>(historyDurationSeconds)
+        * static_cast<std::uint64_t>(requestedSliceRateHz);
+    return static_cast<std::uint32_t>(
+        std::min<std::uint64_t>(requested, maximumSpectrogramHistoryColumnCount));
+}
+
+std::uint64_t calculateSpectrogramTimelineSlot(const std::uint64_t capturedFrameEnd,
+    const double sampleRate, const std::uint32_t requestedSliceRateHz) noexcept
+{
+    if (capturedFrameEnd == 0 || !std::isfinite(sampleRate) || sampleRate <= 0.0
+        || requestedSliceRateHz == 0) {
+        return 0;
+    }
+
+    const auto slot = (static_cast<long double>(capturedFrameEnd) * requestedSliceRateHz)
+        / static_cast<long double>(sampleRate);
+    if (!std::isfinite(slot) || slot <= 0.0L)
+        return 0;
+
+    const auto bounded = std::min<long double>(
+        slot, static_cast<long double>(std::numeric_limits<std::uint64_t>::max()));
+    return std::max<std::uint64_t>(1, static_cast<std::uint64_t>(std::llround(bounded)));
+}
+
+SpectrogramHistoryTransition spectrogramHistoryTransition(
+    const std::optional<SpectrogramHistorySignature>& previous,
+    const SpectrogramHistorySignature& next) noexcept
+{
+    const auto nextIsValid = next.captureGeneration != 0 && next.fftGeneration != 0
+        && next.mappingGeneration != 0 && next.resetEpoch != 0 && next.fftSize != 0
+        && next.rowCount != 0 && next.rowCount <= maximumSpectrogramRowCount
+        && next.columnCount != 0 && next.columnCount <= maximumSpectrogramHistoryColumnCount
+        && next.requestedSliceRateHz != 0 && std::isfinite(next.sampleRate)
+        && next.sampleRate > 0.0;
+    if (!nextIsValid)
+        return { };
+
+    if (!previous.has_value())
+        return { true, true };
+
+    const auto dimensionsChanged
+        = previous->rowCount != next.rowCount || previous->columnCount != next.columnCount;
+    const auto sampleRateScale
+        = std::max({ 1.0, std::abs(previous->sampleRate), std::abs(next.sampleRate) });
+    const auto sampleRateChanged = std::abs(previous->sampleRate - next.sampleRate)
+        > std::numeric_limits<double>::epsilon() * sampleRateScale * 4.0;
+    const auto historyIsIncompatible = previous->captureGeneration != next.captureGeneration
+        || previous->fftGeneration != next.fftGeneration
+        || previous->mappingGeneration != next.mappingGeneration
+        || previous->resetEpoch != next.resetEpoch || previous->fftSize != next.fftSize
+        || previous->requestedSliceRateHz != next.requestedSliceRateHz || sampleRateChanged
+        || dimensionsChanged;
+    return { historyIsIncompatible, dimensionsChanged };
+}
+
+float spectrogramPaletteCoordinate(const float decibels, const float floorDecibels,
+    const float ceilingDecibels, const float response) noexcept
+{
+    if (!std::isfinite(decibels) || !std::isfinite(floorDecibels) || !std::isfinite(ceilingDecibels)
+        || ceilingDecibels <= floorDecibels) {
+        return 0.0F;
+    }
+
+    const auto value
+        = std::clamp((decibels - floorDecibels) / (ceilingDecibels - floorDecibels), 0.0F, 1.0F);
+    const auto boundedResponse = std::clamp(std::isfinite(response) ? response : 0.0F, -2.0F, 2.0F);
+    return std::pow(value, std::exp2(boundedResponse));
+}
+
+SpectrogramPaletteColour spectrogramPaletteColour(
+    const SpectrogramRenderPalette palette, const float coordinate) noexcept
+{
+    constexpr std::array blueFire {
+        PaletteStop { 0.0F, { 0.0F, 0.0F, 0.0F } },
+        PaletteStop { 0.10F, { 0.008F, 0.016F, 0.070F } },
+        PaletteStop { 0.28F, { 0.016F, 0.080F, 0.310F } },
+        PaletteStop { 0.48F, { 0.020F, 0.330F, 0.760F } },
+        PaletteStop { 0.58F, { 0.650F, 0.360F, 0.760F } },
+        PaletteStop { 0.68F, { 0.980F, 0.500F, 0.080F } },
+        PaletteStop { 0.84F, { 1.000F, 0.690F, 0.170F } },
+        PaletteStop { 1.0F, { 1.000F, 0.985F, 0.920F } },
+    };
+    constexpr std::array inferno {
+        PaletteStop { 0.0F, { 0.0F, 0.0F, 0.0F } },
+        PaletteStop { 0.13F, { 0.106F, 0.047F, 0.255F } },
+        PaletteStop { 0.31F, { 0.365F, 0.071F, 0.431F } },
+        PaletteStop { 0.49F, { 0.665F, 0.139F, 0.365F } },
+        PaletteStop { 0.67F, { 0.902F, 0.318F, 0.169F } },
+        PaletteStop { 0.84F, { 0.988F, 0.645F, 0.039F } },
+        PaletteStop { 1.0F, { 0.988F, 1.000F, 0.644F } },
+    };
+    constexpr std::array viridis {
+        PaletteStop { 0.0F, { 0.0F, 0.0F, 0.0F } },
+        PaletteStop { 0.13F, { 0.267F, 0.005F, 0.329F } },
+        PaletteStop { 0.31F, { 0.231F, 0.322F, 0.545F } },
+        PaletteStop { 0.49F, { 0.129F, 0.569F, 0.549F } },
+        PaletteStop { 0.67F, { 0.369F, 0.789F, 0.383F } },
+        PaletteStop { 0.84F, { 0.678F, 0.864F, 0.190F } },
+        PaletteStop { 1.0F, { 0.993F, 0.906F, 0.144F } },
+    };
+    constexpr std::array grayscale {
+        PaletteStop { 0.0F, { 0.0F, 0.0F, 0.0F } },
+        PaletteStop { 1.0F, { 1.0F, 1.0F, 1.0F } },
+    };
+
+    switch (palette) {
+    case SpectrogramRenderPalette::inferno:
+        return interpolatePalette(inferno, coordinate);
+    case SpectrogramRenderPalette::viridis:
+        return interpolatePalette(viridis, coordinate);
+    case SpectrogramRenderPalette::grayscale:
+        return interpolatePalette(grayscale, coordinate);
+    case SpectrogramRenderPalette::blueFire:
+        return interpolatePalette(blueFire, coordinate);
+    }
+
+    return { };
+}
+
+float spectrogramPerceivedLuminance(const SpectrogramPaletteColour& colour) noexcept
+{
+    return (0.2126F * srgbComponentToLinear(colour.red))
+        + (0.7152F * srgbComponentToLinear(colour.green))
+        + (0.0722F * srgbComponentToLinear(colour.blue));
+}
+
+float spectrogramFrequencyCoordinate(const float topOriginCoordinate) noexcept
+{
+    return 1.0F
+        - std::clamp(std::isfinite(topOriginCoordinate) ? topOriginCoordinate : 1.0F, 0.0F, 1.0F);
+}
+
+float spectrogramLogicalPixelWidth(const float backingScale) noexcept
+{
+    return 1.0F / (std::isfinite(backingScale) && backingScale > 0.0F ? backingScale : 1.0F);
+}
+
+namespace {
 using Clock = std::chrono::steady_clock;
 
 constexpr std::size_t renderBufferCount = 3;
 constexpr std::size_t maximumVertexCount = MetalVisualizationGeometryLimits::vertexCapacity;
+constexpr std::size_t metalTextureBufferAlignment = 256;
+constexpr std::size_t spectrogramHalfRowBytes = maximumSpectrogramRowCount * sizeof(_Float16);
+constexpr std::size_t spectrogramStagingRowStride
+    = ((spectrogramHalfRowBytes + metalTextureBufferAlignment - 1) / metalTextureBufferAlignment)
+    * metalTextureBufferAlignment;
+constexpr std::size_t spectrogramStagingBufferBytes
+    = maximumSpectrogramColumnsDrainedPerFrame * spectrogramStagingRowStride;
+constexpr std::size_t spectrogramUniformBufferBytes = 256;
+static_assert(sizeof(_Float16) == 2);
+static_assert(spectrogramStagingRowStride % metalTextureBufferAlignment == 0);
 constexpr std::size_t printableAsciiFirst = 32;
 constexpr std::size_t printableAsciiLast = 126;
 constexpr std::size_t printableAsciiCount = printableAsciiLast - printableAsciiFirst + 1;
@@ -631,7 +912,7 @@ constexpr std::size_t fixedTextGlyphCount = [] {
     for (const auto titleIndex : panelTitleTextRunIndices)
         glyphCount += cachedFixedTextStrings[titleIndex].size();
 
-    constexpr auto placeholderPanelCount = dashboardPanelCount - 2;
+    constexpr auto placeholderPanelCount = dashboardPanelCount - 3;
     return glyphCount
         + (placeholderPanelCount * cachedFixedTextStrings[placeholderTextRunIndex].size());
 }();
@@ -863,6 +1144,17 @@ struct AtomicRenderTelemetry {
     std::atomic<std::uint64_t> snapshotReads { 0 };
     std::atomic<std::uint64_t> framesWithNewSnapshot { 0 };
     std::atomic<std::uint64_t> lastSpectrumSequence { 0 };
+    std::atomic<std::uint64_t> spectrogramColumnsRead { 0 };
+    std::atomic<std::uint64_t> spectrogramColumnsUploaded { 0 };
+    std::atomic<std::uint64_t> spectrogramColumnsRejected { 0 };
+    std::atomic<std::uint64_t> spectrogramGapColumns { 0 };
+    std::atomic<std::uint64_t> spectrogramHistoryClears { 0 };
+    std::atomic<std::uint64_t> spectrogramTextureReallocations { 0 };
+    std::atomic<std::uint64_t> spectrogramTextureAllocationFailures { 0 };
+    std::atomic<std::uint64_t> spectrogramUploadBackpressureDrops { 0 };
+    std::atomic<std::uint64_t> spectrogramUploadCommands { 0 };
+    std::atomic<std::uint64_t> spectrogramUploadBytes { 0 };
+    std::atomic<std::uint64_t> spectrogramLastColumnSequence { 0 };
 
     std::atomic<std::uint64_t> lastCpuEncodeNanoseconds { 0 };
     std::atomic<std::uint64_t> maximumCpuEncodeNanoseconds { 0 };
@@ -896,6 +1188,9 @@ struct AtomicRenderTelemetry {
     std::atomic<std::uint32_t> drawableWidthPixels { 0 };
     std::atomic<std::uint32_t> drawableHeightPixels { 0 };
     std::atomic<std::uint32_t> configuredMaximumFramesPerSecond { 0 };
+    std::atomic<std::uint32_t> spectrogramTextureRows { 0 };
+    std::atomic<std::uint32_t> spectrogramTextureColumns { 0 };
+    std::atomic<std::uint64_t> spectrogramTextureBytes { 0 };
     std::atomic<double> backingScale { 1.0 };
 
     std::atomic<bool> metalAvailable { false };
@@ -970,15 +1265,22 @@ struct RenderBufferSlot {
     // in-flight admission, allowing late callbacks to release only their own.
     std::atomic<std::uint64_t> admissionState { 0 };
     id<MTLBuffer> vertexBuffer = nil;
+    id<MTLBuffer> spectrogramStagingBuffer = nil;
+    id<MTLBuffer> spectrogramValidityBuffer = nil;
+    id<MTLBuffer> spectrogramUniformBuffer = nil;
 
     ~RenderBufferSlot()
     {
+        [spectrogramUniformBuffer release];
+        [spectrogramValidityBuffer release];
+        [spectrogramStagingBuffer release];
         [vertexBuffer release];
     }
 };
 
 struct SharedRenderState {
     std::array<RenderBufferSlot, renderBufferCount> slots;
+    SpectrogramUploadGate spectrogramUploadGate;
 };
 
 struct VertexRange {
@@ -993,10 +1295,37 @@ struct VertexBatches {
     VertexRange spectrumHeld;
     VertexRange spectrum;
     VertexRange spectrumControls;
+    VertexRange spectrogramHistory;
     VertexRange spectrogramAxis;
     VertexRange peakRms;
     VertexRange dashboardSplitters;
     std::array<VertexRange, dashboardPanelCount> text;
+};
+
+struct SpectrogramShaderUniforms final {
+    std::uint32_t historyColumnCount = 0;
+    std::uint32_t frequencyRowCount = 0;
+    std::uint32_t nextWriteColumn = 0;
+    std::uint32_t timelineSpan = 0;
+    std::uint32_t historyMode = 0;
+    std::uint32_t palette = 0;
+    float colorFloorDecibels = -120.0F;
+    float colorCeilingDecibels = 0.0F;
+    float colorResponse = 0.0F;
+    std::uint32_t reserved = 0;
+};
+
+static_assert(sizeof(SpectrogramShaderUniforms) <= spectrogramUniformBufferBytes);
+
+struct SpectrogramUpload final {
+    NSUInteger sourceOffset = 0;
+    NSUInteger destinationRow = 0;
+    NSUInteger rowCount = 0;
+};
+
+struct PreparedSpectrogramUploads final {
+    std::array<SpectrogramUpload, maximumSpectrogramColumnsDrainedPerFrame> uploads { };
+    std::size_t count = 0;
 };
 
 struct RenderRect {
@@ -1090,6 +1419,95 @@ SpectrumRenderSettings unpackSpectrumSettings(std::uint64_t packed) noexcept
         minimumAllowedSpectrumCeiling + static_cast<float>(ceilingValue),
         supportedSlopes[slopeValue], static_cast<float>(frequencySpacingValue) / 32'767.0F,
         static_cast<float>(fillOpacityValue) / 1'000.0F, traceColourRgb };
+}
+
+SpectrogramRenderSettings sanitiseSpectrogramSettings(SpectrogramRenderSettings settings) noexcept
+{
+    if (!std::isfinite(settings.colorResponse))
+        settings.colorResponse = SpectrogramRenderSettings { }.colorResponse;
+    if (!std::isfinite(settings.colorFloorDecibels))
+        settings.colorFloorDecibels = SpectrogramRenderSettings { }.colorFloorDecibels;
+    if (!std::isfinite(settings.colorCeilingDecibels))
+        settings.colorCeilingDecibels = SpectrogramRenderSettings { }.colorCeilingDecibels;
+
+    settings.colorResponse = std::clamp(settings.colorResponse, -2.0F, 2.0F);
+    settings.colorFloorDecibels = std::clamp(settings.colorFloorDecibels, -180.0F, -36.0F);
+    settings.colorCeilingDecibels = std::clamp(settings.colorCeilingDecibels, -24.0F, 12.0F);
+    if (settings.colorCeilingDecibels - settings.colorFloorDecibels < 24.0F)
+        settings.colorFloorDecibels = settings.colorCeilingDecibels - 24.0F;
+
+    constexpr std::array supportedDurations { 2, 5, 10, 20, 30, 60 };
+    settings.historyDurationSeconds = *std::min_element(supportedDurations.begin(),
+        supportedDurations.end(), [&](const auto left, const auto right) {
+            return std::abs(left - settings.historyDurationSeconds)
+                < std::abs(right - settings.historyDurationSeconds);
+        });
+    constexpr std::array supportedRates { 15, 30, 60, 120 };
+    settings.requestedSliceRateHz = *std::min_element(
+        supportedRates.begin(), supportedRates.end(), [&](const auto left, const auto right) {
+            return std::abs(left - settings.requestedSliceRateHz)
+                < std::abs(right - settings.requestedSliceRateHz);
+        });
+
+    switch (settings.palette) {
+    case SpectrogramRenderPalette::blueFire:
+    case SpectrogramRenderPalette::inferno:
+    case SpectrogramRenderPalette::viridis:
+    case SpectrogramRenderPalette::grayscale:
+        break;
+    default:
+        settings.palette = SpectrogramRenderPalette::blueFire;
+        break;
+    }
+
+    switch (settings.historyMode) {
+    case SpectrogramRenderHistoryMode::scroll:
+    case SpectrogramRenderHistoryMode::overwrite:
+        break;
+    default:
+        settings.historyMode = SpectrogramRenderHistoryMode::scroll;
+        break;
+    }
+
+    return settings;
+}
+
+std::uint32_t packSpectrogramSettings(SpectrogramRenderSettings settings) noexcept
+{
+    settings = sanitiseSpectrogramSettings(settings);
+    constexpr std::array supportedDurations { 2, 5, 10, 20, 30, 60 };
+    constexpr std::array supportedRates { 15, 30, 60, 120 };
+    const auto palette = static_cast<std::uint32_t>(settings.palette);
+    const auto mode = static_cast<std::uint32_t>(settings.historyMode);
+    const auto duration = static_cast<std::uint32_t>(std::distance(supportedDurations.begin(),
+        std::find(supportedDurations.begin(), supportedDurations.end(),
+            settings.historyDurationSeconds)));
+    const auto rate = static_cast<std::uint32_t>(std::distance(supportedRates.begin(),
+        std::find(supportedRates.begin(), supportedRates.end(), settings.requestedSliceRateHz)));
+    const auto floor
+        = static_cast<std::uint32_t>(std::lround(settings.colorFloorDecibels + 180.0F));
+    const auto ceiling
+        = static_cast<std::uint32_t>(std::lround(settings.colorCeilingDecibels + 24.0F));
+    const auto response
+        = static_cast<std::uint32_t>(std::lround((settings.colorResponse + 2.0F) * 100.0F));
+    return palette | (mode << 2U) | (duration << 3U) | (rate << 6U) | (floor << 8U)
+        | (ceiling << 16U) | (response << 22U);
+}
+
+SpectrogramRenderSettings unpackSpectrogramSettings(const std::uint32_t packed) noexcept
+{
+    constexpr std::array supportedDurations { 2, 5, 10, 20, 30, 60 };
+    constexpr std::array supportedRates { 15, 30, 60, 120 };
+    const auto palette = static_cast<SpectrogramRenderPalette>(packed & 0x03U);
+    const auto mode = static_cast<SpectrogramRenderHistoryMode>((packed >> 2U) & 0x01U);
+    const auto duration = static_cast<std::size_t>((packed >> 3U) & 0x07U);
+    const auto rate = static_cast<std::size_t>((packed >> 6U) & 0x03U);
+    const auto floor = static_cast<float>((packed >> 8U) & 0xffU) - 180.0F;
+    const auto ceiling = static_cast<float>((packed >> 16U) & 0x3fU) - 24.0F;
+    const auto response = (static_cast<float>((packed >> 22U) & 0x01ffU) / 100.0F) - 2.0F;
+    return sanitiseSpectrogramSettings({ palette, response, floor, ceiling,
+        supportedDurations[std::min(duration, supportedDurations.size() - 1)], mode,
+        supportedRates[std::min(rate, supportedRates.size() - 1)] });
 }
 
 std::uint32_t packDashboardLayoutSplits(DashboardLayoutSplits splits) noexcept
@@ -1342,6 +1760,20 @@ struct RasterVertex
     float2 textureCoordinate;
 };
 
+struct SpectrogramUniforms
+{
+    uint historyColumnCount;
+    uint frequencyRowCount;
+    uint nextWriteColumn;
+    uint timelineSpan;
+    uint historyMode;
+    uint palette;
+    float colorFloorDecibels;
+    float colorCeilingDecibels;
+    float colorResponse;
+    uint reserved;
+};
+
 vertex RasterVertex audioInsightVertex(const device Vertex* vertices [[buffer(0)]],
                                        uint vertexId [[vertex_id]])
 {
@@ -1364,6 +1796,58 @@ fragment half4 audioInsightTextFragment(RasterVertex input [[stage_in]],
     const float coverage = glyphAtlas.sample(glyphSampler, input.textureCoordinate).r;
     return half4(half3(input.colour.rgb), half(input.colour.a * coverage));
 }
+
+fragment half4 audioInsightSpectrogramFragment(
+    RasterVertex input [[stage_in]],
+    constant SpectrogramUniforms& uniforms [[buffer(0)]],
+    const device uchar* validColumns [[buffer(1)]],
+    texture2d<float, access::read> history [[texture(0)]],
+    texture2d<float> palettes [[texture(1)]],
+    sampler paletteSampler [[sampler(0)]])
+{
+    if (uniforms.historyColumnCount == 0 || uniforms.frequencyRowCount == 0)
+        return half4(0.0h, 0.0h, 0.0h, 1.0h);
+
+    const float boundedX = clamp(input.textureCoordinate.x, 0.0f, 1.0f);
+    const uint screenColumn = min(uint(boundedX * float(uniforms.historyColumnCount)),
+                                  uniforms.historyColumnCount - 1);
+    uint physicalColumn = screenColumn;
+
+    if (uniforms.historyMode == 0) {
+        const uint span = min(uniforms.timelineSpan, uniforms.historyColumnCount);
+        const uint emptyColumns = uniforms.historyColumnCount - span;
+        if (screenColumn < emptyColumns)
+            return half4(0.0h, 0.0h, 0.0h, 1.0h);
+
+        const uint oldest = (uniforms.nextWriteColumn + uniforms.historyColumnCount - span)
+            % uniforms.historyColumnCount;
+        physicalColumn = (oldest + screenColumn - emptyColumns) % uniforms.historyColumnCount;
+    }
+
+    if (validColumns[physicalColumn] == 0)
+        return half4(0.0h, 0.0h, 0.0h, 1.0h);
+
+    // Quad texture coordinates use the conventional top-origin direction.
+    // Stored rows increase from low to high frequency, so reverse that axis.
+    const float frequencyCoordinate
+        = 1.0f - clamp(input.textureCoordinate.y, 0.0f, 1.0f);
+    const float rowPosition
+        = frequencyCoordinate * float(max(uniforms.frequencyRowCount, 1u) - 1u);
+    const uint lowerRow = min(uint(floor(rowPosition)), uniforms.frequencyRowCount - 1);
+    const uint upperRow = min(lowerRow + 1, uniforms.frequencyRowCount - 1);
+    const float rowFraction = rowPosition - float(lowerRow);
+    const float lowerDecibels = history.read(uint2(lowerRow, physicalColumn)).r;
+    const float upperDecibels = history.read(uint2(upperRow, physicalColumn)).r;
+    const float decibels = mix(lowerDecibels, upperDecibels, rowFraction);
+    const float range = max(0.0001f,
+        uniforms.colorCeilingDecibels - uniforms.colorFloorDecibels);
+    const float value = clamp((decibels - uniforms.colorFloorDecibels) / range, 0.0f, 1.0f);
+    const float paletteCoordinate = pow(value, exp2(uniforms.colorResponse));
+    const float paletteX = (paletteCoordinate * 255.0f + 0.5f) / 256.0f;
+    const float paletteY = (float(min(uniforms.palette, 3u)) + 0.5f) / 4.0f;
+    const float3 colour = palettes.sample(paletteSampler, float2(paletteX, paletteY)).rgb;
+    return half4(half3(colour), 1.0h);
+}
 )metal";
 } // namespace
 
@@ -1376,6 +1860,7 @@ public:
         std::atomic_store_explicit(
             &publishedTelemetry, callbackTelemetry, std::memory_order_release);
         setSpectrumSettings({ });
+        setSpectrogramSettings({ });
         setDashboardLayoutSplits(DashboardLayout::defaultSplits);
         initialiseMetal();
         callbackTelemetry->metalAvailable.store(metalReady, std::memory_order_relaxed);
@@ -1384,6 +1869,10 @@ public:
     ~MetalRenderBackend()
     {
         shutdown();
+        [spectrogramHistoryTexture release];
+        [spectrogramPaletteTexture release];
+        [spectrogramPaletteSamplerState release];
+        [spectrogramPipelineState release];
         [glyphAtlasTexture release];
         [glyphSamplerState release];
         [textPipelineState release];
@@ -1499,12 +1988,37 @@ public:
 
     void setSpectrumSettings(SpectrumRenderSettings settings) noexcept
     {
+        // The ordered analysis stream owns Spectrogram mapping invalidation.
+        // A renderer-side clear here can arrive after the new-generation seed
+        // and erase it without another column to restore the history.
         packedSpectrumSettings.store(packSpectrumSettings(settings), std::memory_order_release);
     }
 
     [[nodiscard]] SpectrumRenderSettings getSpectrumSettings() const noexcept
     {
         return unpackSpectrumSettings(packedSpectrumSettings.load(std::memory_order_acquire));
+    }
+
+    void setSpectrogramSettings(SpectrogramRenderSettings settings) noexcept
+    {
+        const auto packed = packSpectrogramSettings(settings);
+        const auto previous = packedSpectrogramSettings.exchange(packed, std::memory_order_acq_rel);
+        if (previous == packed)
+            return;
+
+        const auto before = unpackSpectrogramSettings(previous);
+        const auto after = unpackSpectrogramSettings(packed);
+        // FFT slice-rate invalidation is ordered with its reset/seed records in
+        // the analysis stream. History duration is renderer-owned and is the
+        // only setting that needs an independent deferred clear here.
+        if (before.historyDurationSeconds != after.historyDurationSeconds) {
+            spectrogramConfigurationClearPending.store(true, std::memory_order_release);
+        }
+    }
+
+    [[nodiscard]] SpectrogramRenderSettings getSpectrogramSettings() const noexcept
+    {
+        return unpackSpectrogramSettings(packedSpectrogramSettings.load(std::memory_order_acquire));
     }
 
     void setDashboardLayoutSplits(DashboardLayoutSplits splits) noexcept
@@ -1792,6 +2306,28 @@ public:
             = telemetry->framesWithNewSnapshot.load(std::memory_order_relaxed);
         result.lastSpectrumSequence
             = telemetry->lastSpectrumSequence.load(std::memory_order_relaxed);
+        result.spectrogramColumnsRead
+            = telemetry->spectrogramColumnsRead.load(std::memory_order_relaxed);
+        result.spectrogramColumnsUploaded
+            = telemetry->spectrogramColumnsUploaded.load(std::memory_order_relaxed);
+        result.spectrogramColumnsRejected
+            = telemetry->spectrogramColumnsRejected.load(std::memory_order_relaxed);
+        result.spectrogramGapColumns
+            = telemetry->spectrogramGapColumns.load(std::memory_order_relaxed);
+        result.spectrogramHistoryClears
+            = telemetry->spectrogramHistoryClears.load(std::memory_order_relaxed);
+        result.spectrogramTextureReallocations
+            = telemetry->spectrogramTextureReallocations.load(std::memory_order_relaxed);
+        result.spectrogramTextureAllocationFailures
+            = telemetry->spectrogramTextureAllocationFailures.load(std::memory_order_relaxed);
+        result.spectrogramUploadBackpressureDrops
+            = telemetry->spectrogramUploadBackpressureDrops.load(std::memory_order_relaxed);
+        result.spectrogramUploadCommands
+            = telemetry->spectrogramUploadCommands.load(std::memory_order_relaxed);
+        result.spectrogramUploadBytes
+            = telemetry->spectrogramUploadBytes.load(std::memory_order_relaxed);
+        result.spectrogramLastColumnSequence
+            = telemetry->spectrogramLastColumnSequence.load(std::memory_order_relaxed);
         result.lastCpuEncodeNanoseconds
             = telemetry->lastCpuEncodeNanoseconds.load(std::memory_order_relaxed);
         result.maximumCpuEncodeNanoseconds
@@ -1821,6 +2357,12 @@ public:
             = telemetry->drawableHeightPixels.load(std::memory_order_relaxed);
         result.configuredMaximumFramesPerSecond
             = telemetry->configuredMaximumFramesPerSecond.load(std::memory_order_relaxed);
+        result.spectrogramTextureRows
+            = telemetry->spectrogramTextureRows.load(std::memory_order_relaxed);
+        result.spectrogramTextureColumns
+            = telemetry->spectrogramTextureColumns.load(std::memory_order_relaxed);
+        result.spectrogramTextureBytes
+            = telemetry->spectrogramTextureBytes.load(std::memory_order_relaxed);
         result.backingScale = telemetry->backingScale.load(std::memory_order_relaxed);
         result.metalAvailable = telemetry->metalAvailable.load(std::memory_order_relaxed);
         result.renderingRequested = telemetry->renderingRequested.load(std::memory_order_relaxed);
@@ -1957,6 +2499,16 @@ public:
         const auto presentationSequence = recordDisplayLinkCallback(
             *telemetry, callbackHostTime, targetTimestamp, targetPresentationTimestamp);
 
+        // CPU ring validity becomes speculative as soon as a column is staged.
+        // Do not drain, mutate, or render that state from another callback until
+        // the upload-bearing command buffer has completed successfully or
+        // published its failure for the next callback to consume.
+        if (sharedState->spectrogramUploadGate.isUploadInFlight()) {
+            telemetry->spectrogramUploadBackpressureDrops.fetch_add(1, std::memory_order_relaxed);
+            telemetry->skippedPresentations.fetch_add(1, std::memory_order_relaxed);
+            return;
+        }
+
         const auto admission = acquireRenderBuffer();
 
         if (admission.index >= renderBufferCount) {
@@ -2017,6 +2569,9 @@ public:
         }
 
         const auto spectrumSettings = getSpectrumSettings();
+        const auto spectrogramSettings = getSpectrogramSettings();
+        const auto preparedSpectrogramUploads
+            = prepareSpectrogramUploads(slot, spectrogramSettings, *telemetry);
         updateInterpolatedDisplayValues(callbackTime);
 
         const auto boundsSize = view.bounds.size;
@@ -2026,8 +2581,8 @@ public:
             getDashboardLayoutSplits());
 
         auto* vertices = static_cast<MetalVertex*>(slot.vertexBuffer.contents);
-        const auto batches
-            = populateVertices(vertices, boundsSize, dashboardLayout, spectrumSettings);
+        const auto batches = populateVertices(
+            vertices, boundsSize, dashboardLayout, spectrumSettings, spectrogramSettings);
 
         auto* descriptor = [MTLRenderPassDescriptor renderPassDescriptor];
         auto* colourAttachment = descriptor.colorAttachments[0];
@@ -2039,16 +2594,27 @@ public:
         id<MTLCommandBuffer> commandBuffer = [commandQueue commandBuffer];
 
         if (commandBuffer == nil) {
+            if (preparedSpectrogramUploads.count != 0)
+                clearSpectrogramHistory(telemetry.get());
             recordSkippedPresentation(submission, telemetry);
             releaseRenderBuffer(sharedState, admission);
             telemetry->gpuBackpressureDrops.fetch_add(1, std::memory_order_relaxed);
             return;
         }
 
+        const auto spectrogramUploadsEncoded
+            = encodeSpectrogramUploads(commandBuffer, slot, preparedSpectrogramUploads, *telemetry);
+        if (!spectrogramUploadsEncoded) {
+            clearSpectrogramHistory(telemetry.get());
+            writeSpectrogramGpuState(slot, spectrogramSettings);
+        }
+
         id<MTLRenderCommandEncoder> encoder =
             [commandBuffer renderCommandEncoderWithDescriptor:descriptor];
 
         if (encoder == nil) {
+            if (preparedSpectrogramUploads.count != 0)
+                clearSpectrogramHistory(telemetry.get());
             recordSkippedPresentation(submission, telemetry);
             releaseRenderBuffer(sharedState, admission);
             telemetry->drawableUnavailableDrops.fetch_add(1, std::memory_order_relaxed);
@@ -2100,12 +2666,29 @@ public:
             = makeScissorRect(dashboardLayout[DashboardPanel::spectrogram], boundsSize,
                 drawable.texture.width, drawable.texture.height);
 
-        if (spectrogramScissor.width != 0 && spectrogramScissor.height != 0
-            && batches.spectrogramAxis.count != 0) {
+        if (spectrogramScissor.width != 0 && spectrogramScissor.height != 0) {
             [encoder setScissorRect:spectrogramScissor];
-            [encoder drawPrimitives:MTLPrimitiveTypeTriangle
-                        vertexStart:batches.spectrogramAxis.start
-                        vertexCount:batches.spectrogramAxis.count];
+
+            if (batches.spectrogramHistory.count >= 4 && spectrogramPipelineState != nil
+                && spectrogramHistoryTexture != nil && spectrogramPaletteTexture != nil
+                && spectrogramPaletteSamplerState != nil) {
+                [encoder setRenderPipelineState:spectrogramPipelineState];
+                [encoder setFragmentBuffer:slot.spectrogramUniformBuffer offset:0 atIndex:0];
+                [encoder setFragmentBuffer:slot.spectrogramValidityBuffer offset:0 atIndex:1];
+                [encoder setFragmentTexture:spectrogramHistoryTexture atIndex:0];
+                [encoder setFragmentTexture:spectrogramPaletteTexture atIndex:1];
+                [encoder setFragmentSamplerState:spectrogramPaletteSamplerState atIndex:0];
+                [encoder drawPrimitives:MTLPrimitiveTypeTriangleStrip
+                            vertexStart:batches.spectrogramHistory.start
+                            vertexCount:batches.spectrogramHistory.count];
+                [encoder setRenderPipelineState:pipelineState];
+            }
+
+            if (batches.spectrogramAxis.count != 0) {
+                [encoder drawPrimitives:MTLPrimitiveTypeTriangle
+                            vertexStart:batches.spectrogramAxis.start
+                            vertexCount:batches.spectrogramAxis.count];
+            }
         }
 
         const auto meterScissor = makeScissorRect(dashboardLayout[DashboardPanel::peakRms],
@@ -2160,7 +2743,14 @@ public:
 
         auto completionState = sharedState;
         auto completionTelemetry = telemetry;
+        const auto commandContainsSpectrogramUploads
+            = spectrogramUploadsEncoded && preparedSpectrogramUploads.count != 0;
+        const auto commandSpectrogramUploadCount = preparedSpectrogramUploads.count;
         [commandBuffer addCompletedHandler:^(id<MTLCommandBuffer> completedBuffer) {
+            const auto commandSucceeded = completedBuffer.status != MTLCommandBufferStatusError;
+            if (commandContainsSpectrogramUploads)
+                completionState->spectrogramUploadGate.completeUpload(commandSucceeded);
+
             // The GPU has finished reading this submission's shared vertex
             // buffer. Presentation may be delayed by several refresh periods,
             // so it must not retain renderer admission.
@@ -2168,7 +2758,6 @@ public:
 
             const auto gpuStart = completedBuffer.GPUStartTime;
             const auto gpuEnd = completedBuffer.GPUEndTime;
-            const auto commandSucceeded = completedBuffer.status != MTLCommandBufferStatusError;
             const auto hasGpuTiming = commandSucceeded && std::isfinite(gpuStart)
                 && std::isfinite(gpuEnd) && gpuEnd >= gpuStart && gpuStart > 0.0;
             FrameLatencySample latencySample;
@@ -2182,6 +2771,11 @@ public:
                 completionTelemetry->commandBufferFailures.fetch_add(1, std::memory_order_relaxed);
                 recordSkippedPresentation(submission, completionTelemetry);
                 return;
+            }
+
+            if (commandContainsSpectrogramUploads) {
+                completionTelemetry->spectrogramColumnsUploaded.fetch_add(
+                    commandSpectrogramUploadCount, std::memory_order_relaxed);
             }
 
             const auto hasTargetPresentationTimestamp
@@ -2222,6 +2816,8 @@ public:
         }];
 
         submission->setCpuReadyTimestamp(hostTimeNanoseconds(CACurrentMediaTime()));
+        if (commandContainsSpectrogramUploads)
+            sharedState->spectrogramUploadGate.beginUpload();
         [commandBuffer commit];
 
         // CAMetalDisplayLink owns the drawable's presentation timing. Timed presentation APIs
@@ -2263,8 +2859,12 @@ private:
     id<MTLCommandQueue> commandQueue = nil;
     id<MTLRenderPipelineState> pipelineState = nil;
     id<MTLRenderPipelineState> textPipelineState = nil;
+    id<MTLRenderPipelineState> spectrogramPipelineState = nil;
     id<MTLSamplerState> glyphSamplerState = nil;
+    id<MTLSamplerState> spectrogramPaletteSamplerState = nil;
     id<MTLTexture> glyphAtlasTexture = nil;
+    id<MTLTexture> spectrogramPaletteTexture = nil;
+    id<MTLTexture> spectrogramHistoryTexture = nil;
     std::array<CachedTextRun, cachedFixedTextRunCount> cachedFixedTextRuns { };
     std::array<CachedTextRun, frequencyAxisTickCandidateCount> cachedFrequencyAxisTextRuns { };
     std::array<CachedTextRun, cachedDecibelTickCount> cachedDecibelTextRuns { };
@@ -2279,6 +2879,8 @@ private:
     juce::String initializationError;
     bool metalReady = false;
     std::atomic<std::uint64_t> packedSpectrumSettings { 0 };
+    std::atomic<std::uint32_t> packedSpectrogramSettings { 0 };
+    std::atomic<bool> spectrogramConfigurationClearPending { false };
     std::atomic<std::uint32_t> packedDashboardLayoutSplits { 0 };
     std::atomic<bool> dashboardLayoutEditing { false };
     std::atomic<std::uint32_t> focusedDashboardSplitterIndex { static_cast<std::uint32_t>(
@@ -2303,6 +2905,11 @@ private:
     std::uint64_t lastGeneration = 0;
     std::uint64_t lastFftGeneration = 0;
     bool hasDisplayFrame = false;
+
+    SpectrogramHistoryRing spectrogramHistoryRing;
+    std::optional<SpectrogramHistorySignature> spectrogramHistorySignature;
+    std::uint32_t spectrogramTextureRowCount = 0;
+    std::uint32_t spectrogramTextureColumnCount = 0;
 
     Clock::time_point previousInterpolationTime;
     CFTimeInterval previousDisplayCallbackHostTime = 0.0;
@@ -2398,12 +3005,16 @@ private:
         id<MTLFunction> fragmentFunction = [library newFunctionWithName:@"audioInsightFragment"];
         id<MTLFunction> textFragmentFunction =
             [library newFunctionWithName:@"audioInsightTextFragment"];
+        id<MTLFunction> spectrogramFragmentFunction =
+            [library newFunctionWithName:@"audioInsightSpectrogramFragment"];
 
-        if (vertexFunction == nil || fragmentFunction == nil || textFragmentFunction == nil) {
+        if (vertexFunction == nil || fragmentFunction == nil || textFragmentFunction == nil
+            || spectrogramFragmentFunction == nil) {
             initializationError = "Metal could not load the visualization shader functions.";
             [vertexFunction release];
             [fragmentFunction release];
             [textFragmentFunction release];
+            [spectrogramFragmentFunction release];
             [library release];
             return;
         }
@@ -2432,10 +3043,18 @@ private:
         textPipelineState = [view.device newRenderPipelineStateWithDescriptor:descriptor
                                                                         error:&textPipelineError];
 
+        NSError* spectrogramPipelineError = nil;
+        descriptor.label = @"Audio Insight Spectrogram pipeline";
+        descriptor.fragmentFunction = spectrogramFragmentFunction;
+        spectrogramPipelineState =
+            [view.device newRenderPipelineStateWithDescriptor:descriptor
+                                                        error:&spectrogramPipelineError];
+
         [descriptor release];
         [vertexFunction release];
         [fragmentFunction release];
         [textFragmentFunction release];
+        [spectrogramFragmentFunction release];
         [library release];
 
         if (pipelineState == nil) {
@@ -2449,6 +3068,13 @@ private:
             initializationError = textPipelineError != nil
                 ? juce::String::fromUTF8(textPipelineError.localizedDescription.UTF8String)
                 : juce::String("Metal could not create the glyph-atlas text pipeline.");
+            return;
+        }
+
+        if (spectrogramPipelineState == nil) {
+            initializationError = spectrogramPipelineError != nil
+                ? juce::String::fromUTF8(spectrogramPipelineError.localizedDescription.UTF8String)
+                : juce::String("Metal could not create the Spectrogram pipeline.");
             return;
         }
 
@@ -2467,16 +3093,51 @@ private:
             return;
         }
 
+        auto* spectrogramSamplerDescriptor = [[MTLSamplerDescriptor alloc] init];
+        spectrogramSamplerDescriptor.label = @"Audio Insight Spectrogram palette sampler";
+        spectrogramSamplerDescriptor.minFilter = MTLSamplerMinMagFilterLinear;
+        spectrogramSamplerDescriptor.magFilter = MTLSamplerMinMagFilterLinear;
+        spectrogramSamplerDescriptor.mipFilter = MTLSamplerMipFilterNotMipmapped;
+        spectrogramSamplerDescriptor.sAddressMode = MTLSamplerAddressModeClampToEdge;
+        spectrogramSamplerDescriptor.tAddressMode = MTLSamplerAddressModeClampToEdge;
+        spectrogramPaletteSamplerState =
+            [view.device newSamplerStateWithDescriptor:spectrogramSamplerDescriptor];
+        [spectrogramSamplerDescriptor release];
+
+        if (spectrogramPaletteSamplerState == nil) {
+            initializationError = "Metal could not create the Spectrogram palette sampler.";
+            return;
+        }
+
         for (auto& slot : sharedState->slots) {
             slot.vertexBuffer =
                 [view.device newBufferWithLength:maximumVertexCount * sizeof(MetalVertex)
                                          options:MTLResourceStorageModeShared |
                     MTLResourceCPUCacheModeWriteCombined];
 
-            if (slot.vertexBuffer == nil) {
+            slot.spectrogramStagingBuffer =
+                [view.device newBufferWithLength:spectrogramStagingBufferBytes
+                                         options:MTLResourceStorageModeShared |
+                    MTLResourceCPUCacheModeWriteCombined];
+            slot.spectrogramValidityBuffer =
+                [view.device newBufferWithLength:maximumSpectrogramHistoryColumnCount
+                                         options:MTLResourceStorageModeShared |
+                    MTLResourceCPUCacheModeWriteCombined];
+            slot.spectrogramUniformBuffer =
+                [view.device newBufferWithLength:spectrogramUniformBufferBytes
+                                         options:MTLResourceStorageModeShared |
+                    MTLResourceCPUCacheModeWriteCombined];
+
+            if (slot.vertexBuffer == nil || slot.spectrogramStagingBuffer == nil
+                || slot.spectrogramValidityBuffer == nil || slot.spectrogramUniformBuffer == nil) {
                 initializationError = "Metal could not allocate the visualization buffers.";
                 return;
             }
+        }
+
+        if (!buildSpectrogramPaletteTexture()) {
+            initializationError = "Metal could not create the Spectrogram palettes.";
+            return;
         }
 
         if (!rebuildGlyphAtlas(1.0)) {
@@ -2485,6 +3146,56 @@ private:
         }
 
         metalReady = true;
+    }
+
+    bool buildSpectrogramPaletteTexture()
+    {
+        assertMessageThread();
+        if (view == nil || view.device == nil)
+            return false;
+
+        constexpr auto paletteWidth = std::size_t { 256 };
+        constexpr auto paletteCount = std::size_t { 4 };
+        constexpr auto componentCount = std::size_t { 4 };
+        std::array<std::uint8_t, paletteWidth * paletteCount * componentCount> pixels { };
+
+        for (std::size_t palette = 0; palette < paletteCount; ++palette) {
+            for (std::size_t coordinate = 0; coordinate < paletteWidth; ++coordinate) {
+                const auto colour
+                    = spectrogramPaletteColour(static_cast<SpectrogramRenderPalette>(palette),
+                        static_cast<float>(coordinate) / static_cast<float>(paletteWidth - 1));
+                const auto offset = ((palette * paletteWidth) + coordinate) * componentCount;
+                const auto toByte = [](const float component) noexcept {
+                    return static_cast<std::uint8_t>(std::lround(
+                        std::clamp(std::isfinite(component) ? component : 0.0F, 0.0F, 1.0F)
+                        * 255.0F));
+                };
+                pixels[offset] = toByte(colour.red);
+                pixels[offset + 1] = toByte(colour.green);
+                pixels[offset + 2] = toByte(colour.blue);
+                pixels[offset + 3] = 255;
+            }
+        }
+
+        auto* descriptor =
+            [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:MTLPixelFormatRGBA8Unorm_sRGB
+                                                               width:paletteWidth
+                                                              height:paletteCount
+                                                           mipmapped:NO];
+        descriptor.storageMode = MTLStorageModeShared;
+        descriptor.usage = MTLTextureUsageShaderRead;
+        id<MTLTexture> texture = [view.device newTextureWithDescriptor:descriptor];
+        if (texture == nil)
+            return false;
+
+        texture.label = @"Audio Insight Spectrogram palettes";
+        [texture replaceRegion:MTLRegionMake2D(0, 0, paletteWidth, paletteCount)
+                   mipmapLevel:0
+                     withBytes:pixels.data()
+                   bytesPerRow:paletteWidth * componentCount];
+        [spectrogramPaletteTexture release];
+        spectrogramPaletteTexture = texture;
+        return true;
     }
 
     // Font selection, measurement, rasterization, texture allocation, and fixed
@@ -2752,6 +3463,15 @@ private:
         destination.configuredMaximumFramesPerSecond.store(
             sourceTelemetry.configuredMaximumFramesPerSecond.load(std::memory_order_relaxed),
             std::memory_order_relaxed);
+        destination.spectrogramTextureRows.store(
+            sourceTelemetry.spectrogramTextureRows.load(std::memory_order_relaxed),
+            std::memory_order_relaxed);
+        destination.spectrogramTextureColumns.store(
+            sourceTelemetry.spectrogramTextureColumns.load(std::memory_order_relaxed),
+            std::memory_order_relaxed);
+        destination.spectrogramTextureBytes.store(
+            sourceTelemetry.spectrogramTextureBytes.load(std::memory_order_relaxed),
+            std::memory_order_relaxed);
         destination.backingScale.store(sourceTelemetry.backingScale.load(std::memory_order_relaxed),
             std::memory_order_relaxed);
         destination.metalAvailable.store(
@@ -2772,6 +3492,209 @@ private:
         previousTargetPresentationTimestamp = 0.0;
     }
 
+    void clearSpectrogramHistory(AtomicRenderTelemetry* const telemetry) noexcept
+    {
+        spectrogramHistoryRing.clear();
+        spectrogramHistorySignature.reset();
+        if (telemetry != nullptr)
+            telemetry->spectrogramHistoryClears.fetch_add(1, std::memory_order_relaxed);
+    }
+
+    bool ensureSpectrogramHistoryTexture(const std::uint32_t rowCount,
+        const std::uint32_t columnCount, AtomicRenderTelemetry& telemetry) noexcept
+    {
+        if (rowCount == 0 || rowCount > maximumSpectrogramRowCount || columnCount == 0
+            || columnCount > maximumSpectrogramHistoryColumnCount || view == nil
+            || view.device == nil) {
+            return false;
+        }
+
+        if (spectrogramHistoryTexture != nil && spectrogramTextureRowCount == rowCount
+            && spectrogramTextureColumnCount == columnCount) {
+            spectrogramHistoryRing.configure(columnCount);
+            return true;
+        }
+
+        auto* descriptor =
+            [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:MTLPixelFormatR16Float
+                                                               width:rowCount
+                                                              height:columnCount
+                                                           mipmapped:NO];
+        descriptor.storageMode = MTLStorageModePrivate;
+        descriptor.usage = MTLTextureUsageShaderRead;
+        id<MTLTexture> replacement = [view.device newTextureWithDescriptor:descriptor];
+        if (replacement == nil) {
+            [spectrogramHistoryTexture release];
+            spectrogramHistoryTexture = nil;
+            spectrogramTextureRowCount = 0;
+            spectrogramTextureColumnCount = 0;
+            spectrogramHistoryRing.configure(0);
+            telemetry.spectrogramTextureRows.store(0, std::memory_order_relaxed);
+            telemetry.spectrogramTextureColumns.store(0, std::memory_order_relaxed);
+            telemetry.spectrogramTextureBytes.store(0, std::memory_order_relaxed);
+            telemetry.spectrogramTextureAllocationFailures.fetch_add(1, std::memory_order_relaxed);
+            return false;
+        }
+
+        replacement.label = @"Audio Insight circular Spectrogram dB history";
+        [spectrogramHistoryTexture release];
+        spectrogramHistoryTexture = replacement;
+        spectrogramTextureRowCount = rowCount;
+        spectrogramTextureColumnCount = columnCount;
+        spectrogramHistoryRing.configure(columnCount);
+        const auto bytes = static_cast<std::uint64_t>(rowCount) * columnCount * sizeof(_Float16);
+        telemetry.spectrogramTextureRows.store(rowCount, std::memory_order_relaxed);
+        telemetry.spectrogramTextureColumns.store(columnCount, std::memory_order_relaxed);
+        telemetry.spectrogramTextureBytes.store(bytes, std::memory_order_relaxed);
+        telemetry.spectrogramTextureReallocations.fetch_add(1, std::memory_order_relaxed);
+        return true;
+    }
+
+    void writeSpectrogramGpuState(
+        RenderBufferSlot& slot, const SpectrogramRenderSettings& settings) const noexcept
+    {
+        std::memcpy(slot.spectrogramValidityBuffer.contents,
+            spectrogramHistoryRing.validity().data(), maximumSpectrogramHistoryColumnCount);
+        const SpectrogramShaderUniforms uniforms {
+            spectrogramHistoryRing.columnCount(),
+            spectrogramTextureRowCount,
+            spectrogramHistoryRing.nextWriteColumn(),
+            spectrogramHistoryRing.timelineSpan(),
+            static_cast<std::uint32_t>(settings.historyMode),
+            static_cast<std::uint32_t>(settings.palette),
+            settings.colorFloorDecibels,
+            settings.colorCeilingDecibels,
+            settings.colorResponse,
+            0,
+        };
+        std::memcpy(slot.spectrogramUniformBuffer.contents, &uniforms, sizeof(uniforms));
+    }
+
+    PreparedSpectrogramUploads prepareSpectrogramUploads(RenderBufferSlot& slot,
+        const SpectrogramRenderSettings& settings, AtomicRenderTelemetry& telemetry) noexcept
+    {
+        PreparedSpectrogramUploads prepared;
+        const auto pendingConfigurationClear
+            = spectrogramConfigurationClearPending.exchange(false, std::memory_order_acq_rel);
+        const auto previousUploadFailed = sharedState->spectrogramUploadGate.consumeFailure();
+        if (pendingConfigurationClear || previousUploadFailed)
+            clearSpectrogramHistory(&telemetry);
+
+        SpectrogramColumn column;
+        for (std::size_t drained = 0; drained < maximumSpectrogramColumnsDrainedPerFrame;
+            ++drained) {
+            if (!source.copyNextSpectrogramColumn(column))
+                break;
+
+            telemetry.spectrogramColumnsRead.fetch_add(1, std::memory_order_relaxed);
+            if (column.resetMarker) {
+                clearSpectrogramHistory(&telemetry);
+                prepared.count = 0;
+                telemetry.spectrogramLastColumnSequence.store(
+                    column.sequence, std::memory_order_relaxed);
+                continue;
+            }
+
+            const auto historyColumns = calculateSpectrogramHistoryColumnCount(
+                settings.historyDurationSeconds, static_cast<int>(column.requestedSliceRateHz));
+            const auto hasSupportedFftSize = column.fftSize == 1024 || column.fftSize == 2048
+                || column.fftSize == 4096 || column.fftSize == 8192 || column.fftSize == 16384;
+            const auto metadataIsValid = column.sequence != 0 && column.captureGeneration != 0
+                && column.fftGeneration != 0 && column.mappingGeneration != 0
+                && column.resetEpoch != 0 && column.capturedFrameEnd != 0
+                && std::isfinite(column.sampleRate) && column.sampleRate > 0.0
+                && hasSupportedFftSize && column.binCount == (column.fftSize / 2) + 1
+                && column.binCount <= maximumSpectrumBinCount && column.rowCount != 0
+                && column.rowCount <= maximumSpectrogramRowCount && historyColumns != 0;
+            if (!metadataIsValid) {
+                telemetry.spectrogramColumnsRejected.fetch_add(1, std::memory_order_relaxed);
+                continue;
+            }
+
+            const SpectrogramHistorySignature signature { column.captureGeneration,
+                column.fftGeneration, column.mappingGeneration, column.resetEpoch, column.fftSize,
+                column.rowCount, historyColumns, column.requestedSliceRateHz, column.sampleRate };
+            const auto transition
+                = spectrogramHistoryTransition(spectrogramHistorySignature, signature);
+            if (!transition.clear && !spectrogramHistorySignature.has_value()) {
+                telemetry.spectrogramColumnsRejected.fetch_add(1, std::memory_order_relaxed);
+                continue;
+            }
+
+            if (transition.clear) {
+                clearSpectrogramHistory(&telemetry);
+                prepared.count = 0;
+            }
+
+            if (!ensureSpectrogramHistoryTexture(column.rowCount, historyColumns, telemetry)) {
+                telemetry.spectrogramColumnsRejected.fetch_add(1, std::memory_order_relaxed);
+                break;
+            }
+
+            spectrogramHistorySignature = signature;
+            const auto timelineSlot = calculateSpectrogramTimelineSlot(
+                column.capturedFrameEnd, column.sampleRate, column.requestedSliceRateHz);
+            const auto advance = spectrogramHistoryRing.append(timelineSlot, column.sequence);
+            if (!advance.accepted) {
+                telemetry.spectrogramColumnsRejected.fetch_add(1, std::memory_order_relaxed);
+                continue;
+            }
+
+            telemetry.spectrogramGapColumns.fetch_add(
+                advance.gapColumnCount, std::memory_order_relaxed);
+            telemetry.spectrogramLastColumnSequence.store(
+                column.sequence, std::memory_order_relaxed);
+            auto* const stagingBytes
+                = static_cast<std::byte*>(slot.spectrogramStagingBuffer.contents);
+            const auto sourceOffset = prepared.count * spectrogramStagingRowStride;
+            auto* const staging = reinterpret_cast<_Float16*>(stagingBytes + sourceOffset);
+            for (std::size_t row = 0; row < column.rowCount; ++row) {
+                const auto decibels = std::isfinite(column.decibels[row])
+                    ? std::clamp(column.decibels[row], -65'504.0F, 65'504.0F)
+                    : minimumSpectrumDecibels;
+                staging[row] = static_cast<_Float16>(decibels);
+            }
+
+            prepared.uploads[prepared.count++] = { static_cast<NSUInteger>(sourceOffset),
+                static_cast<NSUInteger>(advance.writeColumn),
+                static_cast<NSUInteger>(column.rowCount) };
+        }
+
+        writeSpectrogramGpuState(slot, settings);
+        return prepared;
+    }
+
+    bool encodeSpectrogramUploads(id<MTLCommandBuffer> commandBuffer, RenderBufferSlot& slot,
+        const PreparedSpectrogramUploads& prepared, AtomicRenderTelemetry& telemetry) noexcept
+    {
+        if (prepared.count == 0 || commandBuffer == nil || spectrogramHistoryTexture == nil)
+            return prepared.count == 0;
+
+        id<MTLBlitCommandEncoder> blit = [commandBuffer blitCommandEncoder];
+        if (blit == nil)
+            return false;
+
+        blit.label = @"Audio Insight Spectrogram column uploads";
+        for (std::size_t index = 0; index < prepared.count; ++index) {
+            const auto& upload = prepared.uploads[index];
+            [blit copyFromBuffer:slot.spectrogramStagingBuffer
+                       sourceOffset:upload.sourceOffset
+                  sourceBytesPerRow:spectrogramStagingRowStride
+                sourceBytesPerImage:spectrogramStagingRowStride
+                         sourceSize:MTLSizeMake(upload.rowCount, 1, 1)
+                          toTexture:spectrogramHistoryTexture
+                   destinationSlice:0
+                   destinationLevel:0
+                  destinationOrigin:MTLOriginMake(0, upload.destinationRow, 0)];
+        }
+        [blit endEncoding];
+        telemetry.spectrogramUploadCommands.fetch_add(prepared.count, std::memory_order_relaxed);
+        telemetry.spectrogramUploadBytes.fetch_add(
+            prepared.count * spectrogramTextureRowCount * sizeof(_Float16),
+            std::memory_order_relaxed);
+        return true;
+    }
+
     void resetRendererStateWhileDisplayLinkIsPaused() noexcept
     {
         targetFrame = { };
@@ -2782,6 +3705,8 @@ private:
         lastSpectrumSequence = 0;
         lastMeterSequence = 0;
         hasDisplayFrame = false;
+        clearSpectrogramHistory(callbackTelemetry.get());
+        spectrogramConfigurationClearPending.store(false, std::memory_order_relaxed);
         previousInterpolationTime = { };
         resetTelemetryTimingAtCallbackBoundary();
     }
@@ -2829,6 +3754,7 @@ private:
         effectiveActive.store(false, std::memory_order_release);
         loadPublishedTelemetry()->effectivelyRendering.store(false, std::memory_order_relaxed);
         applyPendingTelemetryAtSafeBoundary();
+        clearSpectrogramHistory(callbackTelemetry.get());
         source.setVisualizationActive(false);
         notifyEffectiveActivityChanged(false);
     }
@@ -3033,7 +3959,8 @@ private:
     }
 
     VertexBatches populateVertices(MetalVertex* vertices, CGSize logicalSize,
-        const DashboardTileLayout& dashboardLayout, SpectrumRenderSettings settings) const noexcept
+        const DashboardTileLayout& dashboardLayout, SpectrumRenderSettings settings,
+        const SpectrogramRenderSettings& spectrogramSettings) const noexcept
     {
         VertexBatches batches;
 
@@ -3080,6 +4007,24 @@ private:
                   vertices[cursor++] = { bottomRight, colour, noTextureCoordinate };
                   vertices[cursor++] = { topRight, colour, noTextureCoordinate };
               };
+        const auto appendSpectrogramQuad = [&](const RenderRect& bounds) noexcept {
+            if (bounds.width() <= 0.0F || bounds.height() <= 0.0F)
+                return;
+
+            jassert(cursor + 4 <= maximumVertexCount);
+            if (cursor + 4 > maximumVertexCount)
+                return;
+
+            constexpr auto opaqueWhite = simd_float4 { 1.0F, 1.0F, 1.0F, 1.0F };
+            vertices[cursor++] = { pointToClip(bounds.left, bounds.bottom), opaqueWhite,
+                simd_make_float2(0.0F, 1.0F) };
+            vertices[cursor++] = { pointToClip(bounds.right, bounds.bottom), opaqueWhite,
+                simd_make_float2(1.0F, 1.0F) };
+            vertices[cursor++] = { pointToClip(bounds.left, bounds.top), opaqueWhite,
+                simd_make_float2(0.0F, 0.0F) };
+            vertices[cursor++] = { pointToClip(bounds.right, bounds.top), opaqueWhite,
+                simd_make_float2(1.0F, 0.0F) };
+        };
 
         const auto density = static_cast<float>(
             std::isfinite(glyphAtlasBackingScale) && glyphAtlasBackingScale > 0.0
@@ -3399,9 +4344,31 @@ private:
         const auto spectrogramFrequencyTicks = selectFrequencyAxisTicks(
             frequencyMapping, spectrogramPlot.height(), frequencyLabelHeights, axisTextHeight);
         constexpr auto spectrogramTickColour = simd_float4 { 0.19F, 0.25F, 0.33F, 0.78F };
+        batches.spectrogramHistory.start = cursor;
+        if (spectrogramHistoryTexture != nil && spectrogramHistoryRing.columnCount() != 0
+            && spectrogramTextureRowCount != 0) {
+            appendSpectrogramQuad(spectrogramPlot);
+        }
+        batches.spectrogramHistory.count = cursor - batches.spectrogramHistory.start;
         batches.spectrogramAxis.start = cursor;
 
         if (spectrogramPlot.width() > 0.0F && spectrogramPlot.height() > 0.0F) {
+            if (spectrogramSettings.historyMode == SpectrogramRenderHistoryMode::overwrite
+                && spectrogramHistoryRing.columnCount() != 0) {
+                constexpr auto seamColour = simd_float4 { 0.26F, 0.34F, 0.43F, 0.46F };
+                const auto seamX = spectrogramPlot.left
+                    + (static_cast<float>(spectrogramHistoryRing.nextWriteColumn())
+                          / static_cast<float>(spectrogramHistoryRing.columnCount()))
+                        * spectrogramPlot.width();
+                const auto physicalPixelWidth = spectrogramLogicalPixelWidth(density);
+                const auto seamLeft
+                    = std::clamp(seamX - (physicalPixelWidth * 0.5F), spectrogramPlot.left,
+                        std::max(spectrogramPlot.left, spectrogramPlot.right - physicalPixelWidth));
+                appendQuad(seamLeft, spectrogramPlot.bottom,
+                    std::min(spectrogramPlot.right, seamLeft + physicalPixelWidth),
+                    spectrogramPlot.top, seamColour);
+            }
+
             for (std::size_t index = 0; index < spectrogramFrequencyTicks.count; ++index) {
                 const auto unit = mapFrequencyToUnit(
                     frequencyMapping, spectrogramFrequencyTicks.ticks[index].frequencyHz);
@@ -3740,12 +4707,11 @@ private:
                 }
             }
 
-            if (panel != DashboardPanel::spectrum && panel != DashboardPanel::peakRms) {
+            if (panel != DashboardPanel::spectrum && panel != DashboardPanel::peakRms
+                && panel != DashboardPanel::spectrogram) {
                 const auto& placeholderRun = cachedFixedTextRuns[placeholderTextRunIndex];
-                const auto placeholderBounds = panel == DashboardPanel::spectrogram
-                    ? spectrogramPlot
-                    : RenderRect { bounds.left, bounds.bottom, bounds.right,
-                          bounds.top - panelHeaderHeight };
+                const auto placeholderBounds = RenderRect { bounds.left, bounds.bottom,
+                    bounds.right, bounds.top - panelHeaderHeight };
                 const auto availableWidth = std::max(0.0F, placeholderBounds.width() - 12.0F);
                 const auto availableHeight = std::max(0.0F, placeholderBounds.height() - 12.0F);
                 const auto horizontalScale
@@ -3931,8 +4897,8 @@ NSString* makeDashboardAccessibilityString(const std::string_view value)
     self.accessibilityElement = YES;
     self.accessibilityRole = NSAccessibilityGroupRole;
     self.accessibilityLabel = @"Audio Insight analyzer dashboard";
-    self.accessibilityHelp
-        = @"Contains Spectrum and Peak/RMS visualizations plus unfinished analyzer panels.";
+    self.accessibilityHelp = @"Contains Spectrum, Peak/RMS, and Spectrogram visualizations plus "
+                             @"unfinished Stereo and Loudness panels.";
     auto* clearAction = [[NSAccessibilityCustomAction alloc]
         initWithName:@"Clear Peak/RMS holds and OVER"
               target:self
@@ -4435,6 +5401,16 @@ void MetalVisualization::setSpectrumSettings(SpectrumRenderSettings settings) no
 SpectrumRenderSettings MetalVisualization::getSpectrumSettings() const noexcept
 {
     return impl->backend->getSpectrumSettings();
+}
+
+void MetalVisualization::setSpectrogramSettings(SpectrogramRenderSettings settings) noexcept
+{
+    impl->backend->setSpectrogramSettings(settings);
+}
+
+SpectrogramRenderSettings MetalVisualization::getSpectrogramSettings() const noexcept
+{
+    return impl->backend->getSpectrogramSettings();
 }
 
 void MetalVisualization::setDashboardLayoutSplits(DashboardLayoutSplits splits) noexcept

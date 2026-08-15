@@ -47,7 +47,7 @@ private:
     void componentPeerChanged() override;
     void componentVisibilityChanged() override;
 
-    void updateSpectrumSettings(const AnalyzerConfiguration& configuration) noexcept;
+    void updateAnalyzerRenderSettings(const AnalyzerConfiguration& configuration) noexcept;
     void updateRenderingState();
     void updateUtilityPresentation();
     void updateMainControlVisibility();

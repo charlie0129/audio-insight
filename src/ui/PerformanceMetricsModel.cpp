@@ -288,6 +288,39 @@ void appendRawSections(
         "metal.lastSpectrumSequence", "Last spectrum sequence", metal.lastSpectrumSequence));
     sections.emplace_back(std::move(handoff));
 
+    PerformanceMetricGroup spectrogramRender { "Renderer Spectrogram history", { } };
+    spectrogramRender.rows.emplace_back(rawUnsigned("metal.spectrogramColumnsRead",
+        "Columns read from analysis", metal.spectrogramColumnsRead, "columns"));
+    spectrogramRender.rows.emplace_back(rawUnsigned("metal.spectrogramColumnsUploaded",
+        "Columns uploaded", metal.spectrogramColumnsUploaded, "columns"));
+    spectrogramRender.rows.emplace_back(rawUnsigned("metal.spectrogramColumnsRejected",
+        "Columns rejected", metal.spectrogramColumnsRejected, "columns"));
+    spectrogramRender.rows.emplace_back(rawUnsigned("metal.spectrogramGapColumns",
+        "Black gap columns inserted", metal.spectrogramGapColumns, "columns"));
+    spectrogramRender.rows.emplace_back(rawUnsigned("metal.spectrogramHistoryClears",
+        "Logical history clears", metal.spectrogramHistoryClears, "clears"));
+    spectrogramRender.rows.emplace_back(rawUnsigned("metal.spectrogramTextureReallocations",
+        "History texture reallocations", metal.spectrogramTextureReallocations, "allocations"));
+    spectrogramRender.rows.emplace_back(rawUnsigned("metal.spectrogramTextureAllocationFailures",
+        "History texture allocation failures", metal.spectrogramTextureAllocationFailures,
+        "failures"));
+    spectrogramRender.rows.emplace_back(rawUnsigned("metal.spectrogramUploadBackpressureDrops",
+        "Callbacks skipped for an outstanding history upload",
+        metal.spectrogramUploadBackpressureDrops, "drops"));
+    spectrogramRender.rows.emplace_back(rawUnsigned("metal.spectrogramUploadCommands",
+        "History column copy commands", metal.spectrogramUploadCommands, "commands"));
+    spectrogramRender.rows.emplace_back(rawUnsigned("metal.spectrogramUploadBytes",
+        "History upload bytes", metal.spectrogramUploadBytes, "bytes"));
+    spectrogramRender.rows.emplace_back(rawUnsigned("metal.spectrogramLastColumnSequence",
+        "Last accepted column sequence", metal.spectrogramLastColumnSequence));
+    spectrogramRender.rows.emplace_back(rawUnsigned(
+        "metal.spectrogramTextureRows", "History texture rows", metal.spectrogramTextureRows));
+    spectrogramRender.rows.emplace_back(rawUnsigned("metal.spectrogramTextureColumns",
+        "History texture columns", metal.spectrogramTextureColumns));
+    spectrogramRender.rows.emplace_back(rawUnsigned("metal.spectrogramTextureBytes",
+        "History texture allocation", metal.spectrogramTextureBytes, "bytes"));
+    sections.emplace_back(std::move(spectrogramRender));
+
     PerformanceMetricGroup timing { "Renderer timing", { } };
     timing.rows.emplace_back(rawDuration(
         "metal.lastCpuEncodeNanoseconds", "Last CPU encode", metal.lastCpuEncodeNanoseconds));
@@ -395,6 +428,37 @@ void appendRawSections(
     fftConfiguration.rows.emplace_back(rawUnsigned("analysis.requestedFftSliceRateHz",
         "Requested FFT slice rate", analysis.requestedFftSliceRateHz, "Hz"));
     sections.emplace_back(std::move(fftConfiguration));
+
+    PerformanceMetricGroup spectrogramAnalysis { "Spectrogram mapping and column handoff", { } };
+    spectrogramAnalysis.rows.emplace_back(rawUnsigned("analysis.spectrogramTransformsOffered",
+        "Raw transforms offered", analysis.spectrogramTransformsOffered, "transforms"));
+    spectrogramAnalysis.rows.emplace_back(rawUnsigned("analysis.spectrogramColumnsMapped",
+        "Columns mapped", analysis.spectrogramColumnsMapped, "columns"));
+    spectrogramAnalysis.rows.emplace_back(rawUnsigned("analysis.spectrogramMappingFailures",
+        "Column mapping failures", analysis.spectrogramMappingFailures, "failures"));
+    spectrogramAnalysis.rows.emplace_back(rawUnsigned("analysis.spectrogramColumnsPublished",
+        "Columns published", analysis.spectrogramColumnsPublished, "columns"));
+    spectrogramAnalysis.rows.emplace_back(rawUnsigned("analysis.spectrogramColumnsReclaimed",
+        "Ready columns reclaimed", analysis.spectrogramColumnsReclaimed, "columns"));
+    spectrogramAnalysis.rows.emplace_back(rawUnsigned("analysis.spectrogramColumnsDropped",
+        "Incoming columns dropped", analysis.spectrogramColumnsDropped, "columns"));
+    spectrogramAnalysis.rows.emplace_back(rawUnsigned("analysis.spectrogramColumnsConsumed",
+        "Columns consumed", analysis.spectrogramColumnsConsumed, "columns"));
+    spectrogramAnalysis.rows.emplace_back(rawUnsigned("analysis.spectrogramColumnsDiscarded",
+        "Queued columns discarded", analysis.spectrogramColumnsDiscarded, "columns"));
+    spectrogramAnalysis.rows.emplace_back(rawUnsigned("analysis.spectrogramMappingChanges",
+        "Frequency-mapping changes", analysis.spectrogramMappingChanges, "changes"));
+    spectrogramAnalysis.rows.emplace_back(rawUnsigned("analysis.spectrogramCapturedFrameEnd",
+        "Latest column captured-frame endpoint", analysis.spectrogramCapturedFrameEnd, "frames"));
+    spectrogramAnalysis.rows.emplace_back(rawUnsigned("analysis.spectrogramMappingGeneration",
+        "Frequency-mapping generation", analysis.spectrogramMappingGeneration));
+    spectrogramAnalysis.rows.emplace_back(rawUnsigned(
+        "analysis.spectrogramRowCount", "Mapped frequency rows", analysis.spectrogramRowCount));
+    spectrogramAnalysis.rows.emplace_back(rawUnsigned("analysis.spectrogramQueueReadyHighWaterMark",
+        "Ready-column high-water mark", analysis.spectrogramQueueReadyHighWaterMark, "columns"));
+    spectrogramAnalysis.rows.emplace_back(rawUnsigned("analysis.spectrogramQueueReadyColumns",
+        "Ready columns", analysis.spectrogramQueueReadyColumns, "columns"));
+    sections.emplace_back(std::move(spectrogramAnalysis));
 
     PerformanceMetricGroup jobs { "Analysis jobs and publication", { } };
     jobs.rows.emplace_back(
@@ -584,6 +648,30 @@ void buildRates(const PerformanceMetricsSnapshot& current,
         previous.metal.snapshotReads);
     addMetal("metal.framesWithNewSnapshot", "Frames with new snapshots", "frames/s",
         current.metal.framesWithNewSnapshot, previous.metal.framesWithNewSnapshot);
+    addMetal("metal.spectrogramColumnsRead", "Spectrogram columns read", "columns/s",
+        current.metal.spectrogramColumnsRead, previous.metal.spectrogramColumnsRead);
+    addMetal("metal.spectrogramColumnsUploaded", "Spectrogram columns uploaded", "columns/s",
+        current.metal.spectrogramColumnsUploaded, previous.metal.spectrogramColumnsUploaded);
+    addMetal("metal.spectrogramColumnsRejected", "Spectrogram columns rejected", "columns/s",
+        current.metal.spectrogramColumnsRejected, previous.metal.spectrogramColumnsRejected);
+    addMetal("metal.spectrogramGapColumns", "Spectrogram black gaps", "columns/s",
+        current.metal.spectrogramGapColumns, previous.metal.spectrogramGapColumns);
+    addMetal("metal.spectrogramHistoryClears", "Spectrogram history clears", "clears/s",
+        current.metal.spectrogramHistoryClears, previous.metal.spectrogramHistoryClears);
+    addMetal("metal.spectrogramTextureReallocations", "Spectrogram texture reallocations",
+        "allocations/s", current.metal.spectrogramTextureReallocations,
+        previous.metal.spectrogramTextureReallocations);
+    addMetal("metal.spectrogramTextureAllocationFailures",
+        "Spectrogram texture allocation failures", "failures/s",
+        current.metal.spectrogramTextureAllocationFailures,
+        previous.metal.spectrogramTextureAllocationFailures);
+    addMetal("metal.spectrogramUploadBackpressureDrops", "Spectrogram upload-backpressure drops",
+        "drops/s", current.metal.spectrogramUploadBackpressureDrops,
+        previous.metal.spectrogramUploadBackpressureDrops);
+    addMetal("metal.spectrogramUploadCommands", "Spectrogram column copy commands", "commands/s",
+        current.metal.spectrogramUploadCommands, previous.metal.spectrogramUploadCommands);
+    addMetal("metal.spectrogramUploadBytes", "Spectrogram upload throughput", "bytes/s",
+        current.metal.spectrogramUploadBytes, previous.metal.spectrogramUploadBytes);
 
     const auto& capture = current.analysis.capture;
     const auto& previousCapture = previous.analysis.capture;
@@ -674,6 +762,33 @@ void buildRates(const PerformanceMetricsSnapshot& current,
         "Spectrum temporal configuration changes", "changes/s",
         current.analysis.spectrumTemporalConfigurationChanges,
         previous.analysis.spectrumTemporalConfigurationChanges, elapsedSeconds, baselineIsValid);
+    appendRate(rates, "analysis.spectrogramTransformsOffered", "Spectrogram raw transforms offered",
+        "transforms/s", current.analysis.spectrogramTransformsOffered,
+        previous.analysis.spectrogramTransformsOffered, elapsedSeconds, baselineIsValid);
+    appendRate(rates, "analysis.spectrogramColumnsMapped", "Spectrogram columns mapped",
+        "columns/s", current.analysis.spectrogramColumnsMapped,
+        previous.analysis.spectrogramColumnsMapped, elapsedSeconds, baselineIsValid);
+    appendRate(rates, "analysis.spectrogramMappingFailures", "Spectrogram mapping failures",
+        "failures/s", current.analysis.spectrogramMappingFailures,
+        previous.analysis.spectrogramMappingFailures, elapsedSeconds, baselineIsValid);
+    appendRate(rates, "analysis.spectrogramColumnsPublished", "Spectrogram columns published",
+        "columns/s", current.analysis.spectrogramColumnsPublished,
+        previous.analysis.spectrogramColumnsPublished, elapsedSeconds, baselineIsValid);
+    appendRate(rates, "analysis.spectrogramColumnsReclaimed", "Spectrogram columns reclaimed",
+        "columns/s", current.analysis.spectrogramColumnsReclaimed,
+        previous.analysis.spectrogramColumnsReclaimed, elapsedSeconds, baselineIsValid);
+    appendRate(rates, "analysis.spectrogramColumnsDropped", "Spectrogram columns dropped",
+        "columns/s", current.analysis.spectrogramColumnsDropped,
+        previous.analysis.spectrogramColumnsDropped, elapsedSeconds, baselineIsValid);
+    appendRate(rates, "analysis.spectrogramColumnsConsumed", "Spectrogram columns consumed",
+        "columns/s", current.analysis.spectrogramColumnsConsumed,
+        previous.analysis.spectrogramColumnsConsumed, elapsedSeconds, baselineIsValid);
+    appendRate(rates, "analysis.spectrogramColumnsDiscarded", "Spectrogram columns discarded",
+        "columns/s", current.analysis.spectrogramColumnsDiscarded,
+        previous.analysis.spectrogramColumnsDiscarded, elapsedSeconds, baselineIsValid);
+    appendRate(rates, "analysis.spectrogramMappingChanges", "Spectrogram mapping changes",
+        "changes/s", current.analysis.spectrogramMappingChanges,
+        previous.analysis.spectrogramMappingChanges, elapsedSeconds, baselineIsValid);
 }
 
 void appendIntervalSample(
