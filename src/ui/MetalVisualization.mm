@@ -47,15 +47,24 @@ namespace {
 using Clock = std::chrono::steady_clock;
 
 constexpr std::size_t renderBufferCount = 3;
-constexpr std::size_t maximumGridVertices = 160;
-constexpr std::size_t maximumMeterVertices = 48;
-constexpr std::size_t maximumVertexCount
-    = (2 * spectrumBinCount) + maximumGridVertices + maximumMeterVertices;
+constexpr std::size_t maximumVertexCount = 8'192;
+
+// The fixed capacity covers five filled/bordered/header-divided tiles, every
+// accepted grid line, the maximum FFT trace, and both live meter channels. Keep
+// this proof beside the allocation so a future geometry builder cannot quietly
+// rely on the bounds checks to truncate a frame.
+constexpr std::size_t maximumShellVertices = dashboardPanelCount * 36;
+constexpr std::size_t maximumGridVertices = (10 + 16) * 6;
+constexpr std::size_t maximumSpectrumVertices = 2 * spectrumBinCount;
+constexpr std::size_t maximumMeterVertices = 2 * 3 * 6;
+static_assert(
+    maximumShellVertices + maximumGridVertices + maximumSpectrumVertices + maximumMeterVertices
+    <= maximumVertexCount);
 
 constexpr float minimumSpectrumFrequency = 20.0F;
 constexpr float maximumSpectrumFrequency = 20'000.0F;
 constexpr float minimumMeterDecibels = -60.0F;
-constexpr float maximumMeterDecibels = 12.0F;
+constexpr float maximumMeterDecibels = 3.0F;
 constexpr float minimumAllowedSpectrumFloor = -160.0F;
 constexpr float maximumAllowedSpectrumCeiling = 24.0F;
 constexpr float minimumSpectrumRange = 6.0F;
@@ -66,6 +75,7 @@ struct MetalVertex {
 };
 
 static_assert(std::atomic<std::uint64_t>::is_always_lock_free);
+static_assert(std::atomic<std::uint32_t>::is_always_lock_free);
 
 struct AtomicRenderTelemetry {
     std::uint64_t epoch = 1;
@@ -221,13 +231,33 @@ struct SharedRenderState {
     std::array<RenderBufferSlot, renderBufferCount> slots;
 };
 
+struct VertexRange {
+    std::size_t start = 0;
+    std::size_t count = 0;
+};
+
 struct VertexBatches {
-    std::size_t gridStart = 0;
-    std::size_t gridCount = 0;
-    std::size_t spectrumStart = 0;
-    std::size_t spectrumCount = 0;
-    std::size_t meterStart = 0;
-    std::size_t meterCount = 0;
+    VertexRange shell;
+    VertexRange spectrumGrid;
+    VertexRange spectrum;
+    VertexRange peakRms;
+};
+
+struct RenderRect {
+    float left = 0.0F;
+    float bottom = 0.0F;
+    float right = 0.0F;
+    float top = 0.0F;
+
+    [[nodiscard]] float width() const noexcept
+    {
+        return std::max(0.0F, right - left);
+    }
+
+    [[nodiscard]] float height() const noexcept
+    {
+        return std::max(0.0F, top - bottom);
+    }
 };
 
 struct RenderBufferAdmission {
@@ -278,6 +308,65 @@ SpectrumRenderSettings unpackSpectrumSettings(std::uint64_t packed) noexcept
     return { minimumAllowedSpectrumFloor + (static_cast<float>(floorValue) * 0.01F),
         minimumAllowedSpectrumFloor + (static_cast<float>(ceilingValue) * 0.01F),
         static_cast<float>(smoothingValue) / 65'535.0F };
+}
+
+std::uint32_t packDashboardLayoutSplits(DashboardLayoutSplits splits) noexcept
+{
+    splits = DashboardLayout::validOrDefault(splits);
+    return static_cast<std::uint32_t>(splits.horizontal)
+        | (static_cast<std::uint32_t>(splits.upper) << 8U)
+        | (static_cast<std::uint32_t>(splits.lowerLeft) << 16U)
+        | (static_cast<std::uint32_t>(splits.lowerRight) << 24U);
+}
+
+DashboardLayoutSplits unpackDashboardLayoutSplits(const std::uint32_t packed) noexcept
+{
+    const DashboardLayoutSplits splits { static_cast<int>(packed & 0xffU),
+        static_cast<int>((packed >> 8U) & 0xffU), static_cast<int>((packed >> 16U) & 0xffU),
+        static_cast<int>((packed >> 24U) & 0xffU) };
+    return DashboardLayout::validOrDefault(splits);
+}
+
+RenderRect toRenderRect(const DashboardLogicalBounds& bounds, const float logicalHeight) noexcept
+{
+    return { static_cast<float>(bounds.x), logicalHeight - static_cast<float>(bounds.bottom()),
+        static_cast<float>(bounds.right()), logicalHeight - static_cast<float>(bounds.y) };
+}
+
+RenderRect insetRenderRect(
+    const RenderRect& bounds, const float horizontal, const float bottom, const float top) noexcept
+{
+    const auto insetX = std::min(horizontal, bounds.width() * 0.5F);
+    const auto insetBottom = std::min(bottom, bounds.height());
+    const auto insetTop = std::min(top, std::max(0.0F, bounds.height() - insetBottom));
+    return { bounds.left + insetX, bounds.bottom + insetBottom, bounds.right - insetX,
+        bounds.top - insetTop };
+}
+
+MTLScissorRect makeScissorRect(const DashboardLogicalBounds& bounds, const CGSize logicalSize,
+    const NSUInteger drawableWidth, const NSUInteger drawableHeight) noexcept
+{
+    if (logicalSize.width <= 0.0 || logicalSize.height <= 0.0 || drawableWidth == 0
+        || drawableHeight == 0) {
+        return { 0, 0, 0, 0 };
+    }
+
+    const auto xScale = static_cast<double>(drawableWidth) / logicalSize.width;
+    const auto yScale = static_cast<double>(drawableHeight) / logicalSize.height;
+    const auto clampHorizontal = [drawableWidth](const double value) noexcept {
+        return std::clamp(value, 0.0, static_cast<double>(drawableWidth));
+    };
+    const auto clampVertical = [drawableHeight](const double value) noexcept {
+        return std::clamp(value, 0.0, static_cast<double>(drawableHeight));
+    };
+    const auto left = clampHorizontal(std::floor(bounds.x * xScale));
+    const auto top = clampVertical(std::floor(bounds.y * yScale));
+    const auto right = clampHorizontal(std::ceil(bounds.right() * xScale));
+    const auto bottom = clampVertical(std::ceil(bounds.bottom() * yScale));
+
+    return { static_cast<NSUInteger>(left), static_cast<NSUInteger>(top),
+        static_cast<NSUInteger>(std::max(0.0, right - left)),
+        static_cast<NSUInteger>(std::max(0.0, bottom - top)) };
 }
 
 void releaseRenderBuffer(
@@ -491,6 +580,7 @@ public:
         std::atomic_store_explicit(
             &publishedTelemetry, callbackTelemetry, std::memory_order_release);
         setSpectrumSettings({ });
+        setDashboardLayoutSplits(DashboardLayout::defaultSplits);
         initialiseMetal();
         callbackTelemetry->metalAvailable.store(metalReady, std::memory_order_relaxed);
     }
@@ -610,6 +700,18 @@ public:
     [[nodiscard]] SpectrumRenderSettings getSpectrumSettings() const noexcept
     {
         return unpackSpectrumSettings(packedSpectrumSettings.load(std::memory_order_acquire));
+    }
+
+    void setDashboardLayoutSplits(DashboardLayoutSplits splits) noexcept
+    {
+        packedDashboardLayoutSplits.store(
+            packDashboardLayoutSplits(splits), std::memory_order_release);
+    }
+
+    [[nodiscard]] DashboardLayoutSplits getDashboardLayoutSplits() const noexcept
+    {
+        return unpackDashboardLayoutSplits(
+            packedDashboardLayoutSplits.load(std::memory_order_acquire));
     }
 
     [[nodiscard]] MetalRenderTelemetry getTelemetry() const noexcept
@@ -792,9 +894,14 @@ public:
         updateSmoothedDisplayValues(callbackTime, spectrumSettings);
 
         const auto boundsSize = view.bounds.size;
+        const auto dashboardLayout = DashboardLayout::calculateTileLayout(
+            { 0.0, 0.0, static_cast<double>(boundsSize.width),
+                static_cast<double>(boundsSize.height) },
+            getDashboardLayoutSplits());
 
         auto* vertices = static_cast<MetalVertex*>(slot.vertexBuffer.contents);
-        const auto batches = populateVertices(vertices, boundsSize, spectrumSettings);
+        const auto batches
+            = populateVertices(vertices, boundsSize, dashboardLayout, spectrumSettings);
 
         auto* descriptor = [MTLRenderPassDescriptor renderPassDescriptor];
         auto* colourAttachment = descriptor.colorAttachments[0];
@@ -826,20 +933,37 @@ public:
         [encoder setRenderPipelineState:pipelineState];
         [encoder setVertexBuffer:slot.vertexBuffer offset:0 atIndex:0];
 
-        if (batches.gridCount != 0)
+        if (batches.shell.count != 0)
             [encoder drawPrimitives:MTLPrimitiveTypeTriangle
-                        vertexStart:batches.gridStart
-                        vertexCount:batches.gridCount];
+                        vertexStart:batches.shell.start
+                        vertexCount:batches.shell.count];
 
-        if (batches.spectrumCount >= 2)
-            [encoder drawPrimitives:MTLPrimitiveTypeTriangleStrip
-                        vertexStart:batches.spectrumStart
-                        vertexCount:batches.spectrumCount];
+        const auto spectrumScissor = makeScissorRect(dashboardLayout[DashboardPanel::spectrum],
+            boundsSize, drawable.texture.width, drawable.texture.height);
 
-        if (batches.meterCount != 0)
+        if (spectrumScissor.width != 0 && spectrumScissor.height != 0) {
+            [encoder setScissorRect:spectrumScissor];
+
+            if (batches.spectrumGrid.count != 0)
+                [encoder drawPrimitives:MTLPrimitiveTypeTriangle
+                            vertexStart:batches.spectrumGrid.start
+                            vertexCount:batches.spectrumGrid.count];
+
+            if (batches.spectrum.count >= 2)
+                [encoder drawPrimitives:MTLPrimitiveTypeTriangleStrip
+                            vertexStart:batches.spectrum.start
+                            vertexCount:batches.spectrum.count];
+        }
+
+        const auto meterScissor = makeScissorRect(dashboardLayout[DashboardPanel::peakRms],
+            boundsSize, drawable.texture.width, drawable.texture.height);
+
+        if (meterScissor.width != 0 && meterScissor.height != 0 && batches.peakRms.count != 0) {
+            [encoder setScissorRect:meterScissor];
             [encoder drawPrimitives:MTLPrimitiveTypeTriangle
-                        vertexStart:batches.meterStart
-                        vertexCount:batches.meterCount];
+                        vertexStart:batches.peakRms.start
+                        vertexCount:batches.peakRms.count];
+        }
 
         [encoder endEncoding];
 
@@ -956,6 +1080,7 @@ private:
     juce::String initializationError;
     bool metalReady = false;
     std::atomic<std::uint64_t> packedSpectrumSettings { 0 };
+    std::atomic<std::uint32_t> packedDashboardLayoutSplits { 0 };
     std::atomic<std::uint64_t> requestedTelemetryEpoch { 1 };
 
     std::atomic<bool> requestedActive { false };
@@ -1390,8 +1515,8 @@ private:
         }
     }
 
-    VertexBatches populateVertices(
-        MetalVertex* vertices, CGSize logicalSize, SpectrumRenderSettings settings) const noexcept
+    VertexBatches populateVertices(MetalVertex* vertices, CGSize logicalSize,
+        const DashboardTileLayout& dashboardLayout, SpectrumRenderSettings settings) const noexcept
     {
         VertexBatches batches;
 
@@ -1401,39 +1526,97 @@ private:
         std::size_t cursor = 0;
         const auto width = static_cast<float>(logicalSize.width);
         const auto height = static_cast<float>(logicalSize.height);
-        const auto margin = std::clamp(width * 0.018F, 10.0F, 20.0F);
-        const auto meterWidth = std::clamp(width * 0.075F, 54.0F, 92.0F);
-        const auto meterGap = std::clamp(width * 0.012F, 8.0F, 16.0F);
-        const auto plotLeft = margin;
-        const auto plotRight = std::max(plotLeft + 1.0F, width - margin - meterGap - meterWidth);
-        const auto plotBottom = std::clamp(height * 0.045F, 14.0F, 30.0F);
-        const auto plotTop = height - std::clamp(height * 0.025F, 10.0F, 22.0F);
 
         const auto pointToClip = [width, height](float x, float y) noexcept {
             return simd_make_float2((2.0F * x / width) - 1.0F, (2.0F * y / height) - 1.0F);
         };
 
         const auto appendVertex = [&](float x, float y, simd_float4 colour) noexcept {
-            if (cursor < maximumVertexCount)
-                vertices[cursor++] = { pointToClip(x, y), colour };
+            jassert(cursor < maximumVertexCount);
+
+            if (cursor >= maximumVertexCount)
+                return;
+
+            vertices[cursor++] = { pointToClip(x, y), colour };
         };
 
         const auto appendQuad
             = [&](float left, float bottom, float right, float top, simd_float4 colour) noexcept {
+                  if (right <= left || top <= bottom)
+                      return;
+
                   const auto bottomLeft = pointToClip(left, bottom);
                   const auto bottomRight = pointToClip(right, bottom);
                   const auto topLeft = pointToClip(left, top);
                   const auto topRight = pointToClip(right, top);
 
-                  if (cursor + 6 <= maximumVertexCount) {
-                      vertices[cursor++] = { bottomLeft, colour };
-                      vertices[cursor++] = { bottomRight, colour };
-                      vertices[cursor++] = { topLeft, colour };
-                      vertices[cursor++] = { topLeft, colour };
-                      vertices[cursor++] = { bottomRight, colour };
-                      vertices[cursor++] = { topRight, colour };
-                  }
+                  jassert(cursor + 6 <= maximumVertexCount);
+
+                  if (cursor + 6 > maximumVertexCount)
+                      return;
+
+                  vertices[cursor++] = { bottomLeft, colour };
+                  vertices[cursor++] = { bottomRight, colour };
+                  vertices[cursor++] = { topLeft, colour };
+                  vertices[cursor++] = { topLeft, colour };
+                  vertices[cursor++] = { bottomRight, colour };
+                  vertices[cursor++] = { topRight, colour };
               };
+
+        const auto appendBorder = [&](const RenderRect& bounds, float thickness,
+                                      simd_float4 colour) noexcept {
+            if (bounds.width() <= 0.0F || bounds.height() <= 0.0F)
+                return;
+
+            thickness
+                = std::min(thickness, std::min(bounds.width() * 0.5F, bounds.height() * 0.5F));
+            appendQuad(bounds.left, bounds.bottom, bounds.right, bounds.bottom + thickness, colour);
+            appendQuad(bounds.left, bounds.top - thickness, bounds.right, bounds.top, colour);
+            appendQuad(bounds.left, bounds.bottom + thickness, bounds.left + thickness,
+                bounds.top - thickness, colour);
+            appendQuad(bounds.right - thickness, bounds.bottom + thickness, bounds.right,
+                bounds.top - thickness, colour);
+        };
+
+        const auto headerHeight = [](const RenderRect& bounds) noexcept {
+            return std::min(bounds.height(), std::clamp(bounds.height() * 0.13F, 18.0F, 26.0F));
+        };
+
+        constexpr auto livePanelColour = simd_float4 { 0.025F, 0.035F, 0.052F, 1.0F };
+        constexpr auto placeholderPanelColour = simd_float4 { 0.014F, 0.020F, 0.030F, 1.0F };
+        constexpr auto spectrogramPanelColour = simd_float4 { 0.0F, 0.0F, 0.0F, 1.0F };
+        constexpr auto panelBorderColour = simd_float4 { 0.13F, 0.17F, 0.23F, 0.90F };
+        constexpr auto headerDividerColour = simd_float4 { 0.12F, 0.17F, 0.24F, 0.72F };
+
+        batches.shell.start = cursor;
+
+        for (std::size_t index = 0; index < dashboardPanelCount; ++index) {
+            const auto panel = static_cast<DashboardPanel>(index);
+            const auto bounds = toRenderRect(dashboardLayout[panel], height);
+            auto fillColour = placeholderPanelColour;
+
+            if (panel == DashboardPanel::spectrum || panel == DashboardPanel::peakRms)
+                fillColour = livePanelColour;
+            else if (panel == DashboardPanel::spectrogram)
+                fillColour = spectrogramPanelColour;
+
+            appendQuad(bounds.left, bounds.bottom, bounds.right, bounds.top, fillColour);
+            appendBorder(bounds, 1.0F, panelBorderColour);
+
+            const auto dividerY = bounds.top - headerHeight(bounds);
+            appendQuad(bounds.left + 1.0F, dividerY - 0.5F, bounds.right - 1.0F, dividerY + 0.5F,
+                headerDividerColour);
+        }
+
+        batches.shell.count = cursor - batches.shell.start;
+
+        const auto spectrumPanel = toRenderRect(dashboardLayout[DashboardPanel::spectrum], height);
+        const auto spectrumPlot
+            = insetRenderRect(spectrumPanel, 10.0F, 10.0F, headerHeight(spectrumPanel) + 8.0F);
+        const auto plotLeft = spectrumPlot.left;
+        const auto plotRight = spectrumPlot.right;
+        const auto plotBottom = spectrumPlot.bottom;
+        const auto plotTop = spectrumPlot.top;
 
         const auto frequencyToX = [&](float frequency, float maximumFrequency) noexcept {
             const auto ratio = std::log(frequency / minimumSpectrumFrequency)
@@ -1456,28 +1639,32 @@ private:
         constexpr std::array<float, 10> frequencyGrid { 20.0F, 50.0F, 100.0F, 200.0F, 500.0F,
             1'000.0F, 2'000.0F, 5'000.0F, 10'000.0F, 20'000.0F };
 
-        batches.gridStart = cursor;
+        batches.spectrumGrid.start = cursor;
 
-        for (const auto frequency : frequencyGrid) {
-            if (frequency > maximumFrequency)
-                continue;
+        if (spectrumPlot.width() > 0.0F && spectrumPlot.height() > 0.0F) {
+            for (const auto frequency : frequencyGrid) {
+                if (frequency > maximumFrequency)
+                    continue;
 
-            const auto x = frequencyToX(frequency, maximumFrequency);
-            appendQuad(x - 0.5F, plotBottom, x + 0.5F, plotTop, gridColour);
+                const auto x = frequencyToX(frequency, maximumFrequency);
+                appendQuad(x - 0.5F, plotBottom, x + 0.5F, plotTop, gridColour);
+            }
+
+            auto decibels = static_cast<float>(std::ceil(settings.floorDecibels / 20.0F) * 20.0F);
+
+            for (std::size_t line = 0; line < 16 && decibels <= settings.ceilingDecibels;
+                ++line, decibels += 20.0F) {
+                const auto y
+                    = decibelsToY(decibels, settings.floorDecibels, settings.ceilingDecibels);
+                appendQuad(plotLeft, y - 0.5F, plotRight, y + 0.5F, gridColour);
+            }
         }
 
-        auto decibels = static_cast<float>(std::ceil(settings.floorDecibels / 20.0F) * 20.0F);
+        batches.spectrumGrid.count = cursor - batches.spectrumGrid.start;
+        batches.spectrum.start = cursor;
 
-        for (std::size_t line = 0; line < 16 && decibels <= settings.ceilingDecibels;
-            ++line, decibels += 20.0F) {
-            const auto y = decibelsToY(decibels, settings.floorDecibels, settings.ceilingDecibels);
-            appendQuad(plotLeft, y - 0.5F, plotRight, y + 0.5F, gridColour);
-        }
-
-        batches.gridCount = cursor - batches.gridStart;
-        batches.spectrumStart = cursor;
-
-        if (hasDisplayFrame && targetFrame.spectrumValid && targetFrame.sampleRate > 0.0) {
+        if (spectrumPlot.width() > 0.0F && spectrumPlot.height() > 0.0F && hasDisplayFrame
+            && targetFrame.spectrumValid && targetFrame.sampleRate > 0.0) {
             const auto binFrequency
                 = static_cast<float>(targetFrame.sampleRate / static_cast<double>(fftSize));
             const auto firstBin = std::max<std::size_t>(
@@ -1499,8 +1686,7 @@ private:
                             settings.ceilingDecibels));
             }
 
-            for (std::size_t index = 0; index < pointCount && cursor + 2 <= maximumVertexCount;
-                ++index) {
+            for (std::size_t index = 0; index < pointCount; ++index) {
                 const auto previous = spectrumPoints[index == 0 ? index : index - 1];
                 const auto next = spectrumPoints[index + 1 < pointCount ? index + 1 : index];
                 const auto deltaX = next.x - previous.x;
@@ -1517,36 +1703,59 @@ private:
             }
         }
 
-        batches.spectrumCount = cursor - batches.spectrumStart;
-        batches.meterStart = cursor;
+        batches.spectrum.count = cursor - batches.spectrum.start;
+        batches.peakRms.start = cursor;
 
-        const auto meterLeft = plotRight + meterGap;
-        const auto channelGap = std::clamp(meterWidth * 0.11F, 5.0F, 9.0F);
-        const auto channelWidth = (meterWidth - channelGap) * 0.5F;
+        const auto meterPanel = toRenderRect(dashboardLayout[DashboardPanel::peakRms], height);
+        const auto meterPlot
+            = insetRenderRect(meterPanel, 12.0F, 10.0F, headerHeight(meterPanel) + 8.0F);
+        const auto meterGroupWidth
+            = std::min(meterPlot.width(), std::clamp(meterPanel.width() * 0.38F, 44.0F, 76.0F));
+        const auto meterLeft = meterPlot.left + (meterPlot.width() - meterGroupWidth) * 0.5F;
+        const auto meterBottom = meterPlot.bottom;
+        const auto meterTop = meterPlot.top;
+        const auto channelGap
+            = std::min(meterGroupWidth * 0.14F, std::clamp(meterGroupWidth * 0.08F, 4.0F, 7.0F));
+        const auto channelWidth = std::max(0.0F, (meterGroupWidth - channelGap) * 0.5F);
         constexpr auto meterTrackColour = simd_float4 { 0.08F, 0.11F, 0.15F, 1.0F };
-        constexpr auto rmsColour = simd_float4 { 0.12F, 0.58F, 0.78F, 1.0F };
-        constexpr auto peakColour = simd_float4 { 1.0F, 0.72F, 0.20F, 1.0F };
+        constexpr auto rmsColour = simd_float4 { 0.10F, 0.48F, 0.62F, 0.82F };
+        constexpr auto peakNormalColour = simd_float4 { 0.18F, 0.90F, 0.85F, 1.0F };
+        constexpr auto peakWarningColour = simd_float4 { 1.0F, 0.72F, 0.20F, 1.0F };
+        constexpr auto peakOverColour = simd_float4 { 1.0F, 0.20F, 0.12F, 1.0F };
 
-        for (std::size_t channel = 0; channel < 2; ++channel) {
-            const auto left = meterLeft + static_cast<float>(channel) * (channelWidth + channelGap);
-            const auto right = left + channelWidth;
-            appendQuad(left, plotBottom, right, plotTop, meterTrackColour);
+        const auto meterDecibelsToY = [&](float decibels) noexcept {
+            const auto normalised
+                = (sanitiseDecibels(decibels, minimumMeterDecibels, maximumMeterDecibels)
+                      - minimumMeterDecibels)
+                / (maximumMeterDecibels - minimumMeterDecibels);
+            return meterBottom + normalised * (meterTop - meterBottom);
+        };
 
-            if (hasDisplayFrame) {
-                const auto rmsTop = decibelsToY(
-                    displayedRms[channel], minimumMeterDecibels, maximumMeterDecibels);
-                appendQuad(left + 1.0F, plotBottom + 1.0F, right - 1.0F, rmsTop, rmsColour);
+        if (meterPlot.width() > 0.0F && meterPlot.height() > 0.0F && channelWidth > 0.0F) {
+            for (std::size_t channel = 0; channel < 2; ++channel) {
+                const auto left
+                    = meterLeft + static_cast<float>(channel) * (channelWidth + channelGap);
+                const auto right = left + channelWidth;
+                appendQuad(left, meterBottom, right, meterTop, meterTrackColour);
 
-                const auto peakY = decibelsToY(
-                    displayedPeak[channel], minimumMeterDecibels, maximumMeterDecibels);
-                const auto displayedPeakColour = displayedPeak[channel] > 0.0F
-                    ? simd_float4 { 1.0F, 0.20F, 0.12F, 1.0F }
-                    : peakColour;
-                appendQuad(left, peakY - 1.0F, right, peakY + 1.0F, displayedPeakColour);
+                if (!hasDisplayFrame)
+                    continue;
+
+                const auto rmsTop = meterDecibelsToY(displayedRms[channel]);
+                appendQuad(left + 1.0F, meterBottom + 1.0F, right - 1.0F, rmsTop, rmsColour);
+
+                const auto peakY = meterDecibelsToY(displayedPeak[channel]);
+                const auto peakWidth = channelWidth * 0.52F;
+                const auto peakLeft = left + (channelWidth - peakWidth) * 0.5F;
+                const auto displayedPeakColour = displayedPeak[channel] >= 0.0F
+                    ? peakOverColour
+                    : (displayedPeak[channel] >= -6.0F ? peakWarningColour : peakNormalColour);
+                appendQuad(peakLeft, peakY - 1.0F, peakLeft + peakWidth, peakY + 1.0F,
+                    displayedPeakColour);
             }
         }
 
-        batches.meterCount = cursor - batches.meterStart;
+        batches.peakRms.count = cursor - batches.peakRms.start;
         return batches;
     }
 };
@@ -1763,6 +1972,16 @@ void MetalVisualization::setSpectrumSettings(SpectrumRenderSettings settings) no
 SpectrumRenderSettings MetalVisualization::getSpectrumSettings() const noexcept
 {
     return impl->backend->getSpectrumSettings();
+}
+
+void MetalVisualization::setDashboardLayoutSplits(DashboardLayoutSplits splits) noexcept
+{
+    impl->backend->setDashboardLayoutSplits(splits);
+}
+
+DashboardLayoutSplits MetalVisualization::getDashboardLayoutSplits() const noexcept
+{
+    return impl->backend->getDashboardLayoutSplits();
 }
 
 MetalRenderTelemetry MetalVisualization::getRenderTelemetry() const noexcept

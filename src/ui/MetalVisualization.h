@@ -3,6 +3,7 @@
 #pragma once
 
 #include "../core/VisualizationDataSource.h"
+#include "DashboardLayout.h"
 #include "FrameLatencyHistory.h"
 #include "PresentedFrameHistory.h"
 
@@ -144,6 +145,14 @@ public:
     */
     void setSpectrumSettings(SpectrumRenderSettings settings) noexcept;
     [[nodiscard]] SpectrumRenderSettings getSpectrumSettings() const noexcept;
+
+    /**
+        Publishes the four validated dashboard split indices. Invalid input is
+        replaced atomically with the compiled default layout. These methods are
+        safe to call from any thread and never allocate.
+    */
+    void setDashboardLayoutSplits(DashboardLayoutSplits splits) noexcept;
+    [[nodiscard]] DashboardLayoutSplits getDashboardLayoutSplits() const noexcept;
 
     [[nodiscard]] MetalRenderTelemetry getRenderTelemetry() const noexcept;
 

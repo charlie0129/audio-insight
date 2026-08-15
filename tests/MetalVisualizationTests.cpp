@@ -72,6 +72,17 @@ public:
         expectEquals(afterSecondReset.epoch, afterReset.epoch + 1);
         expect(!afterSecondReset.resetPending);
 
+        beginTest("Dashboard splits are published as one validated snapshot");
+
+        expect(visualization.getDashboardLayoutSplits() == DashboardLayout::defaultSplits);
+
+        constexpr DashboardLayoutSplits validSplits { 14, 24, 16, 36 };
+        visualization.setDashboardLayoutSplits(validSplits);
+        expect(visualization.getDashboardLayoutSplits() == validSplits);
+
+        visualization.setDashboardLayoutSplits({ 22, 36, 35, 36 });
+        expect(visualization.getDashboardLayoutSplits() == DashboardLayout::defaultSplits);
+
         visualization.setEffectiveActivityCallback({ });
     }
 };
