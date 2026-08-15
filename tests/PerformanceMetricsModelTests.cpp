@@ -910,6 +910,34 @@ public:
                 expectWithinAbsoluteError(updateRate->value, 3.0, 1.0e-12);
         });
 
+        testCase("Requested and achieved FFT slice rates are explicit", [this] {
+            PerformanceMetricsModel model;
+            PerformanceMetricsSnapshot snapshot;
+            snapshot.analysis.requestedFftSliceRateHz = 60;
+            snapshot.analysis.spectrumTransforms = 100;
+
+            auto view = model.update(snapshot, 10.0);
+            const auto* requested = findRawRow(view, "analysis.requestedFftSliceRateHz");
+            expect(requested != nullptr);
+            if (requested != nullptr) {
+                expectEquals(requested->label, std::string("Requested FFT slice rate"));
+                expectEquals(requested->unit, std::string("Hz"));
+            }
+
+            snapshot.analysis.spectrumTransforms += 120;
+            view = model.update(snapshot, 12.0);
+            const auto* achieved = findRate(view, "analysis.spectrumTransforms");
+            expect(achieved != nullptr && achieved->available);
+            if (achieved != nullptr) {
+                expectEquals(achieved->label, std::string("Achieved FFT slice rate"));
+                expectEquals(achieved->unit, std::string("Hz"));
+                expectWithinAbsoluteError(achieved->value, 60.0, 1.0e-12);
+            }
+
+            expect(
+                view.report.find("rate.analysis.spectrumTransforms = 60 Hz") != std::string::npos);
+        });
+
         testCase("Counter rates rebase across epochs and reject rollbacks", [this] {
             PerformanceMetricsModel model;
             PerformanceMetricsSnapshot snapshot;

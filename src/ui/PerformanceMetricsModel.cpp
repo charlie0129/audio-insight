@@ -1254,7 +1254,7 @@ void buildRates(const PerformanceMetricsSnapshot& current,
     appendRate(rates, "analysis.droppedFramePublications", "Dropped frame publications", "drops/s",
         current.analysis.droppedFramePublications, previous.analysis.droppedFramePublications,
         elapsedSeconds, baselineIsValid);
-    appendRate(rates, "analysis.spectrumTransforms", "Spectrum transforms", "transforms/s",
+    appendRate(rates, "analysis.spectrumTransforms", "Achieved FFT slice rate", "Hz",
         current.analysis.spectrumTransforms, previous.analysis.spectrumTransforms, elapsedSeconds,
         baselineIsValid);
     appendRate(rates, "analysis.backlogDiscardedFrames", "Backlog frames discarded", "frames/s",
