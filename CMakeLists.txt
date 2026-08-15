@@ -204,6 +204,8 @@ target_sources(AudioInsight
         src/plugin/PluginEditor.h
         src/plugin/PluginProcessor.cpp
         src/plugin/PluginProcessor.h
+        src/state/AnalyzerConfiguration.cpp
+        src/state/AnalyzerConfiguration.h
         src/ui/DashboardLayout.cpp
         src/ui/DashboardLayout.h
         src/ui/DashboardLayoutEdit.cpp
@@ -266,6 +268,8 @@ source_group(TREE "${CMAKE_CURRENT_SOURCE_DIR}" FILES
     src/plugin/PluginEditor.h
     src/plugin/PluginProcessor.cpp
     src/plugin/PluginProcessor.h
+    src/state/AnalyzerConfiguration.cpp
+    src/state/AnalyzerConfiguration.h
     src/ui/DashboardLayout.cpp
     src/ui/DashboardLayout.h
     src/ui/DashboardLayoutEdit.cpp
@@ -311,6 +315,8 @@ if(BUILD_TESTING)
             src/plugin/PluginEditor.h
             src/plugin/PluginProcessor.cpp
             src/plugin/PluginProcessor.h
+            src/state/AnalyzerConfiguration.cpp
+            src/state/AnalyzerConfiguration.h
             src/ui/DashboardLayout.cpp
             src/ui/DashboardLayout.h
             src/ui/DashboardLayoutEdit.cpp
@@ -331,6 +337,7 @@ if(BUILD_TESTING)
             src/ui/PresentedFrameHistory.h
             tests/AnalysisCoordinatorTests.cpp
             tests/AnalysisCoreTests.cpp
+            tests/AnalyzerConfigurationTests.cpp
             tests/DashboardLayoutTests.cpp
             tests/DashboardLayoutEditTests.cpp
             tests/DashboardLayoutStoreTests.cpp
@@ -399,6 +406,8 @@ if(BUILD_TESTING)
         src/plugin/PluginEditor.h
         src/plugin/PluginProcessor.cpp
         src/plugin/PluginProcessor.h
+        src/state/AnalyzerConfiguration.cpp
+        src/state/AnalyzerConfiguration.h
         src/ui/DashboardLayout.cpp
         src/ui/DashboardLayout.h
         src/ui/DashboardLayoutEdit.cpp
@@ -419,6 +428,7 @@ if(BUILD_TESTING)
         src/ui/PresentedFrameHistory.h
         tests/AnalysisCoordinatorTests.cpp
         tests/AnalysisCoreTests.cpp
+        tests/AnalyzerConfigurationTests.cpp
         tests/DashboardLayoutTests.cpp
         tests/DashboardLayoutEditTests.cpp
         tests/DashboardLayoutStoreTests.cpp
