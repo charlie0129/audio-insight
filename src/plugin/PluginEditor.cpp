@@ -196,7 +196,8 @@ PluginEditor::PluginEditor(PluginProcessor& processorToUse, VisualizationDataSou
                   processor_.getAnalysisTelemetry() };
           },
           [this] { visualization.resetRenderTelemetry(); },
-          [this] { return visualization.isEffectivelyRendering(); }),
+          [this] { return visualization.isEffectivelyRendering(); },
+          [this] { return visualization.getRenderTelemetry(); }),
       floorAttachment(processorToUse.getParameters(), spectrumFloorParameter, floorSlider),
       ceilingAttachment(processorToUse.getParameters(), spectrumCeilingParameter, ceilingSlider),
       smoothingAttachment(
