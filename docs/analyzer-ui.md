@@ -157,10 +157,13 @@ there is no separate Apply step. Give each section a reset-to-default action.
 Keep settings for placeholder panels visibly disabled and labeled as not yet
 implemented rather than accepting changes that do nothing without explanation.
 
-Move the current Floor, Ceiling, and Smooth controls from the toolbar into the
-Spectrum section when the inspector lands; do not duplicate them. Until that
-migration, the normalized Smooth control defaults to `0.40`. The later
-time-based Temporal averaging control replaces it for fresh configurations.
+Floor, Ceiling, and Smooth live in the Spectrum section rather than the toolbar;
+do not duplicate them. The current interim Smooth control remains normalized
+from `0` (immediate/off) to `1` (strongest renderer interpolation). A fresh
+75 ms analyzer configuration displays approximately `0.35`, replacing the
+earlier `0.40` default. This control describes the current visual interpolation,
+not the average-power analyzer defined below. Replace it with the logarithmic,
+time-based Temporal averaging control when that analyzer path is implemented.
 
 ### Settings and Metrics exclusivity
 
@@ -207,6 +210,10 @@ layout in the global store described above. Metrics remains a non-automatable
 per-instance toggle. Settings visibility, edit-mode working state, active
 history samples, holds, and loudness integration are transient and are not
 serialized.
+
+After a user-originated analyzer configuration edit, notify the host that
+non-parameter plugin state changed so it can mark the project for re-saving.
+Loading or restoring existing state must not itself be reported as a new edit.
 
 Current development builds exposed `spectrumFloor`, `spectrumCeiling`, and
 `spectrumSmoothing` as automatable host parameters. There is no public state or

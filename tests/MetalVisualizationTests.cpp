@@ -304,7 +304,7 @@ public:
         const auto defaultedSettings = visualization.getSpectrumSettings();
         expectWithinAbsoluteError(defaultedSettings.floorDecibels, -90.0F, 0.001F);
         expectWithinAbsoluteError(defaultedSettings.ceilingDecibels, 0.0F, 0.001F);
-        expectWithinAbsoluteError(defaultedSettings.smoothing, 0.40F, 0.0001F);
+        expectWithinAbsoluteError(defaultedSettings.smoothing, 0.35F, 0.0001F);
         expectWithinAbsoluteError(defaultedSettings.frequencySpacing, 1.0F, 0.0001F);
 
         visualization.setEffectiveActivityCallback({ });

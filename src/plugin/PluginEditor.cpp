@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 
 #include "PluginEditor.h"
+#include "../ui/SpectrumSmoothingMapping.h"
 
 #include <algorithm>
 #include <functional>
@@ -8,9 +9,6 @@
 
 namespace audio_insight {
 namespace {
-constexpr auto spectrumFloorParameter = "spectrumFloor";
-constexpr auto spectrumCeilingParameter = "spectrumCeiling";
-constexpr auto spectrumSmoothingParameter = "spectrumSmoothing";
 constexpr auto performanceMetricsParameter = "performanceMetrics";
 
 constexpr auto projectUrl = "https://github.com/charlie0129/audio-insight";
@@ -26,13 +24,12 @@ const auto primaryText = juce::Colour { 0xffedf4fc };
 const auto secondaryText = juce::Colour { 0xffa9b8ca };
 const auto accent = juce::Colour { 0xff55c7e8 };
 
-void layoutParameterControl(juce::Rectangle<int> area, juce::Label& label, juce::Slider& slider)
+bool readMetricsRequested(PluginProcessor& processor) noexcept
 {
-    constexpr int labelWidth = 52;
-
-    label.setBounds(area.removeFromLeft(labelWidth));
-    slider.setBounds(area);
+    const auto* value = processor.getParameters().getRawParameterValue(performanceMetricsParameter);
+    return value != nullptr && value->load(std::memory_order_relaxed) >= 0.5F;
 }
+
 } // namespace
 
 class PluginEditor::AboutOverlay final : public juce::Component {
@@ -198,11 +195,14 @@ PluginEditor::PluginEditor(PluginProcessor& processorToUse, VisualizationDataSou
           [this] { visualization.resetRenderTelemetry(); },
           [this] { return visualization.isEffectivelyRendering(); },
           [this] { return visualization.getRenderTelemetry(); }),
-      floorAttachment(processorToUse.getParameters(), spectrumFloorParameter, floorSlider),
-      ceilingAttachment(processorToUse.getParameters(), spectrumCeilingParameter, ceilingSlider),
-      smoothingAttachment(
-          processorToUse.getParameters(), spectrumSmoothingParameter, smoothingSlider),
-      metricsAttachment(processorToUse.getParameters(), performanceMetricsParameter, metricsButton),
+      utilityState(readMetricsRequested(processorToUse)),
+      settingsPanel(
+          processorToUse.getAnalyzerConfiguration(),
+          [this](const AnalyzerConfiguration& configuration) {
+              processor_.setAnalyzerConfiguration(configuration);
+              updateSpectrumSettings(configuration);
+          },
+          [this] { setSettingsVisible(false); }),
       aboutOverlay(std::make_unique<AboutOverlay>([this] { setAboutVisible(false); }))
 {
     setName("Audio Insight editor");
@@ -210,56 +210,64 @@ PluginEditor::PluginEditor(PluginProcessor& processorToUse, VisualizationDataSou
     setResizable(true, false);
     setResizeLimits(720, 420, 2560, 1600);
 
+    visualization.setComponentID("metalVisualization");
     addAndMakeVisible(visualization);
     addChildComponent(metricsPanel);
     visualization.setEffectiveActivityCallback(
         [this](const bool isActive) { metricsPanel.setCollectionActivity(isActive); });
 
-    configureParameterControl(
-        floorLabel, floorSlider, "Floor", "Lower decibel limit of the spectrum display");
-    configureParameterControl(
-        ceilingLabel, ceilingSlider, "Ceiling", "Upper decibel limit of the spectrum display");
-    configureParameterControl(
-        smoothingLabel, smoothingSlider, "Smooth", "Temporal smoothing of the spectrum display");
+    settingsButton.setComponentID("analyzerSettingsToggle");
+    settingsButton.setTooltip("Open per-instance analyzer settings");
+    settingsButton.setColour(juce::TextButton::buttonColourId, controlBackground.brighter(0.08F));
+    settingsButton.setColour(juce::TextButton::buttonOnColourId, accent.darker(0.45F));
+    settingsButton.setColour(juce::TextButton::textColourOffId, secondaryText);
+    settingsButton.setColour(juce::TextButton::textColourOnId, primaryText);
+    settingsButton.onClick = [this] { setSettingsVisible(!utilityState.isSettingsOpen()); };
+    addAndMakeVisible(settingsButton);
 
     metricsButton.setComponentID("performanceMetricsToggle");
-    metricsButton.setClickingTogglesState(true);
     metricsButton.setTooltip("Show every renderer and analysis-pipeline metric for this instance");
     metricsButton.setColour(juce::TextButton::buttonColourId, controlBackground.brighter(0.08F));
     metricsButton.setColour(juce::TextButton::buttonOnColourId, accent.darker(0.45F));
     metricsButton.setColour(juce::TextButton::textColourOffId, secondaryText);
     metricsButton.setColour(juce::TextButton::textColourOnId, primaryText);
-    metricsButton.onStateChange = [this] { updateMetricsPanelVisibility(); };
+    metricsButton.onClick = [this] {
+        if (const auto requested = utilityState.pressMetrics())
+            setMetricsParameterRequested(*requested);
+        updateUtilityPresentation();
+    };
     addAndMakeVisible(metricsButton);
 
     aboutButton.setTooltip("Show license, source, third-party, and sponsorship information");
     aboutButton.onClick = [this] { setAboutVisible(true); };
     addAndMakeVisible(aboutButton);
 
+    addChildComponent(settingsPanel);
     addChildComponent(*aboutOverlay);
 
-    floorSlider.addListener(this);
-    ceilingSlider.addListener(this);
-    smoothingSlider.addListener(this);
+    metricsParameter = processor_.getParameters().getParameter(performanceMetricsParameter);
+    metricsParameterValue
+        = processor_.getParameters().getRawParameterValue(performanceMetricsParameter);
+    processor_.addAnalyzerConfigurationListener(this);
 
-    updateSpectrumSettings();
-    updateMetricsPanelVisibility();
+    updateSpectrumSettings(processor_.getAnalyzerConfiguration());
+    synchronizeMetricsRequestedFromParameter();
+    updateUtilityPresentation();
     setSize(1200, 800);
     updateRenderingState();
 }
 
 PluginEditor::~PluginEditor()
 {
-    shuttingDown = true;
+    shuttingDown.store(true, std::memory_order_release);
+    stopTimer();
+    processor_.removeAnalyzerConfigurationListener(this);
     visualization.setEffectiveActivityCallback({ });
     metricsPanel.setPollingActive(false);
     visualization.setRenderingActive(false);
 
-    floorSlider.removeListener(this);
-    ceilingSlider.removeListener(this);
-    smoothingSlider.removeListener(this);
-
-    metricsButton.onStateChange = nullptr;
+    settingsButton.onClick = nullptr;
+    metricsButton.onClick = nullptr;
     aboutButton.onClick = nullptr;
     aboutOverlay->clearCloseAction();
 }
@@ -292,23 +300,29 @@ void PluginEditor::resized()
     auto metricsArea = controls.removeFromRight(68);
     metricsButton.setBounds(metricsArea);
 
-    controls.removeFromLeft(116);
-    controls.removeFromRight(12);
+    controls.removeFromRight(8);
+    auto settingsArea = controls.removeFromRight(76);
+    settingsButton.setBounds(settingsArea);
 
-    constexpr int gap = 10;
-    const auto widthPerControl = std::min(220, std::max(1, (controls.getWidth() - (2 * gap)) / 3));
+    const auto aboutIsVisible = aboutOverlay != nullptr && aboutOverlay->isVisible();
+    const auto settingsPresentation = utilityState.settingsPresentation(bounds.getWidth());
+    const auto settingsIsVisible
+        = !aboutIsVisible && settingsPresentation != SettingsPresentation::closed;
+    const auto dashboardIsVisible
+        = !aboutIsVisible && utilityState.shouldRenderDashboard(bounds.getWidth());
+    const auto metricsAreVisible = !aboutIsVisible && utilityState.isMetricsVisible();
 
-    auto floorArea = controls.removeFromLeft(widthPerControl);
-    controls.removeFromLeft(gap);
-    auto ceilingArea = controls.removeFromLeft(widthPerControl);
-    controls.removeFromLeft(gap);
-    auto smoothingArea = controls.removeFromLeft(widthPerControl);
+    settingsPanel.setVisible(settingsIsVisible);
+    metricsPanel.setVisible(metricsAreVisible);
+    visualization.setVisible(dashboardIsVisible);
 
-    layoutParameterControl(floorArea, floorLabel, floorSlider);
-    layoutParameterControl(ceilingArea, ceilingLabel, ceilingSlider);
-    layoutParameterControl(smoothingArea, smoothingLabel, smoothingSlider);
+    if (settingsPresentation == SettingsPresentation::sideInspector && settingsIsVisible) {
+        settingsPanel.setBounds(bounds.removeFromRight(EditorUtilityState::settingsInspectorWidth));
+    } else if (settingsPresentation == SettingsPresentation::fullContent && settingsIsVisible) {
+        settingsPanel.setBounds(bounds);
+    }
 
-    if (metricsPanel.isVisible()) {
+    if (metricsAreVisible) {
         constexpr int minimumVisualizationWidth = 320;
         constexpr int preferredMinimumMetricsWidth = 360;
         constexpr int maximumMetricsWidth = 720;
@@ -326,11 +340,27 @@ void PluginEditor::resized()
 
     visualization.setBounds(bounds);
     aboutOverlay->setBounds(getLocalBounds());
+    updateRenderingState();
 }
 
-void PluginEditor::sliderValueChanged(juce::Slider*)
+void PluginEditor::analyzerConfigurationChanged() noexcept
 {
-    updateSpectrumSettings();
+    if (!shuttingDown.load(std::memory_order_acquire))
+        analyzerConfigurationUpdatePending.store(true, std::memory_order_release);
+}
+
+void PluginEditor::timerCallback()
+{
+    // APVTS listeners may run on the audio thread. Polling its raw atomic here
+    // keeps all utility-UI mutation on the message thread without posting work
+    // from a real-time callback.
+    synchronizeMetricsRequestedFromParameter();
+
+    if (analyzerConfigurationUpdatePending.exchange(false, std::memory_order_acq_rel)) {
+        const auto configuration = processor_.getAnalyzerConfiguration();
+        settingsPanel.setConfiguration(configuration);
+        updateSpectrumSettings(configuration);
+    }
 }
 
 void PluginEditor::componentMovedOrResized(bool, bool)
@@ -348,35 +378,16 @@ void PluginEditor::componentVisibilityChanged()
     updateRenderingState();
 }
 
-void PluginEditor::configureParameterControl(juce::Label& label, juce::Slider& slider,
-    const juce::String& labelText, const juce::String& accessibilityDescription)
+void PluginEditor::updateSpectrumSettings(const AnalyzerConfiguration& configuration) noexcept
 {
-    label.setText(labelText, juce::dontSendNotification);
-    label.setFont(juce::Font { juce::FontOptions { 12.0F } });
-    label.setColour(juce::Label::textColourId, secondaryText);
-    label.setJustificationType(juce::Justification::centredLeft);
-    label.setInterceptsMouseClicks(false, false);
-    addAndMakeVisible(label);
-
-    slider.setName(labelText);
-    slider.setTitle(labelText);
-    slider.setDescription(accessibilityDescription);
-    slider.setTooltip(accessibilityDescription);
-    slider.setSliderStyle(juce::Slider::LinearHorizontal);
-    slider.setTextBoxStyle(juce::Slider::TextBoxRight, false, 58, 22);
-    slider.setColour(juce::Slider::trackColourId, accent);
-    slider.setColour(juce::Slider::thumbColourId, primaryText);
-    slider.setColour(juce::Slider::textBoxTextColourId, primaryText);
-    slider.setColour(juce::Slider::textBoxBackgroundColourId, controlBackground.brighter(0.08F));
-    slider.setColour(juce::Slider::textBoxOutlineColourId, panelOutline);
-    addAndMakeVisible(slider);
-}
-
-void PluginEditor::updateSpectrumSettings() noexcept
-{
+    const auto sanitized = AnalyzerConfigurationCodec::sanitize(configuration);
     visualization.setSpectrumSettings(SpectrumRenderSettings {
-        static_cast<float>(floorSlider.getValue()), static_cast<float>(ceilingSlider.getValue()),
-        static_cast<float>(smoothingSlider.getValue()) });
+        static_cast<float>(sanitized.spectrum.floorDb),
+        static_cast<float>(sanitized.spectrum.ceilingDb),
+        static_cast<float>(
+            SpectrumSmoothingMapping::toNormalized(sanitized.spectrum.temporalAveraging)),
+        static_cast<float>(sanitized.sharedAnalysis.frequencySpacing),
+    });
 }
 
 void PluginEditor::updateRenderingState()
@@ -385,28 +396,89 @@ void PluginEditor::updateRenderingState()
     editorIsAttached = getPeer() != nullptr;
 
     const auto aboutIsVisible = aboutOverlay != nullptr && aboutOverlay->isVisible();
-    const auto shouldRender
-        = !shuttingDown && editorIsShowing && editorIsAttached && !aboutIsVisible;
+    const auto contentWidth = getWidth();
+    const auto dashboardShouldRender = utilityState.shouldRenderDashboard(contentWidth);
+    const auto editorIsActive
+        = !shuttingDown.load(std::memory_order_acquire) && editorIsShowing && editorIsAttached;
+    if (editorIsActive && !isTimerRunning())
+        startTimerHz(30);
+    else if (!editorIsActive && isTimerRunning())
+        stopTimer();
+
+    const auto shouldRender = editorIsActive && !aboutIsVisible && dashboardShouldRender;
     visualization.setRenderingActive(shouldRender);
     metricsPanel.setPollingActive(shouldRender && metricsPanel.isVisible());
 }
 
-void PluginEditor::updateMetricsPanelVisibility()
+void PluginEditor::updateUtilityPresentation()
 {
-    const auto aboutIsVisible = aboutOverlay != nullptr && aboutOverlay->isVisible();
-    metricsPanel.setVisible(metricsButton.getToggleState() && !aboutIsVisible);
+    settingsButton.setToggleState(utilityState.isSettingsOpen(), juce::dontSendNotification);
+    metricsButton.setToggleState(utilityState.isMetricsRequested(), juce::dontSendNotification);
+
+    if (utilityState.isMetricsTemporarilyHidden()) {
+        metricsButton.setDescription(
+            "Performance metrics are requested and temporarily hidden while Settings is open");
+        metricsButton.setTooltip("Switch from Settings to the requested performance metrics panel");
+    } else {
+        metricsButton.setDescription(utilityState.isMetricsRequested()
+                ? "Performance metrics are requested and visible"
+                : "Performance metrics are off");
+        metricsButton.setTooltip(
+            "Show every renderer and analysis-pipeline metric for this instance");
+    }
+
     resized();
-    updateRenderingState();
+}
+
+void PluginEditor::synchronizeMetricsRequestedFromParameter()
+{
+    if (shuttingDown.load(std::memory_order_acquire))
+        return;
+
+    const auto requested = metricsParameterValue != nullptr
+        && metricsParameterValue->load(std::memory_order_relaxed) >= 0.5F;
+    if (requested == utilityState.isMetricsRequested())
+        return;
+
+    utilityState.setMetricsRequested(requested);
+    updateUtilityPresentation();
+}
+
+void PluginEditor::setMetricsParameterRequested(const bool requested)
+{
+    utilityState.setMetricsRequested(requested);
+
+    if (metricsParameter == nullptr)
+        return;
+
+    metricsParameter->beginChangeGesture();
+    metricsParameter->setValueNotifyingHost(requested ? 1.0F : 0.0F);
+    metricsParameter->endChangeGesture();
+}
+
+void PluginEditor::setSettingsVisible(const bool shouldBeVisible)
+{
+    if (shouldBeVisible == utilityState.isSettingsOpen())
+        return;
+
+    if (shouldBeVisible) {
+        settingsPanel.setConfiguration(processor_.getAnalyzerConfiguration());
+        utilityState.openSettings();
+    } else {
+        utilityState.closeSettings();
+    }
+
+    updateUtilityPresentation();
+
+    if (shouldBeVisible)
+        settingsPanel.focusInitialControl();
+    else if (settingsButton.isShowing())
+        settingsButton.grabKeyboardFocus();
 }
 
 void PluginEditor::setMainControlsVisible(const bool shouldBeVisible)
 {
-    floorLabel.setVisible(shouldBeVisible);
-    ceilingLabel.setVisible(shouldBeVisible);
-    smoothingLabel.setVisible(shouldBeVisible);
-    floorSlider.setVisible(shouldBeVisible);
-    ceilingSlider.setVisible(shouldBeVisible);
-    smoothingSlider.setVisible(shouldBeVisible);
+    settingsButton.setVisible(shouldBeVisible);
     metricsButton.setVisible(shouldBeVisible);
     aboutButton.setVisible(shouldBeVisible);
 }
@@ -419,15 +491,14 @@ void PluginEditor::setAboutVisible(bool shouldBeVisible)
     if (shouldBeVisible) {
         visualization.setVisible(false);
         metricsPanel.setVisible(false);
+        settingsPanel.setVisible(false);
         setMainControlsVisible(false);
         aboutOverlay->setVisible(true);
         aboutOverlay->toFront(false);
         aboutOverlay->focusInitialControl();
     } else {
         aboutOverlay->setVisible(false);
-        visualization.setVisible(true);
         setMainControlsVisible(true);
-        metricsPanel.setVisible(metricsButton.getToggleState());
 
         if (aboutButton.isShowing())
             aboutButton.grabKeyboardFocus();

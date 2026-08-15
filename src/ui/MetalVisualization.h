@@ -213,7 +213,7 @@ struct MetalRenderTelemetry {
 struct SpectrumRenderSettings {
     float floorDecibels = -90.0F;
     float ceilingDecibels = 0.0F;
-    float smoothing = 0.40F;
+    float smoothing = 0.35F;
     float frequencySpacing = 1.0F;
 };
 

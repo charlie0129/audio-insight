@@ -1,13 +1,29 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 
 #include "plugin/PluginProcessor.h"
+#include "ui/MetalVisualization.h"
+#include "ui/SpectrumSmoothingMapping.h"
 
 #include <juce_core/juce_core.h>
 
-#include <cmath>
 #include <memory>
 
 namespace audio_insight {
+namespace {
+juce::Component* findDescendantWithId(juce::Component& component, const juce::String& componentId)
+{
+    if (component.getComponentID() == componentId)
+        return &component;
+
+    for (auto* child : component.getChildren()) {
+        if (auto* match = findDescendantWithId(*child, componentId))
+            return match;
+    }
+
+    return nullptr;
+}
+} // namespace
+
 class PluginProcessorTests final : public juce::UnitTest {
 public:
     PluginProcessorTests() : UnitTest("Plugin processor", "audio-insight")
@@ -176,6 +192,65 @@ public:
             expect(configuration.spectrum.temporalAveraging.enabled);
             expectWithinAbsoluteError(
                 configuration.spectrum.temporalAveraging.milliseconds, 75.0, 1.0e-12);
+        });
+
+        testCase("Analyzer configuration listeners observe changes until removed", [this] {
+            class Listener final : public PluginProcessor::AnalyzerConfigurationListener {
+            public:
+                void analyzerConfigurationChanged() noexcept override
+                {
+                    ++notifications;
+                }
+
+                int notifications = 0;
+            };
+
+            class HostListener final : public juce::AudioProcessorListener {
+            public:
+                void audioProcessorParameterChanged(juce::AudioProcessor*, int, float) override
+                {
+                }
+
+                void audioProcessorChanged(
+                    juce::AudioProcessor*, const ChangeDetails& details) override
+                {
+                    ++notifications;
+                    observedNonParameterStateChange
+                        = observedNonParameterStateChange || details.nonParameterStateChanged;
+                }
+
+                int notifications = 0;
+                bool observedNonParameterStateChange = false;
+            };
+
+            PluginProcessor processor;
+            Listener listener;
+            HostListener hostListener;
+            processor.addAnalyzerConfigurationListener(&listener);
+            processor.addListener(&hostListener);
+
+            auto configuration = processor.getAnalyzerConfiguration();
+            configuration.spectrum.floorDb = -108.0;
+            processor.setAnalyzerConfiguration(configuration);
+            expectEquals(listener.notifications, 1);
+            expectEquals(hostListener.notifications, 1);
+            expect(hostListener.observedNonParameterStateChange);
+
+            processor.removeAnalyzerConfigurationListener(&listener);
+            configuration.spectrum.floorDb = -120.0;
+            processor.setAnalyzerConfiguration(configuration);
+            expectEquals(listener.notifications, 1);
+            expectEquals(hostListener.notifications, 2);
+            processor.removeListener(&hostListener);
+
+            juce::MemoryBlock encoded;
+            processor.getStateInformation(encoded);
+            PluginProcessor restored;
+            HostListener restoreHostListener;
+            restored.addListener(&restoreHostListener);
+            restored.setStateInformation(encoded.getData(), static_cast<int>(encoded.getSize()));
+            expectEquals(restoreHostListener.notifications, 0);
+            restored.removeListener(&restoreHostListener);
         });
 
         testCase("Legacy Spectrum parameters migrate only when configuration is absent", [this] {
@@ -437,20 +512,86 @@ public:
 
             auto* metricsControl = editor->findChildWithID("performanceMetricsToggle");
             auto* metricsPanel = editor->findChildWithID("performanceMetricsPanel");
+            auto* settingsControl = editor->findChildWithID("analyzerSettingsToggle");
+            auto* settingsPanel = editor->findChildWithID("analyzerSettingsPanel");
+            auto* visualizationComponent = editor->findChildWithID("metalVisualization");
             expect(metricsControl != nullptr);
             expect(metricsPanel != nullptr);
+            expect(settingsControl != nullptr);
+            expect(settingsPanel != nullptr);
+            expect(visualizationComponent != nullptr);
             expect(metricsPanel != nullptr && metricsPanel->isVisible());
+            expect(settingsPanel != nullptr && !settingsPanel->isVisible());
 
-            if (auto* metricsButton = dynamic_cast<juce::Button*>(metricsControl)) {
+            auto* metricsButton = dynamic_cast<juce::Button*>(metricsControl);
+            auto* settingsButton = dynamic_cast<juce::Button*>(settingsControl);
+            auto* visualization = dynamic_cast<MetalVisualization*>(visualizationComponent);
+            expect(metricsButton != nullptr);
+            expect(settingsButton != nullptr);
+            expect(visualization != nullptr);
+
+            if (visualization != nullptr) {
+                const auto renderSettings = visualization->getSpectrumSettings();
+                expectWithinAbsoluteError(renderSettings.smoothing,
+                    static_cast<float>(
+                        SpectrumSmoothingMapping::toNormalized(TemporalAveragingSettings { })),
+                    0.0001F);
+                expectWithinAbsoluteError(renderSettings.frequencySpacing, 1.0F, 0.0001F);
+            }
+
+            if (settingsButton != nullptr && settingsPanel != nullptr && metricsPanel != nullptr
+                && metricsButton != nullptr) {
+                settingsButton->onClick();
+                expect(settingsButton->getToggleState());
+                expect(settingsPanel->isVisible());
+                expect(!metricsPanel->isVisible());
                 expect(metricsButton->getToggleState());
+                expect(metricsButton->getDescription().containsIgnoreCase("temporarily hidden"));
+                if (metrics != nullptr)
+                    expectWithinAbsoluteError(metrics->getValue(), 1.0F, 0.0001F);
 
-                if (metrics != nullptr) {
-                    metrics->setValueNotifyingHost(0.0F);
-                    expect(!metricsButton->getToggleState());
-                    expect(metricsPanel != nullptr && !metricsPanel->isVisible());
+                editor->setSize(1079, 800);
+                expect(settingsPanel->isVisible());
+                expect(settingsPanel->getBounds() == juce::Rectangle<int>(0, 52, 1079, 748));
+                expect(visualizationComponent != nullptr && !visualizationComponent->isVisible());
+
+                editor->setSize(1080, 800);
+                expect(settingsPanel->getBounds() == juce::Rectangle<int>(720, 52, 360, 748));
+                expect(visualizationComponent != nullptr && visualizationComponent->isVisible());
+                if (visualizationComponent != nullptr)
+                    expectEquals(visualizationComponent->getWidth(), 720);
+
+                if (auto* floorControl
+                    = findDescendantWithId(*settingsPanel, "settingsSpectrumFloor")) {
+                    if (auto* floorSlider = dynamic_cast<juce::Slider*>(floorControl)) {
+                        floorSlider->setValue(-120.0, juce::sendNotificationSync);
+                        expectWithinAbsoluteError(
+                            processor.getAnalyzerConfiguration().spectrum.floorDb, -120.0, 1.0e-12);
+                        if (visualization != nullptr) {
+                            expectWithinAbsoluteError(
+                                visualization->getSpectrumSettings().floorDecibels, -120.0F,
+                                0.0001F);
+                        }
+                    } else {
+                        expect(false, "Spectrum floor Settings control is not a slider");
+                    }
+                } else {
+                    expect(false, "Spectrum floor Settings control was not found");
                 }
-            } else {
-                expect(false, "Performance metrics control is not a button");
+
+                metricsButton->onClick();
+                expect(!settingsButton->getToggleState());
+                expect(!settingsPanel->isVisible());
+                expect(metricsPanel->isVisible());
+                expect(metricsButton->getToggleState());
+                if (metrics != nullptr)
+                    expectWithinAbsoluteError(metrics->getValue(), 1.0F, 0.0001F);
+
+                metricsButton->onClick();
+                expect(!metricsButton->getToggleState());
+                expect(!metricsPanel->isVisible());
+                if (metrics != nullptr)
+                    expectWithinAbsoluteError(metrics->getValue(), 0.0F, 0.0001F);
             }
 
             const auto telemetry = processor.getAnalysisTelemetry();

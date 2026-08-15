@@ -206,6 +206,9 @@ target_sources(AudioInsight
         src/plugin/PluginProcessor.h
         src/state/AnalyzerConfiguration.cpp
         src/state/AnalyzerConfiguration.h
+        src/ui/AnalyzerSettingsPanel.cpp
+        src/ui/AnalyzerSettingsPanel.h
+        src/ui/SpectrumSmoothingMapping.h
         src/ui/DashboardLayout.cpp
         src/ui/DashboardLayout.h
         src/ui/DashboardLayoutEdit.cpp
@@ -270,6 +273,9 @@ source_group(TREE "${CMAKE_CURRENT_SOURCE_DIR}" FILES
     src/plugin/PluginProcessor.h
     src/state/AnalyzerConfiguration.cpp
     src/state/AnalyzerConfiguration.h
+    src/ui/AnalyzerSettingsPanel.cpp
+    src/ui/AnalyzerSettingsPanel.h
+    src/ui/SpectrumSmoothingMapping.h
     src/ui/DashboardLayout.cpp
     src/ui/DashboardLayout.h
     src/ui/DashboardLayoutEdit.cpp
@@ -317,6 +323,9 @@ if(BUILD_TESTING)
             src/plugin/PluginProcessor.h
             src/state/AnalyzerConfiguration.cpp
             src/state/AnalyzerConfiguration.h
+            src/ui/AnalyzerSettingsPanel.cpp
+            src/ui/AnalyzerSettingsPanel.h
+            src/ui/SpectrumSmoothingMapping.h
             src/ui/DashboardLayout.cpp
             src/ui/DashboardLayout.h
             src/ui/DashboardLayoutEdit.cpp
@@ -338,6 +347,7 @@ if(BUILD_TESTING)
             tests/AnalysisCoordinatorTests.cpp
             tests/AnalysisCoreTests.cpp
             tests/AnalyzerConfigurationTests.cpp
+            tests/AnalyzerSettingsPanelTests.cpp
             tests/DashboardLayoutTests.cpp
             tests/DashboardLayoutEditTests.cpp
             tests/DashboardLayoutStoreTests.cpp
@@ -408,6 +418,9 @@ if(BUILD_TESTING)
         src/plugin/PluginProcessor.h
         src/state/AnalyzerConfiguration.cpp
         src/state/AnalyzerConfiguration.h
+        src/ui/AnalyzerSettingsPanel.cpp
+        src/ui/AnalyzerSettingsPanel.h
+        src/ui/SpectrumSmoothingMapping.h
         src/ui/DashboardLayout.cpp
         src/ui/DashboardLayout.h
         src/ui/DashboardLayoutEdit.cpp
@@ -429,6 +442,7 @@ if(BUILD_TESTING)
         tests/AnalysisCoordinatorTests.cpp
         tests/AnalysisCoreTests.cpp
         tests/AnalyzerConfigurationTests.cpp
+        tests/AnalyzerSettingsPanelTests.cpp
         tests/DashboardLayoutTests.cpp
         tests/DashboardLayoutEditTests.cpp
         tests/DashboardLayoutStoreTests.cpp

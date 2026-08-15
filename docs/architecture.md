@@ -618,9 +618,10 @@ authorize fake values, background work, or speculative resource allocation.
   correlation result.
 - Resolved the remaining panel algorithms, scales, labels, controls, defaults,
   persistence, accessibility, and reset behavior in `docs/analyzer-ui.md`.
-- Chose a more responsive `0.40` default for the current normalized Smooth
-  control and a 75 ms default for its future time-based replacement. Floor,
-  Ceiling, and Smooth move from the toolbar into the Spectrum settings section.
+- Moved Floor, Ceiling, and Smooth from the toolbar into the Spectrum settings
+  section. Until average-power temporal analysis lands, the interim normalized
+  Smooth control drives renderer interpolation and displays approximately
+  `0.35` for the fresh 75 ms configuration; zero remains immediate/off.
 - Chose the macOS system monospaced font for the first scale-aware Metal glyph
   atlas, avoiding a bundled font asset while keeping rasterization and cached
   run construction outside the display callback.

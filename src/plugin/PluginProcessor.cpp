@@ -6,6 +6,7 @@
 #include <cmath>
 #include <memory>
 #include <optional>
+#include <utility>
 
 namespace audio_insight {
 namespace {
@@ -226,7 +227,7 @@ void PluginProcessor::setStateInformation(const void* data, int sizeInBytes)
             }
 
             parameters.replaceState(restoredState);
-            setAnalyzerConfiguration(restoredAnalyzerConfiguration);
+            replaceAnalyzerConfiguration(std::move(restoredAnalyzerConfiguration), false);
         }
     }
 }
@@ -244,9 +245,35 @@ AnalyzerConfiguration PluginProcessor::getAnalyzerConfiguration() const
 
 void PluginProcessor::setAnalyzerConfiguration(AnalyzerConfiguration configuration)
 {
+    replaceAnalyzerConfiguration(std::move(configuration), true);
+}
+
+void PluginProcessor::replaceAnalyzerConfiguration(
+    AnalyzerConfiguration configuration, const bool notifyHostOfStateChange)
+{
     configuration = AnalyzerConfigurationCodec::sanitize(configuration);
-    const std::scoped_lock lock(analyzerConfigurationMutex);
-    analyzerConfiguration = configuration;
+    {
+        const std::scoped_lock lock(analyzerConfigurationMutex);
+        analyzerConfiguration = configuration;
+    }
+
+    analyzerConfigurationListeners.call(
+        [](AnalyzerConfigurationListener& listener) { listener.analyzerConfigurationChanged(); });
+
+    if (notifyHostOfStateChange) {
+        updateHostDisplay(
+            juce::AudioProcessorListener::ChangeDetails { }.withNonParameterStateChanged(true));
+    }
+}
+
+void PluginProcessor::addAnalyzerConfigurationListener(AnalyzerConfigurationListener* listener)
+{
+    analyzerConfigurationListeners.add(listener);
+}
+
+void PluginProcessor::removeAnalyzerConfigurationListener(AnalyzerConfigurationListener* listener)
+{
+    analyzerConfigurationListeners.remove(listener);
 }
 
 AnalysisTelemetry PluginProcessor::getAnalysisTelemetry() const noexcept
