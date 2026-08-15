@@ -1,0 +1,42 @@
+<!-- SPDX-License-Identifier: AGPL-3.0-or-later -->
+
+# Audio Insight
+
+Audio Insight is a work-in-progress, open-source AUv2 and VST3 audio analyzer
+for macOS. The project prioritizes smooth display-synchronized Metal graphics,
+real-time-safe audio processing, and low overhead in the host.
+
+The first usable release will combine a real-time FFT spectrum with stereo
+sample-peak and RMS meters. See [the architecture and decision
+record](docs/architecture.md) for the accepted design and current open questions.
+
+## Development build
+
+Current development targets macOS 15 on Apple silicon with Xcode 16.4 or newer
+and CMake 3.25 or newer.
+
+```sh
+git clone --recurse-submodules https://github.com/charlie0129/audio-insight.git
+cd audio-insight
+cmake --preset macos-arm64
+cmake --build --preset macos-arm64-debug --target AudioInsight_AU AudioInsight_VST3
+```
+
+For an existing clone, initialize the pinned JUCE dependency with:
+
+```sh
+git submodule update --init --recursive
+```
+
+The build does not install plugins into user or system directories
+automatically. Signing, local installation, and quarantine guidance lives in
+[the macOS distribution policy](docs/macos-distribution.md).
+
+## License and support
+
+Project-owned code is licensed under
+[GNU AGPL version 3 or later](LICENSE). JUCE and other dependencies retain their
+own licenses and notices.
+
+If Audio Insight is useful to you, you can
+[sponsor its development](https://github.com/sponsors/charlie0129).
