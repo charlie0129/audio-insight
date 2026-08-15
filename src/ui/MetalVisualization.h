@@ -94,6 +94,9 @@ public:
     [[nodiscard]] bool isMetalAvailable() const noexcept;
     [[nodiscard]] juce::String getInitializationError() const;
 
+    /** Enables Apple's Metal Performance HUD for this visualization's layer only. */
+    void setMetalPerformanceHudEnabled(bool shouldBeEnabled);
+
     /**
         Updates the render range and temporal smoothing without requiring the
         message thread. smoothing is normalized: zero is immediate and one is

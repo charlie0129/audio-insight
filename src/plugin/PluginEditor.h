@@ -52,11 +52,14 @@ private:
     juce::Slider ceilingSlider;
     juce::Slider smoothingSlider;
 
+    juce::TextButton metalHudButton { "HUD" };
+    juce::TextButton aboutButton { "About" };
+
     juce::AudioProcessorValueTreeState::SliderAttachment floorAttachment;
     juce::AudioProcessorValueTreeState::SliderAttachment ceilingAttachment;
     juce::AudioProcessorValueTreeState::SliderAttachment smoothingAttachment;
+    juce::AudioProcessorValueTreeState::ButtonAttachment metalHudAttachment;
 
-    juce::TextButton aboutButton { "About" };
     std::unique_ptr<AboutOverlay> aboutOverlay;
 
     bool editorIsShowing = false;

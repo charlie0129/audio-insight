@@ -11,6 +11,7 @@ namespace {
 constexpr auto spectrumFloorParameter = "spectrumFloor";
 constexpr auto spectrumCeilingParameter = "spectrumCeiling";
 constexpr auto spectrumSmoothingParameter = "spectrumSmoothing";
+constexpr auto metalPerformanceHudParameter = "metalPerformanceHud";
 
 constexpr auto projectUrl = "https://github.com/charlie0129/audio-insight";
 constexpr auto sponsorUrl = "https://github.com/sponsors/charlie0129";
@@ -193,12 +194,14 @@ PluginEditor::PluginEditor(PluginProcessor& processorToUse, VisualizationDataSou
       ceilingAttachment(processorToUse.getParameters(), spectrumCeilingParameter, ceilingSlider),
       smoothingAttachment(
           processorToUse.getParameters(), spectrumSmoothingParameter, smoothingSlider),
+      metalHudAttachment(
+          processorToUse.getParameters(), metalPerformanceHudParameter, metalHudButton),
       aboutOverlay(std::make_unique<AboutOverlay>([this] { setAboutVisible(false); }))
 {
     setName("Audio Insight editor");
     setOpaque(true);
     setResizable(true, false);
-    setResizeLimits(640, 420, 2560, 1600);
+    setResizeLimits(720, 420, 2560, 1600);
 
     addAndMakeVisible(visualization);
 
@@ -208,6 +211,17 @@ PluginEditor::PluginEditor(PluginProcessor& processorToUse, VisualizationDataSou
         ceilingLabel, ceilingSlider, "Ceiling", "Upper decibel limit of the spectrum display");
     configureParameterControl(
         smoothingLabel, smoothingSlider, "Smooth", "Temporal smoothing of the spectrum display");
+
+    metalHudButton.setComponentID("metalPerformanceHudToggle");
+    metalHudButton.setClickingTogglesState(true);
+    metalHudButton.setTooltip("Show Apple's Metal Performance HUD over the visualization");
+    metalHudButton.setColour(juce::TextButton::buttonColourId, controlBackground.brighter(0.08F));
+    metalHudButton.setColour(juce::TextButton::buttonOnColourId, accent.darker(0.45F));
+    metalHudButton.setColour(juce::TextButton::textColourOffId, secondaryText);
+    metalHudButton.setColour(juce::TextButton::textColourOnId, primaryText);
+    metalHudButton.onStateChange
+        = [this] { visualization.setMetalPerformanceHudEnabled(metalHudButton.getToggleState()); };
+    addAndMakeVisible(metalHudButton);
 
     aboutButton.setTooltip("Show license, source, third-party, and sponsorship information");
     aboutButton.onClick = [this] { setAboutVisible(true); };
@@ -220,6 +234,7 @@ PluginEditor::PluginEditor(PluginProcessor& processorToUse, VisualizationDataSou
     smoothingSlider.addListener(this);
 
     updateSpectrumSettings();
+    visualization.setMetalPerformanceHudEnabled(metalHudButton.getToggleState());
     setSize(1200, 800);
     updateRenderingState();
 }
@@ -228,11 +243,13 @@ PluginEditor::~PluginEditor()
 {
     shuttingDown = true;
     visualization.setRenderingActive(false);
+    visualization.setMetalPerformanceHudEnabled(false);
 
     floorSlider.removeListener(this);
     ceilingSlider.removeListener(this);
     smoothingSlider.removeListener(this);
 
+    metalHudButton.onStateChange = nullptr;
     aboutButton.onClick = nullptr;
     aboutOverlay->clearCloseAction();
 }
@@ -260,6 +277,10 @@ void PluginEditor::resized()
 
     auto aboutArea = controls.removeFromRight(72);
     aboutButton.setBounds(aboutArea);
+
+    controls.removeFromRight(8);
+    auto metalHudArea = controls.removeFromRight(56);
+    metalHudButton.setBounds(metalHudArea);
 
     controls.removeFromLeft(116);
     controls.removeFromRight(12);
@@ -350,6 +371,7 @@ void PluginEditor::setMainControlsVisible(const bool shouldBeVisible)
     floorSlider.setVisible(shouldBeVisible);
     ceilingSlider.setVisible(shouldBeVisible);
     smoothingSlider.setVisible(shouldBeVisible);
+    metalHudButton.setVisible(shouldBeVisible);
     aboutButton.setVisible(shouldBeVisible);
 }
 

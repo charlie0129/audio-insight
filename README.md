@@ -67,6 +67,21 @@ installation, use the corresponding directories under `~/Library` instead:
 
 Restart or rescan the audio host after copying the bundle.
 
+## Metal performance HUD
+
+The editor's **HUD** toggle enables Apple's Metal Performance HUD directly on
+Audio Insight's Metal layer. It works in Release builds, is off by default, and
+is saved with the plugin state. The focused HUD layout shows frame rate, frame
+interval and pacing graph, GPU and Metal CPU time, presentation delay, and the
+layer's pixel size and scale.
+
+For a useful visual report, let the plugin render for at least 30 seconds, then
+capture the HUD while audio is playing. Include the host, display refresh rate,
+editor size, and whether the display is Retina. The HUD adds some diagnostic
+overhead, so final performance measurements should also be confirmed with it
+disabled. Enable it on only one Audio Insight instance at a time so Metal's
+process-level metric attribution remains unambiguous.
+
 For an existing clone, initialize the pinned JUCE dependency with:
 
 ```sh

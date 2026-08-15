@@ -397,6 +397,8 @@ public:
             layer.presentsWithTransaction = NO;
         }
 
+        setMetalPerformanceHudEnabled(metalPerformanceHudEnabled);
+
         [view attachRenderBackend:this];
 
         if (![view hasDisplayLink]) {
@@ -420,6 +422,7 @@ public:
         setEffectiveActive(false);
 
         if (view != nil) {
+            setMetalPerformanceHudEnabled(false);
             view.paused = YES;
             view.delegate = nil;
             [view detachRenderBackend];
@@ -466,6 +469,29 @@ public:
     [[nodiscard]] juce::String getInitializationError() const
     {
         return initializationError;
+    }
+
+    void setMetalPerformanceHudEnabled(bool shouldBeEnabled)
+    {
+        assertMessageThread();
+        metalPerformanceHudEnabled = shouldBeEnabled;
+
+        if (view == nil || ![view.layer isKindOfClass:[CAMetalLayer class]])
+            return;
+
+        auto* layer = static_cast<CAMetalLayer*>(view.layer);
+
+        if (shouldBeEnabled) {
+            layer.developerHUDProperties = @ {
+                @"mode" : @"main",
+                @"logging" : @"disabled",
+                @"MTL_HUD_DISABLE_MENU_BAR" : @"1",
+                @"MTL_HUD_ELEMENTS" : @"fps,frameinterval,frameintervalgraph,gputime,metalcpu,"
+                                      @"presentdelay,layersize,layerscale"
+            };
+        } else {
+            layer.developerHUDProperties = @ { @"mode" : @"disabled" };
+        }
     }
 
     void setSpectrumSettings(SpectrumRenderSettings settings) noexcept
@@ -770,6 +796,7 @@ private:
     id<MTLRenderPipelineState> pipelineState = nil;
     juce::String initializationError;
     bool metalReady = false;
+    bool metalPerformanceHudEnabled = false;
     std::atomic<std::uint64_t> packedSpectrumSettings { 0 };
     std::atomic<std::uint64_t> requestedTelemetryEpoch { 1 };
 
@@ -879,6 +906,7 @@ private:
     {
         auto* messageManager = juce::MessageManager::getInstanceWithoutCreating();
         jassert(messageManager != nullptr && messageManager->isThisTheMessageThread());
+        juce::ignoreUnused(messageManager);
     }
 
     [[nodiscard]] std::shared_ptr<AtomicRenderTelemetry> loadPublishedTelemetry() const noexcept
@@ -1534,6 +1562,12 @@ bool MetalVisualization::isMetalAvailable() const noexcept
 juce::String MetalVisualization::getInitializationError() const
 {
     return impl->backend->getInitializationError();
+}
+
+void MetalVisualization::setMetalPerformanceHudEnabled(bool shouldBeEnabled)
+{
+    jassert(juce::MessageManager::getInstance()->isThisTheMessageThread());
+    impl->backend->setMetalPerformanceHudEnabled(shouldBeEnabled);
 }
 
 void MetalVisualization::setSpectrumSettings(SpectrumRenderSettings settings) noexcept

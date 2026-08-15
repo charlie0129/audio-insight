@@ -38,6 +38,7 @@ an incidental result of analysis.
 | Analysis scheduling | Do not create one thread per visualization. Each instance has a logical coordinator, not a dedicated thread, and submits fairly to a process-wide pool initially bounded to two workers. |
 | Render handoff | Renderers consume stable, immutable snapshots rather than mutable analysis working memory. |
 | Display timing | Pace frames from the active display's refresh cycle, with smooth 60 Hz and 120 Hz/ProMotion behavior where the host and display permit it. Measure the cadence and deadlines actually granted by the display-link update rather than inferring them from the screen's advertised maximum refresh rate. |
+| Performance HUD | Offer Apple's Metal Performance HUD as an opt-in, persisted editor setting that is available in Release builds and off by default. Apply it only to Audio Insight's `CAMetalLayer`; do not mutate the host process's environment. |
 | DPI support | Treat layout units and render pixels separately and support both regular-density and Retina displays, including live movement between them. |
 | Editor lifecycle | Stop sample capture, analysis, history, display-link activity, and Metal submission when the editor is closed, hidden, or occluded beyond a short debounce. Reopening starts with fresh analysis state. |
 | First usable release | Show a large real-time FFT spectrum with compact stereo sample-peak/RMS meters in one resizable layout. Defer history-based and stereo-field views. |
@@ -220,6 +221,15 @@ provided by the display-link update. `CAMetalDisplayLink` owns presentation
 timing, so its timestamps are telemetry and deadline inputs rather than values
 for `presentAtTime` or other timed presentation APIs, which assert for these
 drawables.
+
+The editor exposes Apple's Metal Performance HUD through
+`CAMetalLayer.developerHUDProperties`. The toggle targets only Audio Insight's
+layer, remains available in optimized builds, and defaults to off because the
+HUD itself has diagnostic overhead. Formal performance captures should record
+whether it was enabled and confirm important results with it disabled. Only one
+instance in a host process should designate its layer as the HUD's main layer at
+a time; simultaneous HUD-enabled instances can make process-level metric
+attribution ambiguous.
 
 The rendering toolbox should favor simple, predictable GPU operations:
 
@@ -484,3 +494,5 @@ order of visualizations.
   remains open.
 - Added explicit user review checkpoints for visual and DAW behavior that cannot
   be assessed confidently in the development environment.
+- Added an opt-in, per-layer Metal Performance HUD setting for user-assisted
+  frame-pacing diagnostics in Release builds.

@@ -88,12 +88,19 @@ public:
         testCase("Parameter state round-trips", [this] {
             PluginProcessor source;
             auto* floor = source.getParameters().getParameter("spectrumFloor");
+            auto* metalHud = source.getParameters().getParameter("metalPerformanceHud");
             expect(floor != nullptr);
+            expect(metalHud != nullptr);
 
-            if (floor == nullptr)
+            if (floor == nullptr || metalHud == nullptr)
                 return;
 
+            expectWithinAbsoluteError(metalHud->getValue(), 0.0F, 0.0001F);
+            expect(!metalHud->isMetaParameter());
+            expect(!metalHud->isAutomatable());
+
             floor->setValueNotifyingHost(0.375F);
+            metalHud->setValueNotifyingHost(1.0F);
 
             juce::MemoryBlock state;
             source.getStateInformation(state);
@@ -103,14 +110,26 @@ public:
             restored.setStateInformation(state.getData(), static_cast<int>(state.getSize()));
 
             const auto* restoredFloor = restored.getParameters().getParameter("spectrumFloor");
+            const auto* restoredMetalHud
+                = restored.getParameters().getParameter("metalPerformanceHud");
             expect(restoredFloor != nullptr);
+            expect(restoredMetalHud != nullptr);
 
             if (restoredFloor != nullptr)
                 expectWithinAbsoluteError(restoredFloor->getValue(), 0.375F, 0.0001F);
+
+            if (restoredMetalHud != nullptr)
+                expectWithinAbsoluteError(restoredMetalHud->getValue(), 1.0F, 0.0001F);
         });
 
         testCase("The custom editor starts detached and inactive", [this] {
             PluginProcessor processor;
+            auto* metalHud = processor.getParameters().getParameter("metalPerformanceHud");
+            expect(metalHud != nullptr);
+
+            if (metalHud != nullptr)
+                metalHud->setValueNotifyingHost(1.0F);
+
             std::unique_ptr<juce::AudioProcessorEditor> editor { processor.createEditor() };
 
             expect(editor != nullptr);
@@ -121,6 +140,25 @@ public:
             expect(editor->isResizable());
             expectEquals(editor->getWidth(), 1200);
             expectEquals(editor->getHeight(), 800);
+
+            if (const auto* constrainer = editor->getConstrainer())
+                expectEquals(constrainer->getMinimumWidth(), 720);
+            else
+                expect(false, "Resizable editor has no bounds constrainer");
+
+            auto* metalHudControl = editor->findChildWithID("metalPerformanceHudToggle");
+            expect(metalHudControl != nullptr);
+
+            if (auto* metalHudButton = dynamic_cast<juce::Button*>(metalHudControl)) {
+                expect(metalHudButton->getToggleState());
+
+                if (metalHud != nullptr) {
+                    metalHud->setValueNotifyingHost(0.0F);
+                    expect(!metalHudButton->getToggleState());
+                }
+            } else {
+                expect(false, "Metal HUD control is not a button");
+            }
 
             const auto telemetry = processor.getAnalysisTelemetry();
             expectEquals(telemetry.capture.attemptedChunks, std::uint64_t { 0 });

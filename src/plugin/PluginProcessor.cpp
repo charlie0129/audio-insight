@@ -11,6 +11,7 @@ constexpr auto stateTreeName = "AudioInsightState";
 constexpr auto spectrumFloorParameter = "spectrumFloor";
 constexpr auto spectrumCeilingParameter = "spectrumCeiling";
 constexpr auto spectrumSmoothingParameter = "spectrumSmoothing";
+constexpr auto metalPerformanceHudParameter = "metalPerformanceHud";
 } // namespace
 
 PluginProcessor::PluginProcessor()
@@ -176,6 +177,10 @@ juce::AudioProcessorValueTreeState::ParameterLayout PluginProcessor::createParam
     layout.add(std::make_unique<juce::AudioParameterFloat>(
         juce::ParameterID { spectrumSmoothingParameter, 1 }, "Spectrum smoothing",
         juce::NormalisableRange<float> { 0.0F, 1.0F, 0.01F }, 0.65F));
+
+    layout.add(std::make_unique<juce::AudioParameterBool>(
+        juce::ParameterID { metalPerformanceHudParameter, 1 }, "Metal performance HUD", false,
+        juce::AudioParameterBoolAttributes().withAutomatable(false)));
 
     return layout;
 }
