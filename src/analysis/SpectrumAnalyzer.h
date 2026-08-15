@@ -2,6 +2,7 @@
 
 #pragma once
 
+#include "SpectrumTransformSink.h"
 #include "StereoSampleCapture.h"
 #include "core/SpectrumAnalysisConfiguration.h"
 #include "core/SpectrumTemporalConfiguration.h"
@@ -55,8 +56,12 @@ public:
         VisualizationFrame* destinationToInvalidate = nullptr) noexcept;
 
     /** Consumes one captured chunk and publishes every completed transform. */
-    [[nodiscard]] bool process(
-        const CapturedStereoChunkView& chunk, VisualizationFrame& destination) noexcept;
+    [[nodiscard]] bool process(const CapturedStereoChunkView& chunk,
+        VisualizationFrame& destination,
+        SpectrumTransformSink* rawTransformSink = nullptr) noexcept;
+
+    /** Replays the cached unsmoothed transform, if any, without calculating another FFT. */
+    [[nodiscard]] bool emitLatestRawTransform(SpectrumTransformSink& sink) const noexcept;
 
     /** Explicit capture/lifecycle reset. */
     void reset(VisualizationFrame* destinationToInvalidate = nullptr) noexcept;
@@ -96,6 +101,10 @@ public:
     {
         return temporalConfiguration_;
     }
+    [[nodiscard]] std::uint64_t resetEpoch() const noexcept
+    {
+        return resetEpoch_;
+    }
 
     [[nodiscard]] static bool isSupportedConfiguration(
         const SpectrumAnalysisConfiguration& configuration) noexcept;
@@ -120,7 +129,9 @@ private:
     void configureSampleRate(double sampleRate) noexcept;
     void buildWindow() noexcept;
     void runTransform(std::uint64_t generation, std::uint64_t capturedFrameEnd,
-        std::uint32_t channelCount, VisualizationFrame& destination) noexcept;
+        std::uint32_t channelCount, VisualizationFrame& destination,
+        SpectrumTransformSink* rawTransformSink) noexcept;
+    [[nodiscard]] SpectrumTransformView latestRawTransformView() const noexcept;
     void prepareChannelTransform(const std::array<float, maximumFftSize>& ring,
         std::array<float, maximumTransformWorkspaceSize>& workspace) noexcept;
     [[nodiscard]] juce::dsp::FFT& selectedFft() noexcept;
@@ -153,7 +164,14 @@ private:
     std::array<float, maximumSpectrumBinCount> heldPower_ { };
     std::array<double, maximumSpectrumBinCount> finiteHoldRemainingSeconds_ { };
     std::uint64_t previousTransformCapturedFrameEnd_ = 0;
+    std::uint64_t nextRawTransformSequence_ = 1;
+    std::uint64_t latestRawTransformSequence_ = 0;
+    std::uint64_t latestRawCaptureGeneration_ = 0;
+    std::uint64_t latestRawCapturedFrameEnd_ = 0;
+    std::uint64_t resetEpoch_ = 1;
+    std::uint32_t latestRawChannelCount_ = 0;
     bool hasSpectrumTemporalState_ = false;
+    bool hasLatestRawTransform_ = false;
     bool hasProducedSinceReset_ = false;
     bool hasPreviousChunk_ = false;
     std::uint64_t previousGeneration_ = 0;

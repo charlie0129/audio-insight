@@ -82,8 +82,8 @@ bool SpectrumAnalyzer::reconfigureTemporal(const SpectrumTemporalConfiguration& 
     return true;
 }
 
-bool SpectrumAnalyzer::process(
-    const CapturedStereoChunkView& chunk, VisualizationFrame& destination) noexcept
+bool SpectrumAnalyzer::process(const CapturedStereoChunkView& chunk,
+    VisualizationFrame& destination, SpectrumTransformSink* const rawTransformSink) noexcept
 {
     ++statistics_.inputChunks;
 
@@ -149,8 +149,8 @@ bool SpectrumAnalyzer::process(
             = !hasProducedSinceReset_ && validSampleCount_ == configuration_.fftSize;
         const auto nextHopReady = hasProducedSinceReset_ && samplesSinceTransform_ >= hopSize_;
         if (firstWindowReady || nextHopReady) {
-            runTransform(
-                chunk.generation, chunkFrameStart + frame + 1, chunk.channelCount, destination);
+            runTransform(chunk.generation, chunkFrameStart + frame + 1, chunk.channelCount,
+                destination, rawTransformSink);
             produced = true;
         }
     }
@@ -161,6 +161,15 @@ bool SpectrumAnalyzer::process(
     previousCapturedFrameEnd_ = chunk.capturedFrameEnd;
     previousChannelCount_ = chunk.channelCount;
     return produced;
+}
+
+bool SpectrumAnalyzer::emitLatestRawTransform(SpectrumTransformSink& sink) const noexcept
+{
+    if (!hasLatestRawTransform_)
+        return false;
+
+    sink.consumeSpectrumTransform(latestRawTransformView());
+    return true;
 }
 
 void SpectrumAnalyzer::reset(VisualizationFrame* const destinationToInvalidate) noexcept
@@ -246,6 +255,14 @@ void SpectrumAnalyzer::resetTemporalState(
     samplesSinceTransform_ = 0;
     hasProducedSinceReset_ = false;
     latestPower_.fill(0.0F);
+    hasLatestRawTransform_ = false;
+    latestRawTransformSequence_ = 0;
+    latestRawCaptureGeneration_ = 0;
+    latestRawCapturedFrameEnd_ = 0;
+    latestRawChannelCount_ = 0;
+    ++resetEpoch_;
+    if (resetEpoch_ == 0)
+        ++resetEpoch_;
     resetSpectrumTemporalState(destination);
     ++statistics_.temporalResets;
 
@@ -303,7 +320,7 @@ void SpectrumAnalyzer::buildWindow() noexcept
 
 void SpectrumAnalyzer::runTransform(const std::uint64_t generation,
     const std::uint64_t capturedFrameEnd, const std::uint32_t channelCount,
-    VisualizationFrame& destination) noexcept
+    VisualizationFrame& destination, SpectrumTransformSink* const rawTransformSink) noexcept
 {
     prepareChannelTransform(leftRing_, leftWorkspace_);
     selectedFft().performFrequencyOnlyForwardTransform(leftWorkspace_.data(), true);
@@ -395,11 +412,30 @@ void SpectrumAnalyzer::runTransform(const std::uint64_t generation,
     destination.spectrumPeakHoldValid
         = temporalConfiguration_.peakHoldMode != SpectrumPeakHoldMode::off;
 
+    latestRawTransformSequence_ = nextRawTransformSequence_++;
+    if (latestRawTransformSequence_ == 0)
+        latestRawTransformSequence_ = nextRawTransformSequence_++;
+    latestRawCaptureGeneration_ = generation;
+    latestRawCapturedFrameEnd_ = capturedFrameEnd;
+    latestRawChannelCount_ = channelCount;
+    hasLatestRawTransform_ = true;
+
+    if (rawTransformSink != nullptr)
+        rawTransformSink->consumeSpectrumTransform(latestRawTransformView());
+
     samplesSinceTransform_ = 0;
     hasProducedSinceReset_ = true;
     hasSpectrumTemporalState_ = true;
     previousTransformCapturedFrameEnd_ = capturedFrameEnd;
     ++statistics_.transforms;
+}
+
+SpectrumTransformView SpectrumAnalyzer::latestRawTransformView() const noexcept
+{
+    return { latestPower_.data(), configuredBinCount_, latestRawCaptureGeneration_, fftGeneration_,
+        latestRawTransformSequence_, resetEpoch_, latestRawCapturedFrameEnd_, sampleRate_,
+        static_cast<std::uint32_t>(configuration_.fftSize), static_cast<std::uint32_t>(hopSize_),
+        static_cast<std::uint32_t>(configuration_.requestedSliceRateHz), latestRawChannelCount_ };
 }
 
 void SpectrumAnalyzer::prepareChannelTransform(const std::array<float, maximumFftSize>& ring,

@@ -190,8 +190,13 @@ target_sources(AudioInsight
     PRIVATE
         src/analysis/AnalysisCoordinator.cpp
         src/analysis/AnalysisCoordinator.h
+        src/analysis/SpectrogramColumnMapper.cpp
+        src/analysis/SpectrogramColumnMapper.h
+        src/analysis/SpectrogramColumnQueue.cpp
+        src/analysis/SpectrogramColumnQueue.h
         src/analysis/SpectrumAnalyzer.cpp
         src/analysis/SpectrumAnalyzer.h
+        src/analysis/SpectrumTransformSink.h
         src/analysis/PeakRmsBallistics.cpp
         src/analysis/PeakRmsBallistics.h
         src/analysis/SharedAnalysisScheduler.cpp
@@ -201,6 +206,7 @@ target_sources(AudioInsight
         src/analysis/StereoSampleCapture.cpp
         src/analysis/StereoSampleCapture.h
         src/core/VisualizationDataSource.h
+        src/core/SpectrogramColumn.h
         src/core/SpectrumAnalysisConfiguration.h
         src/core/SpectrumTemporalConfiguration.h
         src/core/VisualizationFrame.h
@@ -260,8 +266,13 @@ target_link_libraries(AudioInsight
 source_group(TREE "${CMAKE_CURRENT_SOURCE_DIR}" FILES
     src/analysis/AnalysisCoordinator.cpp
     src/analysis/AnalysisCoordinator.h
+    src/analysis/SpectrogramColumnMapper.cpp
+    src/analysis/SpectrogramColumnMapper.h
+    src/analysis/SpectrogramColumnQueue.cpp
+    src/analysis/SpectrogramColumnQueue.h
     src/analysis/SpectrumAnalyzer.cpp
     src/analysis/SpectrumAnalyzer.h
+    src/analysis/SpectrumTransformSink.h
     src/analysis/PeakRmsBallistics.cpp
     src/analysis/PeakRmsBallistics.h
     src/analysis/SharedAnalysisScheduler.cpp
@@ -271,6 +282,7 @@ source_group(TREE "${CMAKE_CURRENT_SOURCE_DIR}" FILES
     src/analysis/StereoSampleCapture.cpp
     src/analysis/StereoSampleCapture.h
     src/core/VisualizationDataSource.h
+    src/core/SpectrogramColumn.h
     src/core/SpectrumAnalysisConfiguration.h
     src/core/SpectrumTemporalConfiguration.h
     src/core/VisualizationFrame.h
@@ -313,8 +325,13 @@ if(BUILD_TESTING)
         PRIVATE
             src/analysis/AnalysisCoordinator.cpp
             src/analysis/AnalysisCoordinator.h
+            src/analysis/SpectrogramColumnMapper.cpp
+            src/analysis/SpectrogramColumnMapper.h
+            src/analysis/SpectrogramColumnQueue.cpp
+            src/analysis/SpectrogramColumnQueue.h
             src/analysis/SpectrumAnalyzer.cpp
             src/analysis/SpectrumAnalyzer.h
+            src/analysis/SpectrumTransformSink.h
             src/analysis/PeakRmsBallistics.cpp
             src/analysis/PeakRmsBallistics.h
             src/analysis/SharedAnalysisScheduler.cpp
@@ -324,6 +341,7 @@ if(BUILD_TESTING)
             src/analysis/StereoSampleCapture.cpp
             src/analysis/StereoSampleCapture.h
             src/core/VisualizationDataSource.h
+            src/core/SpectrogramColumn.h
             src/core/SpectrumAnalysisConfiguration.h
             src/core/SpectrumTemporalConfiguration.h
             src/core/VisualizationFrame.h
@@ -369,6 +387,7 @@ if(BUILD_TESTING)
             tests/PluginProcessorTests.cpp
             tests/PresentedFrameHistoryTests.cpp
             tests/SharedAnalysisSchedulerTests.cpp
+            tests/SpectrogramAnalysisTests.cpp
             tests/TestMain.cpp
     )
 
@@ -412,8 +431,13 @@ if(BUILD_TESTING)
     source_group(TREE "${CMAKE_CURRENT_SOURCE_DIR}" FILES
         src/analysis/AnalysisCoordinator.cpp
         src/analysis/AnalysisCoordinator.h
+        src/analysis/SpectrogramColumnMapper.cpp
+        src/analysis/SpectrogramColumnMapper.h
+        src/analysis/SpectrogramColumnQueue.cpp
+        src/analysis/SpectrogramColumnQueue.h
         src/analysis/SpectrumAnalyzer.cpp
         src/analysis/SpectrumAnalyzer.h
+        src/analysis/SpectrumTransformSink.h
         src/analysis/PeakRmsBallistics.cpp
         src/analysis/PeakRmsBallistics.h
         src/analysis/SharedAnalysisScheduler.cpp
@@ -423,6 +447,7 @@ if(BUILD_TESTING)
         src/analysis/StereoSampleCapture.cpp
         src/analysis/StereoSampleCapture.h
         src/core/VisualizationDataSource.h
+        src/core/SpectrogramColumn.h
         src/core/SpectrumAnalysisConfiguration.h
         src/core/SpectrumTemporalConfiguration.h
         src/core/VisualizationFrame.h
@@ -468,6 +493,7 @@ if(BUILD_TESTING)
         tests/PluginProcessorTests.cpp
         tests/PresentedFrameHistoryTests.cpp
         tests/SharedAnalysisSchedulerTests.cpp
+        tests/SpectrogramAnalysisTests.cpp
         tests/TestMain.cpp
     )
 endif()

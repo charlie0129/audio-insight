@@ -283,6 +283,29 @@ public:
             expect(afterEdit.requestedFftSliceRateHz == beforeEdit.requestedFftSliceRateHz);
             expect(afterEdit.spectrumTemporalConfigurationChanges
                 == beforeEdit.spectrumTemporalConfigurationChanges);
+            expect(
+                afterEdit.spectrogramMappingGeneration > beforeEdit.spectrogramMappingGeneration);
+            expect(afterEdit.spectrogramMappingChanges == beforeEdit.spectrogramMappingChanges + 1);
+        });
+
+        testCase("Spectrogram colour edits do not rebuild its frequency mapping", [this] {
+            PluginProcessor processor;
+            const auto beforeEdit = processor.getAnalysisTelemetry();
+            auto configuration = processor.getAnalyzerConfiguration();
+            configuration.spectrogram.palette = SpectrogramPalette::inferno;
+            configuration.spectrogram.colorResponse = -1.25;
+            configuration.spectrogram.colorFloorDb = -150.0;
+            configuration.spectrogram.colorCeilingDb = 6.0;
+            configuration.spectrogram.historyDurationSeconds = 30;
+            configuration.spectrogram.historyMode = SpectrogramHistoryMode::overwrite;
+            processor.setAnalyzerConfiguration(configuration);
+            const auto afterEdit = processor.getAnalysisTelemetry();
+
+            expectEquals(afterEdit.fftGeneration, beforeEdit.fftGeneration);
+            expectEquals(afterEdit.fftConfigurationChanges, beforeEdit.fftConfigurationChanges);
+            expectEquals(
+                afterEdit.spectrogramMappingGeneration, beforeEdit.spectrogramMappingGeneration);
+            expectEquals(afterEdit.spectrogramMappingChanges, beforeEdit.spectrogramMappingChanges);
         });
 
         testCase("Temporal analyzer edits remain scoped away from the FFT generation", [this] {

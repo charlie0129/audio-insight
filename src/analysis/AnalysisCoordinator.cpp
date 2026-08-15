@@ -2,10 +2,13 @@
 
 #include "AnalysisCoordinator.h"
 
+#include "SpectrogramColumnMapper.h"
+#include "SpectrogramColumnQueue.h"
 #include "SpectrumAnalyzer.h"
 #include <algorithm>
 #include <array>
 #include <atomic>
+#include <bit>
 #include <chrono>
 #include <cmath>
 #include <cstddef>
@@ -32,6 +35,11 @@ constexpr auto staleInputTimeoutNanoseconds
 
     const auto scale = std::max({ 1.0, std::abs(left), std::abs(right) });
     return std::abs(left - right) > std::numeric_limits<double>::epsilon() * scale * 4.0;
+}
+
+[[nodiscard]] bool hasIdenticalBits(const double left, const double right) noexcept
+{
+    return std::bit_cast<std::uint64_t>(left) == std::bit_cast<std::uint64_t>(right);
 }
 
 template <typename Integer>
@@ -165,7 +173,8 @@ private:
 };
 } // namespace
 
-struct AnalysisCoordinator::State final : SharedAnalysisScheduler::JobClient {
+struct AnalysisCoordinator::State final : SharedAnalysisScheduler::JobClient,
+                                          SpectrumTransformSink {
     void captureAudioBlock(const float* const left, const float* const right,
         const std::size_t frameCount, const double sampleRate, const std::uint64_t generation,
         const std::uint32_t channelCount) noexcept
@@ -197,6 +206,7 @@ struct AnalysisCoordinator::State final : SharedAnalysisScheduler::JobClient {
         newestCapturedFrameEnd = 0;
         nextCoalescedInputSequence = 1;
         spectrum.reset(&workingFrame);
+        observeSpectrumReset(captureGeneration);
         workingFrame.spectrumSequence = nextSpectrumSequence++;
         spectrumCapturedFrameEnd.store(0, std::memory_order_relaxed);
         meterCapturedFrameEnd.store(0, std::memory_order_relaxed);
@@ -223,6 +233,8 @@ struct AnalysisCoordinator::State final : SharedAnalysisScheduler::JobClient {
     {
         if (!spectrum.reconfigure(configuration, fftGeneration, &workingFrame))
             return false;
+
+        observeSpectrumReset();
 
         workingFrame.generation = currentCaptureGeneration.load(std::memory_order_acquire);
         workingFrame.spectrumSequence = nextSpectrumSequence++;
@@ -258,10 +270,132 @@ struct AnalysisCoordinator::State final : SharedAnalysisScheduler::JobClient {
         return true;
     }
 
+    [[nodiscard]] bool reconfigureSpectrogramMapping(const double frequencySpacing,
+        const std::uint64_t mappingGeneration, const std::uint64_t jobGeneration) noexcept
+    {
+        if (!spectrogramMapper.setFrequencySpacing(frequencySpacing, mappingGeneration))
+            return false;
+
+        spectrogramColumns.discardPending();
+        spectrogramCapturedFrameEnd.store(0, std::memory_order_relaxed);
+        spectrogramRowCount.store(0, std::memory_order_relaxed);
+        spectrogramMappingGeneration.store(mappingGeneration, std::memory_order_relaxed);
+        spectrogramMappingChanges.fetch_add(1, std::memory_order_relaxed);
+
+        mappingSeedWasPublished = false;
+        mappingSeedPending = true;
+        const auto emittedSeed = spectrum.emitLatestRawTransform(*this);
+        mappingSeedPending = false;
+        if (!emittedSeed || !mappingSeedWasPublished) {
+            static_cast<void>(publishSpectrogramResetMarker(
+                currentCaptureGeneration.load(std::memory_order_acquire)));
+        }
+
+        currentJobGeneration.store(jobGeneration, std::memory_order_release);
+        return true;
+    }
+
     void discardPendingCapture() noexcept
     {
         samples.discardPending();
         meters.discardPending();
+    }
+
+    void endGeneration() noexcept
+    {
+        currentCaptureGeneration.store(0, std::memory_order_release);
+        spectrum.reset(nullptr);
+        observeSpectrumReset(0, false);
+        spectrogramCapturedFrameEnd.store(0, std::memory_order_relaxed);
+        spectrogramRowCount.store(0, std::memory_order_relaxed);
+    }
+
+    [[nodiscard]] bool copyNextSpectrogramColumn(SpectrogramColumn& destination) const noexcept
+    {
+        return spectrogramColumns.copyNext(destination);
+    }
+
+    void consumeSpectrumTransform(const SpectrumTransformView& transform) noexcept override
+    {
+        spectrogramTransformsOffered.fetch_add(1, std::memory_order_relaxed);
+
+        auto observedResetFromTransform = false;
+        if (transform.resetEpoch != observedSpectrumResetEpoch) {
+            spectrogramColumns.discardPending();
+            observedSpectrumResetEpoch = transform.resetEpoch;
+            spectrogramCapturedFrameEnd.store(0, std::memory_order_relaxed);
+            spectrogramRowCount.store(0, std::memory_order_relaxed);
+            observedResetFromTransform = true;
+        }
+
+        auto columnSequence = nextSpectrogramColumnSequence++;
+        if (columnSequence == 0)
+            columnSequence = nextSpectrogramColumnSequence++;
+
+        if (!spectrogramMapper.map(
+                transform, columnSequence, mappingSeedPending, spectrogramColumnScratch)) {
+            spectrogramMappingFailures.fetch_add(1, std::memory_order_relaxed);
+            if (observedResetFromTransform)
+                static_cast<void>(publishSpectrogramResetMarker(transform.captureGeneration));
+            return;
+        }
+
+        spectrogramColumnsMapped.fetch_add(1, std::memory_order_relaxed);
+        const auto publication = spectrogramColumns.publish(spectrogramColumnScratch);
+        if (publication.published) {
+            spectrogramCapturedFrameEnd.store(
+                transform.capturedFrameEnd, std::memory_order_relaxed);
+            spectrogramRowCount.store(spectrogramColumnScratch.rowCount, std::memory_order_relaxed);
+            if (mappingSeedPending)
+                mappingSeedWasPublished = true;
+        } else if (observedResetFromTransform) {
+            static_cast<void>(publishSpectrogramResetMarker(transform.captureGeneration));
+        }
+    }
+
+    [[nodiscard]] bool publishSpectrogramResetMarker(const std::uint64_t captureGeneration) noexcept
+    {
+        if (captureGeneration == 0)
+            return false;
+
+        SpectrogramColumn marker;
+        auto sequence = nextSpectrogramColumnSequence++;
+        if (sequence == 0)
+            sequence = nextSpectrogramColumnSequence++;
+
+        marker.sequence = sequence;
+        marker.captureGeneration = captureGeneration;
+        marker.fftGeneration = spectrum.fftGeneration();
+        marker.mappingGeneration = spectrogramMapper.mappingGeneration();
+        marker.resetEpoch = spectrum.resetEpoch();
+        marker.sampleRate = spectrum.sampleRate();
+        marker.fftSize = static_cast<std::uint32_t>(spectrum.configuredFftSize());
+        marker.binCount = static_cast<std::uint32_t>(spectrum.configuredBinCount());
+        marker.hopSizeFrames = static_cast<std::uint32_t>(spectrum.hopSize());
+        marker.requestedSliceRateHz
+            = static_cast<std::uint32_t>(spectrum.configuration().requestedSliceRateHz);
+        marker.resetMarker = true;
+        return spectrogramColumns.publish(marker).published;
+    }
+
+    void observeSpectrumReset(
+        const std::uint64_t captureGeneration, const bool publishMarker = true) noexcept
+    {
+        const auto epoch = spectrum.resetEpoch();
+        if (epoch == observedSpectrumResetEpoch)
+            return;
+
+        spectrogramColumns.discardPending();
+        observedSpectrumResetEpoch = epoch;
+        spectrogramCapturedFrameEnd.store(0, std::memory_order_relaxed);
+        spectrogramRowCount.store(0, std::memory_order_relaxed);
+        if (publishMarker)
+            static_cast<void>(publishSpectrogramResetMarker(captureGeneration));
+    }
+
+    void observeSpectrumReset() noexcept
+    {
+        observeSpectrumReset(currentCaptureGeneration.load(std::memory_order_acquire));
     }
 
     [[nodiscard]] std::uint64_t latestCaptureRevision() const noexcept
@@ -314,6 +448,7 @@ struct AnalysisCoordinator::State final : SharedAnalysisScheduler::JobClient {
             && (workingFrame.channelCount != reading.channelCount
                 || sampleRatesDiffer(workingFrame.sampleRate, reading.sampleRate))) {
             spectrum.reset(&workingFrame);
+            observeSpectrumReset();
             workingFrame.spectrumSequence = nextSpectrumSequence++;
         }
 
@@ -503,7 +638,8 @@ struct AnalysisCoordinator::State final : SharedAnalysisScheduler::JobClient {
                 retainedChannelCount,
             };
             const auto spectrumWasValid = workingFrame.spectrumValid;
-            const auto producedSpectrum = spectrum.process(coalescedInput, workingFrame);
+            const auto producedSpectrum = spectrum.process(coalescedInput, workingFrame, this);
+            observeSpectrumReset();
             if (producedSpectrum) {
                 workingFrame.spectrumSequence = nextSpectrumSequence++;
                 newestCapturedFrameEnd
@@ -564,6 +700,7 @@ struct AnalysisCoordinator::State final : SharedAnalysisScheduler::JobClient {
 
         if (shouldClearStaleFrame) {
             spectrum.reset(&workingFrame);
+            observeSpectrumReset();
             requiredLiveClearEpoch = std::max(requiredLiveClearEpoch, meters.requestLiveClear());
             workingFrame.peakDecibels.fill(minimumDisplayDecibels);
             workingFrame.rmsDecibels.fill(minimumDisplayDecibels);
@@ -621,26 +758,53 @@ struct AnalysisCoordinator::State final : SharedAnalysisScheduler::JobClient {
         result.fftConfigurationChanges = fftConfigurationChanges.load(std::memory_order_relaxed);
         result.spectrumTemporalConfigurationChanges
             = spectrumTemporalConfigurationChanges.load(std::memory_order_relaxed);
+        const auto spectrogramQueueTelemetry = spectrogramColumns.telemetry();
+        result.spectrogramTransformsOffered
+            = spectrogramTransformsOffered.load(std::memory_order_relaxed);
+        result.spectrogramColumnsMapped = spectrogramColumnsMapped.load(std::memory_order_relaxed);
+        result.spectrogramMappingFailures
+            = spectrogramMappingFailures.load(std::memory_order_relaxed);
+        result.spectrogramColumnsPublished = spectrogramQueueTelemetry.publishedColumns;
+        result.spectrogramColumnsReclaimed = spectrogramQueueTelemetry.reclaimedReadyColumns;
+        result.spectrogramColumnsDropped = spectrogramQueueTelemetry.droppedIncomingColumns;
+        result.spectrogramColumnsConsumed = spectrogramQueueTelemetry.consumedColumns;
+        result.spectrogramColumnsDiscarded = spectrogramQueueTelemetry.discardedReadyColumns;
+        result.spectrogramMappingChanges
+            = spectrogramMappingChanges.load(std::memory_order_relaxed);
+        result.spectrogramCapturedFrameEnd
+            = spectrogramCapturedFrameEnd.load(std::memory_order_relaxed);
+        result.spectrogramMappingGeneration
+            = spectrogramMappingGeneration.load(std::memory_order_relaxed);
         result.fftGeneration = currentFftGeneration.load(std::memory_order_relaxed);
         result.configuredFftSize = configuredFftSize.load(std::memory_order_relaxed);
         result.configuredFftWindow = configuredFftWindow.load(std::memory_order_relaxed);
         result.requestedFftSliceRateHz = requestedFftSliceRateHz.load(std::memory_order_relaxed);
+        result.spectrogramRowCount = spectrogramRowCount.load(std::memory_order_relaxed);
+        result.spectrogramQueueReadyHighWaterMark = spectrogramQueueTelemetry.readyHighWaterMark;
+        result.spectrogramQueueReadyColumns = spectrogramQueueTelemetry.readyColumns;
         return result;
     }
 
     StereoSampleCapture samples;
     StereoMeterAccumulator meters;
     SpectrumAnalyzer spectrum;
+    SpectrogramColumnMapper spectrogramMapper;
+    mutable SpectrogramColumnQueue spectrogramColumns;
     VisualizationSnapshotExchange snapshots;
     std::array<float, maximumFftSize> spectrumLeftScratch { };
     std::array<float, maximumFftSize> spectrumRightScratch { };
     VisualizationFrame workingFrame;
+    SpectrogramColumn spectrogramColumnScratch;
     std::uint64_t newestCapturedFrameEnd = 0;
     std::uint64_t nextCoalescedInputSequence = 1;
     std::uint64_t nextSpectrumSequence = 1;
     std::uint64_t nextMeterSequence = 1;
+    std::uint64_t nextSpectrogramColumnSequence = 1;
+    std::uint64_t observedSpectrumResetEpoch = 0;
     std::uint64_t requiredUserResetEpoch = 0;
     std::uint64_t requiredLiveClearEpoch = 0;
+    bool mappingSeedPending = false;
+    bool mappingSeedWasPublished = false;
     std::atomic<std::uint64_t> currentJobGeneration { 0 };
     std::atomic<std::uint64_t> currentCaptureGeneration { 0 };
     std::atomic<std::uint64_t> captureRevision { 0 };
@@ -668,11 +832,18 @@ struct AnalysisCoordinator::State final : SharedAnalysisScheduler::JobClient {
     std::atomic<std::uint64_t> spectrumUserClears { 0 };
     std::atomic<std::uint64_t> fftConfigurationChanges { 0 };
     std::atomic<std::uint64_t> spectrumTemporalConfigurationChanges { 0 };
+    std::atomic<std::uint64_t> spectrogramTransformsOffered { 0 };
+    std::atomic<std::uint64_t> spectrogramColumnsMapped { 0 };
+    std::atomic<std::uint64_t> spectrogramMappingFailures { 0 };
+    std::atomic<std::uint64_t> spectrogramMappingChanges { 0 };
+    std::atomic<std::uint64_t> spectrogramCapturedFrameEnd { 0 };
+    std::atomic<std::uint64_t> spectrogramMappingGeneration { 1 };
     std::atomic<std::uint64_t> currentFftGeneration { 1 };
     std::atomic<std::uint32_t> configuredFftSize { static_cast<std::uint32_t>(fftSize) };
     std::atomic<std::uint32_t> configuredFftWindow { static_cast<std::uint32_t>(
         FftWindow::periodicHann) };
     std::atomic<std::uint32_t> requestedFftSliceRateHz { 60 };
+    std::atomic<std::uint32_t> spectrogramRowCount { 0 };
 };
 
 AnalysisCoordinator::AnalysisCoordinator()
@@ -804,6 +975,37 @@ void AnalysisCoordinator::setSpectrumTemporalConfiguration(
     }
 }
 
+void AnalysisCoordinator::setSpectrogramFrequencySpacing(const double spacing) noexcept
+{
+    try {
+        const std::lock_guard lifecycleLock(lifecycleMutex_);
+        if (client_ == nullptr || !std::isfinite(spacing) || spacing < 0.0 || spacing > 1.0
+            || hasIdenticalBits(spacing, spectrogramFrequencySpacing_)) {
+            return;
+        }
+
+        auto jobGeneration = client_->generation();
+        const auto isActive = captureGeneration_.load(std::memory_order_acquire) != 0;
+        if (isActive) {
+            jobGeneration = client_->cancelAndAdvanceGeneration();
+            if (!client_->waitUntilIdle())
+                return;
+        }
+
+        const auto mappingGeneration = nextNonzeroGeneration(spectrogramMappingGenerationCounter_);
+        if (!state_->reconfigureSpectrogramMapping(spacing, mappingGeneration, jobGeneration))
+            return;
+
+        spectrogramFrequencySpacing_ = spacing;
+        nextAnalysisRequestNanoseconds_.store(0, std::memory_order_relaxed);
+
+        if (isActive)
+            static_cast<void>(client_->request());
+    } catch (...) {
+        // A presentation mapping must never affect transparent audio.
+    }
+}
+
 void AnalysisCoordinator::requestAnalysis() noexcept
 {
     auto staleArmed = false;
@@ -898,6 +1100,7 @@ void AnalysisCoordinator::setVisualizationActive(const bool shouldBeActive) noex
             state_->cancelStaleClear();
             static_cast<void>(client_->cancelAndAdvanceGeneration());
             static_cast<void>(client_->waitUntilIdle());
+            state_->endGeneration();
             return;
         }
 
@@ -975,6 +1178,11 @@ bool AnalysisCoordinator::copyLatestVisualizationFrame(
     VisualizationFrame& destination) const noexcept
 {
     return state_->snapshots.copyLatest(destination);
+}
+
+bool AnalysisCoordinator::copyNextSpectrogramColumn(SpectrogramColumn& destination) const noexcept
+{
+    return state_->copyNextSpectrogramColumn(destination);
 }
 
 bool AnalysisCoordinator::isVisualizationActive() const noexcept

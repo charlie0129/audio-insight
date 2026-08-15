@@ -66,6 +66,8 @@ public:
     void resetPeakRms() noexcept override;
     [[nodiscard]] bool copyLatestVisualizationFrame(
         VisualizationFrame& destination) const noexcept override;
+    [[nodiscard]] bool copyNextSpectrogramColumn(
+        SpectrogramColumn& destination) const noexcept override;
 
 private:
     static juce::AudioProcessorValueTreeState::ParameterLayout createParameterLayout();

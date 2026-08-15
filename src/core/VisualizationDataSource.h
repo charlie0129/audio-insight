@@ -2,6 +2,7 @@
 
 #pragma once
 
+#include "SpectrogramColumn.h"
 #include "VisualizationFrame.h"
 
 namespace audio_insight {
@@ -27,5 +28,15 @@ public:
     // Copies the most recent complete immutable frame without waiting.
     [[nodiscard]] virtual bool copyLatestVisualizationFrame(
         VisualizationFrame& destination) const noexcept = 0;
+
+    // Copies the oldest retained immutable Spectrogram column. The default
+    // keeps non-Spectrogram test/host adapters source-compatible while the
+    // processor and renderer adopt this analysis-side stream.
+    [[nodiscard]] virtual bool copyNextSpectrogramColumn(
+        SpectrogramColumn& destination) const noexcept
+    {
+        static_cast<void>(destination);
+        return false;
+    }
 };
 } // namespace audio_insight

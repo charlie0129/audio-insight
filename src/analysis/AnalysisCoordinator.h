@@ -44,10 +44,24 @@ struct AnalysisTelemetry {
     std::uint64_t spectrumUserClears = 0;
     std::uint64_t fftConfigurationChanges = 0;
     std::uint64_t spectrumTemporalConfigurationChanges = 0;
+    std::uint64_t spectrogramTransformsOffered = 0;
+    std::uint64_t spectrogramColumnsMapped = 0;
+    std::uint64_t spectrogramMappingFailures = 0;
+    std::uint64_t spectrogramColumnsPublished = 0;
+    std::uint64_t spectrogramColumnsReclaimed = 0;
+    std::uint64_t spectrogramColumnsDropped = 0;
+    std::uint64_t spectrogramColumnsConsumed = 0;
+    std::uint64_t spectrogramColumnsDiscarded = 0;
+    std::uint64_t spectrogramMappingChanges = 0;
+    std::uint64_t spectrogramCapturedFrameEnd = 0;
+    std::uint64_t spectrogramMappingGeneration = 0;
     std::uint64_t fftGeneration = 0;
     std::uint32_t configuredFftSize = 0;
     std::uint32_t configuredFftWindow = 0;
     std::uint32_t requestedFftSliceRateHz = 0;
+    std::uint32_t spectrogramRowCount = 0;
+    std::uint32_t spectrogramQueueReadyHighWaterMark = 0;
+    std::uint32_t spectrogramQueueReadyColumns = 0;
 };
 
 /**
@@ -89,12 +103,17 @@ public:
     /** Applies worker-side averaging/hold settings without advancing the FFT generation. */
     void setSpectrumTemporalConfiguration(SpectrumTemporalConfiguration configuration) noexcept;
 
+    /** Rebuilds only the Spectrogram's shared-frequency row mapping. */
+    void setSpectrogramFrequencySpacing(double spacing) noexcept;
+
     void requestAnalysis() noexcept override;
     void setVisualizationActive(bool shouldBeActive) noexcept override;
     void resetSpectrum() noexcept override;
     void resetPeakRms() noexcept override;
     [[nodiscard]] bool copyLatestVisualizationFrame(
         VisualizationFrame& destination) const noexcept override;
+    [[nodiscard]] bool copyNextSpectrogramColumn(
+        SpectrogramColumn& destination) const noexcept override;
 
     [[nodiscard]] bool isVisualizationActive() const noexcept;
     [[nodiscard]] AnalysisTelemetry telemetry() const noexcept;
@@ -136,9 +155,11 @@ private:
     bool staleClearRequested_ = false;
     SpectrumAnalysisConfiguration spectrumConfiguration_;
     SpectrumTemporalConfiguration spectrumTemporalConfiguration_;
+    double spectrogramFrequencySpacing_ = 1.0;
     std::int64_t analysisRequestPeriodNanoseconds_ = 16'666'667;
     std::uint64_t captureGenerationCounter_ = 0;
     std::uint64_t fftGenerationCounter_ = 1;
+    std::uint64_t spectrogramMappingGenerationCounter_ = 1;
 
     // Serialises renderer requests against non-real-time lifecycle changes so
     // no request can slip in after deactivation has drained the client.

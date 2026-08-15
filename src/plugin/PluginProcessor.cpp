@@ -279,6 +279,8 @@ void PluginProcessor::replaceAnalyzerConfiguration(
         spectrumAnalysisConfiguration(configuration));
     analysisCoordinator.setSpectrumTemporalConfiguration(
         spectrumTemporalConfiguration(configuration));
+    analysisCoordinator.setSpectrogramFrequencySpacing(
+        configuration.sharedAnalysis.frequencySpacing);
 
     analyzerConfigurationListeners.call(
         [](AnalyzerConfigurationListener& listener) { listener.analyzerConfigurationChanged(); });
@@ -327,6 +329,11 @@ void PluginProcessor::resetSpectrum() noexcept
 bool PluginProcessor::copyLatestVisualizationFrame(VisualizationFrame& destination) const noexcept
 {
     return analysisCoordinator.copyLatestVisualizationFrame(destination);
+}
+
+bool PluginProcessor::copyNextSpectrogramColumn(SpectrogramColumn& destination) const noexcept
+{
+    return analysisCoordinator.copyNextSpectrogramColumn(destination);
 }
 
 juce::AudioProcessorValueTreeState::ParameterLayout PluginProcessor::createParameterLayout()
