@@ -4,6 +4,7 @@
 
 #include <juce_core/juce_core.h>
 
+#include <algorithm>
 #include <array>
 #include <cmath>
 
@@ -84,6 +85,44 @@ public:
                 lastPublished.sharedAnalysis.frequencySpacing, 0.401234, 1.0e-12);
         }
 
+        beginTest("Shared FFT controls publish their selected analysis choices");
+        {
+            auto callbackCount = 0;
+            AnalyzerConfiguration lastPublished;
+            AnalyzerSettingsPanel panel(
+                AnalyzerConfigurationCodec::defaults(),
+                [&](const AnalyzerConfiguration& configuration) {
+                    ++callbackCount;
+                    lastPublished = configuration;
+                },
+                [] { });
+            panel.setBounds(0, 0, 360, 720);
+
+            auto* fftSizeControl
+                = dynamic_cast<juce::ComboBox*>(findDescendantWithId(panel, "settingsFftSize"));
+            auto* windowControl
+                = dynamic_cast<juce::ComboBox*>(findDescendantWithId(panel, "settingsFftWindow"));
+            auto* rateControl = dynamic_cast<juce::ComboBox*>(
+                findDescendantWithId(panel, "settingsFftSliceRate"));
+            expect(fftSizeControl != nullptr && fftSizeControl->isEnabled());
+            expect(windowControl != nullptr && windowControl->isEnabled());
+            expect(rateControl != nullptr && rateControl->isEnabled());
+            if (fftSizeControl == nullptr || windowControl == nullptr || rateControl == nullptr)
+                return;
+
+            fftSizeControl->setSelectedId(1, juce::sendNotificationSync);
+            expectEquals(callbackCount, 1);
+            expectEquals(lastPublished.sharedAnalysis.fftSize, 1024);
+
+            windowControl->setSelectedId(3, juce::sendNotificationSync);
+            expectEquals(callbackCount, 2);
+            expect(lastPublished.sharedAnalysis.window == FftWindow::fourTermBlackmanHarris);
+
+            rateControl->setSelectedId(4, juce::sendNotificationSync);
+            expectEquals(callbackCount, 3);
+            expectEquals(lastPublished.sharedAnalysis.requestedFftSliceRateHz, 120);
+        }
+
         beginTest("Spectrum reset restores every Spectrum default in one publication");
         {
             auto configuration = AnalyzerConfigurationCodec::defaults();
@@ -128,7 +167,7 @@ public:
             expectWithinAbsoluteError(lastPublished.spectrum.fillOpacity, 0.18, 1.0e-12);
         }
 
-        beginTest("Shared reset restores disabled and live Shared settings together");
+        beginTest("Shared reset restores every Shared analysis setting together");
         {
             auto configuration = AnalyzerConfigurationCodec::defaults();
             configuration.sharedAnalysis.fftSize = 16384;
@@ -278,7 +317,7 @@ public:
             expectWithinAbsoluteError(
                 panel.getConfiguration().spectrum.temporalAveraging.milliseconds, 125.0, 1.0e-12);
 
-            auto* fftSize
+            auto* fftSizeControl
                 = dynamic_cast<juce::ComboBox*>(findDescendantWithId(panel, "settingsFftSize"));
             auto* window
                 = dynamic_cast<juce::ComboBox*>(findDescendantWithId(panel, "settingsFftWindow"));
@@ -292,7 +331,7 @@ public:
                 findDescendantWithId(panel, "settingsSpectrogramHistory"));
             auto* reference = dynamic_cast<juce::Slider*>(
                 findDescendantWithId(panel, "settingsLoudnessReference"));
-            expect(fftSize != nullptr && fftSize->getText() == "8192");
+            expect(fftSizeControl != nullptr && fftSizeControl->getText() == "8192");
             expect(window != nullptr && window->getText() == "Flat-top");
             expect(fftRate != nullptr && fftRate->getText() == "120 Hz");
             expect(spacing != nullptr && std::abs(spacing->getValue() - 0.5) < 1.0e-12);
@@ -315,38 +354,86 @@ public:
                 [] { });
             panel.setBounds(0, 0, 360, 720);
 
-            auto* close = findDescendantWithId(panel, "settingsClose");
-            auto* floor = findDescendantWithId(panel, "settingsSpectrumFloor");
-            auto* smooth = findDescendantWithId(panel, "settingsSpectrumSmooth");
-            auto* reset = findDescendantWithId(panel, "settingsSpectrumReset");
-            expect(close != nullptr);
-            expect(floor != nullptr);
-            expect(smooth != nullptr);
-            expect(reset != nullptr);
-
             auto traverser = panel.createKeyboardFocusTraverser();
-            auto* current = close;
-            auto reachedFloor = false;
-            auto reachedSmooth = false;
-            for (auto step = 0; step < 12 && current != nullptr; ++step) {
-                current = traverser->getNextComponent(current);
-                reachedFloor = reachedFloor || current == floor;
-                reachedSmooth = reachedSmooth || current == smooth;
-            }
-            expect(reachedFloor);
-            expect(reachedSmooth);
+            expect(traverser != nullptr);
+            if (traverser == nullptr)
+                return;
 
-            if (reset != nullptr) {
-                auto handler = reset->createAccessibilityHandler();
-                expect(handler != nullptr);
-                if (handler != nullptr)
-                    expect(handler->getTitle().containsIgnoreCase("Spectrum"));
+            struct ExpectedControl {
+                const char* componentId;
+                const char* accessibleTitle;
+            };
+
+            constexpr std::array expectedControls {
+                ExpectedControl { "settingsClose", "Close" },
+                ExpectedControl { "settingsSharedReset", "Shared analysis" },
+                ExpectedControl { "settingsFftSize", "FFT size" },
+                ExpectedControl { "settingsFftWindow", "FFT window" },
+                ExpectedControl { "settingsFftSliceRate", "FFT slice rate" },
+                ExpectedControl { "settingsFrequencySpacing", "Frequency spacing" },
+                ExpectedControl { "settingsSpectrumReset", "Spectrum" },
+                ExpectedControl { "settingsSpectrumFloor", "Spectrum floor" },
+                ExpectedControl { "settingsSpectrumCeiling", "Spectrum ceiling" },
+                ExpectedControl { "settingsSpectrumSmooth", "Spectrum smooth" },
+            };
+
+            const auto focusComponents = traverser->getAllComponents(&panel);
+            auto traversedSettingIndex = std::size_t { 0 };
+            for (const auto* focusComponent : focusComponents) {
+                const auto componentId = focusComponent->getComponentID();
+                if (!componentId.startsWith("settings"))
+                    continue;
+
+                expect(traversedSettingIndex < expectedControls.size(),
+                    juce::String("Unexpected settings control in the Tab chain: ") + componentId);
+                if (traversedSettingIndex < expectedControls.size()) {
+                    expectEquals(componentId,
+                        juce::String(expectedControls[traversedSettingIndex].componentId));
+                }
+                ++traversedSettingIndex;
             }
-            if (smooth != nullptr) {
-                auto handler = smooth->createAccessibilityHandler();
-                expect(handler != nullptr);
-                if (handler != nullptr)
-                    expect(handler->getTitle().containsIgnoreCase("smooth"));
+            expectEquals(traversedSettingIndex, expectedControls.size());
+
+            auto previousPosition = focusComponents.cbegin();
+            auto hasPreviousPosition = false;
+
+            for (const auto& expectedControl : expectedControls) {
+                auto* control = findDescendantWithId(panel, expectedControl.componentId);
+                expect(control != nullptr,
+                    juce::String("Missing focus control: ") + expectedControl.componentId);
+                if (control == nullptr)
+                    continue;
+
+                expect(control->isEnabled(),
+                    juce::String("Enabled focus control is disabled: ")
+                        + expectedControl.componentId);
+                expect(control->getWantsKeyboardFocus(),
+                    juce::String("Control does not request keyboard focus: ")
+                        + expectedControl.componentId);
+
+                const auto position
+                    = std::find(focusComponents.cbegin(), focusComponents.cend(), control);
+                expect(position != focusComponents.cend(),
+                    juce::String("Control is absent from the Tab chain: ")
+                        + expectedControl.componentId);
+                if (position != focusComponents.cend() && hasPreviousPosition) {
+                    expect(previousPosition < position,
+                        juce::String("Control is out of Tab order: ")
+                            + expectedControl.componentId);
+                }
+                if (position != focusComponents.cend()) {
+                    previousPosition = position;
+                    hasPreviousPosition = true;
+                }
+
+                auto handler = control->createAccessibilityHandler();
+                expect(handler != nullptr,
+                    juce::String("Missing accessibility handler: ") + expectedControl.componentId);
+                if (handler != nullptr) {
+                    expect(handler->getTitle().containsIgnoreCase(expectedControl.accessibleTitle),
+                        juce::String("Unexpected accessibility title for ")
+                            + expectedControl.componentId + ": " + handler->getTitle());
+                }
             }
         }
     }

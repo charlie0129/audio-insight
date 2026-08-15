@@ -1862,10 +1862,11 @@ private:
     MetalVisualization::EffectiveActivityCallback effectiveActivityCallback;
 
     VisualizationFrame targetFrame;
-    std::array<float, spectrumBinCount> displayedSpectrum { };
+    std::array<float, maximumSpectrumBinCount> displayedSpectrum { };
     std::uint64_t lastSpectrumSequence = 0;
     std::uint64_t lastMeterSequence = 0;
     std::uint64_t lastGeneration = 0;
+    std::uint64_t lastFftGeneration = 0;
     bool hasDisplayFrame = false;
 
     Clock::time_point previousSmoothingTime;
@@ -2281,8 +2282,9 @@ private:
     void resetRendererStateWhileDisplayLinkIsPaused() noexcept
     {
         targetFrame = { };
-        displayedSpectrum.fill(minimumDisplayDecibels);
+        displayedSpectrum.fill(minimumSpectrumDecibels);
         lastGeneration = 0;
+        lastFftGeneration = 0;
         lastSpectrumSequence = 0;
         lastMeterSequence = 0;
         hasDisplayFrame = false;
@@ -2472,7 +2474,8 @@ private:
     void acceptSnapshot(const VisualizationFrame& incoming, AtomicRenderTelemetry& telemetry)
     {
         const auto generationChanged = incoming.generation != lastGeneration;
-        const auto isNew = !hasDisplayFrame || generationChanged
+        const auto fftGenerationChanged = incoming.fftGeneration != lastFftGeneration;
+        const auto isNew = !hasDisplayFrame || generationChanged || fftGenerationChanged
             || incoming.spectrumSequence != lastSpectrumSequence
             || incoming.meterSequence != lastMeterSequence;
 
@@ -2481,15 +2484,19 @@ private:
 
         targetFrame = incoming;
         lastGeneration = incoming.generation;
+        lastFftGeneration = incoming.fftGeneration;
         lastSpectrumSequence = incoming.spectrumSequence;
         lastMeterSequence = incoming.meterSequence;
         telemetry.framesWithNewSnapshot.fetch_add(1, std::memory_order_relaxed);
         telemetry.lastSpectrumSequence.store(lastSpectrumSequence, std::memory_order_relaxed);
 
-        if (!hasDisplayFrame || generationChanged) {
+        if (!hasDisplayFrame || generationChanged || fftGenerationChanged) {
             const auto settings = getSpectrumSettings();
+            displayedSpectrum.fill(settings.floorDecibels);
+            const auto activeBinCount
+                = std::min<std::size_t>(targetFrame.spectrumBinCount, displayedSpectrum.size());
 
-            for (std::size_t index = 0; index < displayedSpectrum.size(); ++index)
+            for (std::size_t index = 0; index < activeBinCount; ++index)
                 displayedSpectrum[index] = sanitiseDecibels(targetFrame.spectrumDecibels[index],
                     settings.floorDecibels, settings.ceilingDecibels);
 
@@ -2514,7 +2521,9 @@ private:
         const auto spectrumFall = settings.smoothing <= 0.0F
             ? 1.0F
             : smoothingCoefficient(elapsed, 0.015 + (0.435 * smoothingShape));
-        for (std::size_t index = 0; index < displayedSpectrum.size(); ++index) {
+        const auto activeBinCount
+            = std::min<std::size_t>(targetFrame.spectrumBinCount, displayedSpectrum.size());
+        for (std::size_t index = 0; index < activeBinCount; ++index) {
             const auto target = sanitiseDecibels(targetFrame.spectrumDecibels[index],
                 settings.floorDecibels, settings.ceilingDecibels);
             const auto coefficient
@@ -2784,16 +2793,17 @@ private:
         batches.spectrum.start = cursor;
 
         if (spectrumPlot.width() > 0.0F && spectrumPlot.height() > 0.0F && hasDisplayFrame
-            && targetFrame.spectrumValid && targetFrame.sampleRate > 0.0) {
-            const auto binFrequency
-                = static_cast<float>(targetFrame.sampleRate / static_cast<double>(fftSize));
+            && targetFrame.spectrumValid && targetFrame.sampleRate > 0.0
+            && detail::hasSupportedSpectrumMetadata(targetFrame)) {
+            const auto binFrequency = static_cast<float>(
+                targetFrame.sampleRate / static_cast<double>(targetFrame.spectrumFftSize));
             const auto firstBin = std::max<std::size_t>(
                 1, static_cast<std::size_t>(std::ceil(minimumSpectrumFrequency / binFrequency)));
-            const auto finalBin = std::min<std::size_t>(spectrumBinCount - 1,
+            const auto finalBin = std::min<std::size_t>(targetFrame.spectrumBinCount - 1,
                 static_cast<std::size_t>(std::floor(maximumFrequency / binFrequency)));
             constexpr auto spectrumColour = simd_float4 { 0.18F, 0.90F, 0.85F, 1.0F };
             constexpr auto spectrumHalfWidthPoints = 0.75F;
-            std::array<simd_float2, spectrumBinCount> spectrumPoints;
+            std::array<simd_float2, maximumSpectrumBinCount> spectrumPoints;
             std::size_t pointCount = 0;
 
             for (auto bin = firstBin; bin <= finalBin && pointCount < spectrumPoints.size();

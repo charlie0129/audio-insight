@@ -204,13 +204,23 @@ struct SpectrumDecibelTicks final {
     float headerHeight, std::uint32_t channelCount, float textHeight, float maximumTickLabelWidth,
     float maximumReadoutWidth) noexcept;
 
+/** Validates the fixed-capacity Spectrum metadata before indexing renderer storage. */
+[[nodiscard]] constexpr bool hasSupportedSpectrumMetadata(const VisualizationFrame& frame) noexcept
+{
+    const auto hasSupportedSize = frame.spectrumFftSize == 1024 || frame.spectrumFftSize == 2048
+        || frame.spectrumFftSize == 4096 || frame.spectrumFftSize == 8192
+        || frame.spectrumFftSize == 16384;
+    return hasSupportedSize && frame.spectrumBinCount == (frame.spectrumFftSize / 2) + 1
+        && frame.spectrumBinCount <= maximumSpectrumBinCount;
+}
+
 /** Compile-time proof inputs for the one bounded shared vertex buffer. */
 struct MetalVisualizationGeometryLimits final {
-    static constexpr std::size_t vertexCapacity = 8'448;
+    static constexpr std::size_t vertexCapacity = 24'576;
     static constexpr std::size_t maximumShellVertices = dashboardPanelCount * 36;
     static constexpr std::size_t maximumGridVertices
         = ((2 * maximumFrequencyAxisTickCount) + cachedDecibelTickCount) * 6;
-    static constexpr std::size_t maximumSpectrumVertices = 2 * spectrumBinCount;
+    static constexpr std::size_t maximumSpectrumVertices = 2 * maximumSpectrumBinCount;
     // Eight scale ticks, one five-quad CLEAR target, and four quads (track,
     // RMS, live sample peak, held sample peak) for each of two channels.
     static constexpr std::size_t maximumMeterVertices

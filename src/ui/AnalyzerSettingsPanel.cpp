@@ -110,8 +110,8 @@ public:
             addAndMakeVisible(reset);
         }
 
-        configureLabel(sharedStatus_,
-            "FFT size, window, and slice-rate controls are not yet implemented.", false);
+        configureLabel(
+            sharedStatus_, "FFT changes restart Spectrum overlap; Peak / RMS keeps running.");
         sharedStatus_.setMinimumHorizontalScale(0.8F);
         addAndMakeVisible(sharedStatus_);
 
@@ -120,27 +120,55 @@ public:
         fftSize_.setName("FFT size");
         fftSize_.setTitle("FFT size");
         fftSize_.setDescription("Number of samples in each Fourier transform");
+        fftSize_.setTooltip("Smaller FFTs respond sooner; larger FFTs resolve frequency better");
         fftSize_.setComponentID("settingsFftSize");
+        fftSize_.onChange = [this] {
+            if (synchronizing_)
+                return;
+
+            constexpr std::array fftSizes { 1024, 2048, 4096, 8192, 16384 };
+            const auto index = static_cast<std::size_t>(std::max(1, fftSize_.getSelectedId()) - 1);
+            configuration_.sharedAnalysis.fftSize = fftSizes[std::min(index, fftSizes.size() - 1)];
+            publishSanitizedConfiguration();
+        };
         addAndMakeVisible(fftSize_);
-        configureUnavailableControl(fftSize_, "Not yet connected to the configurable FFT engine");
 
         window_.addItemList({ "Rectangular", "Periodic Hann", "Blackman-Harris", "Flat-top" }, 1);
         window_.setSelectedId(2, juce::dontSendNotification);
         window_.setName("FFT window");
         window_.setTitle("FFT window");
         window_.setDescription("Window function applied before each Fourier transform");
+        window_.setTooltip("Select the FFT window and its frequency-leakage tradeoff");
         window_.setComponentID("settingsFftWindow");
+        window_.onChange = [this] {
+            if (synchronizing_)
+                return;
+
+            configuration_.sharedAnalysis.window
+                = static_cast<FftWindow>(std::max(1, window_.getSelectedId()) - 1);
+            publishSanitizedConfiguration();
+        };
         addAndMakeVisible(window_);
-        configureUnavailableControl(window_, "Not yet connected to the configurable FFT engine");
 
         fftRate_.addItemList({ "15 Hz", "30 Hz", "60 Hz", "120 Hz" }, 1);
         fftRate_.setSelectedId(3, juce::dontSendNotification);
         fftRate_.setName("FFT slice rate");
         fftRate_.setTitle("FFT slice rate");
         fftRate_.setDescription("Requested number of new FFT snapshots per second");
+        fftRate_.setTooltip(
+            "FFT analysis rate; Metal rendering remains paced by the display refresh rate");
         fftRate_.setComponentID("settingsFftSliceRate");
+        fftRate_.onChange = [this] {
+            if (synchronizing_)
+                return;
+
+            constexpr std::array fftRates { 15, 30, 60, 120 };
+            const auto index = static_cast<std::size_t>(std::max(1, fftRate_.getSelectedId()) - 1);
+            configuration_.sharedAnalysis.requestedFftSliceRateHz
+                = fftRates[std::min(index, fftRates.size() - 1)];
+            publishSanitizedConfiguration();
+        };
         addAndMakeVisible(fftRate_);
-        configureUnavailableControl(fftRate_, "Not yet connected to the configurable FFT engine");
 
         configureSlider(frequencySpacing_, "Frequency spacing",
             "Shared linear-to-logarithmic frequency spacing for Spectrum and Spectrogram", "");
@@ -353,11 +381,14 @@ public:
         resetButtons_[sharedSection].setComponentID("settingsSharedReset");
         resetButtons_[spectrogramSection].setComponentID("settingsSpectrogramReset");
         resetButtons_[sharedSection].setExplicitFocusOrder(2);
-        frequencySpacing_.setExplicitFocusOrder(3);
-        resetButtons_[spectrumSection].setExplicitFocusOrder(4);
-        floor_.setExplicitFocusOrder(5);
-        ceiling_.setExplicitFocusOrder(6);
-        averaging_.setExplicitFocusOrder(7);
+        fftSize_.setExplicitFocusOrder(3);
+        window_.setExplicitFocusOrder(4);
+        fftRate_.setExplicitFocusOrder(5);
+        frequencySpacing_.setExplicitFocusOrder(6);
+        resetButtons_[spectrumSection].setExplicitFocusOrder(7);
+        floor_.setExplicitFocusOrder(8);
+        ceiling_.setExplicitFocusOrder(9);
+        averaging_.setExplicitFocusOrder(10);
         resetButtons_[peakRmsSection].setEnabled(false);
         resetButtons_[spectrogramSection].setEnabled(false);
         resetButtons_[stereoSection].setEnabled(false);
@@ -368,6 +399,9 @@ public:
 
     ~Content() override
     {
+        fftSize_.onChange = nullptr;
+        window_.onChange = nullptr;
+        fftRate_.onChange = nullptr;
         floor_.removeListener(this);
         ceiling_.removeListener(this);
         averaging_.removeListener(this);
@@ -539,9 +573,9 @@ private:
             configuration_.spectrum.fillOpacity * 100.0, juce::dontSendNotification);
 
         constexpr std::array fftSizes { 1024, 2048, 4096, 8192, 16384 };
-        const auto fftSize
+        const auto fftSizeChoice
             = std::find(fftSizes.begin(), fftSizes.end(), configuration_.sharedAnalysis.fftSize);
-        fftSize_.setSelectedId(static_cast<int>(std::distance(fftSizes.begin(), fftSize)) + 1,
+        fftSize_.setSelectedId(static_cast<int>(std::distance(fftSizes.begin(), fftSizeChoice)) + 1,
             juce::dontSendNotification);
         window_.setSelectedId(
             static_cast<int>(configuration_.sharedAnalysis.window) + 1, juce::dontSendNotification);

@@ -60,6 +60,13 @@ void removeAnalyzerConfigurationChildren(juce::ValueTree& state)
             state.removeChild(childIndex, nullptr);
     }
 }
+
+SpectrumAnalysisConfiguration spectrumAnalysisConfiguration(
+    const AnalyzerConfiguration& configuration) noexcept
+{
+    return { static_cast<std::size_t>(configuration.sharedAnalysis.fftSize),
+        configuration.sharedAnalysis.window, configuration.sharedAnalysis.requestedFftSliceRateHz };
+}
 } // namespace
 
 PluginProcessor::PluginProcessor()
@@ -259,6 +266,9 @@ void PluginProcessor::replaceAnalyzerConfiguration(
         const std::scoped_lock lock(analyzerConfigurationMutex);
         analyzerConfiguration = configuration;
     }
+
+    analysisCoordinator.setSpectrumAnalysisConfiguration(
+        spectrumAnalysisConfiguration(configuration));
 
     analyzerConfigurationListeners.call(
         [](AnalyzerConfigurationListener& listener) { listener.analyzerConfigurationChanged(); });

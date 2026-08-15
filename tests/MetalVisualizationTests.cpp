@@ -384,9 +384,34 @@ public:
         beginTest("Axis and meter geometry remain within the fixed Metal vertex buffer");
 
         expectEquals(detail::MetalVisualizationGeometryLimits::maximumGeneratedVertices,
-            std::size_t { 8'406 });
+            std::size_t { 20'694 });
         expect(detail::MetalVisualizationGeometryLimits::maximumGeneratedVertices
             <= detail::MetalVisualizationGeometryLimits::vertexCapacity);
+
+        beginTest("Spectrum frame metadata accepts only supported FFT storage bounds");
+
+        VisualizationFrame spectrumMetadata;
+        constexpr std::array supportedFftSizes {
+            std::uint32_t { 1024 },
+            std::uint32_t { 2048 },
+            std::uint32_t { 4096 },
+            std::uint32_t { 8192 },
+            std::uint32_t { 16384 },
+        };
+        for (const auto supportedFftSize : supportedFftSizes) {
+            spectrumMetadata.spectrumFftSize = supportedFftSize;
+            spectrumMetadata.spectrumBinCount = (supportedFftSize / 2) + 1;
+            expect(detail::hasSupportedSpectrumMetadata(spectrumMetadata));
+        }
+
+        spectrumMetadata.spectrumFftSize = 1536;
+        spectrumMetadata.spectrumBinCount = 769;
+        expect(!detail::hasSupportedSpectrumMetadata(spectrumMetadata));
+        spectrumMetadata.spectrumFftSize = 16384;
+        spectrumMetadata.spectrumBinCount = maximumSpectrumBinCount - 1;
+        expect(!detail::hasSupportedSpectrumMetadata(spectrumMetadata));
+        spectrumMetadata = { };
+        expect(!detail::hasSupportedSpectrumMetadata(spectrumMetadata));
 
         beginTest("Telemetry reset publishes immediately while rendering is paused");
 

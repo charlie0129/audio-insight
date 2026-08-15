@@ -206,6 +206,51 @@ public:
             expectWithinAbsoluteError(actual.loudness.referenceLufs, -14.5, 1.0e-12);
         });
 
+        testCase("Restored FFT settings reach analysis without creating an editor", [this] {
+            PluginProcessor source;
+            auto configuration = source.getAnalyzerConfiguration();
+            configuration.sharedAnalysis.fftSize = 16'384;
+            configuration.sharedAnalysis.window = FftWindow::fiveTermFlatTop;
+            configuration.sharedAnalysis.requestedFftSliceRateHz = 120;
+            source.setAnalyzerConfiguration(configuration);
+
+            juce::MemoryBlock state;
+            source.getStateInformation(state);
+
+            PluginProcessor restored;
+            const auto beforeRestore = restored.getAnalysisTelemetry();
+            restored.setStateInformation(state.getData(), static_cast<int>(state.getSize()));
+            const auto afterRestore = restored.getAnalysisTelemetry();
+
+            expect(afterRestore.configuredFftSize == 16'384);
+            expect(afterRestore.configuredFftWindow
+                == static_cast<std::uint32_t>(FftWindow::fiveTermFlatTop));
+            expect(afterRestore.requestedFftSliceRateHz == 120);
+            expect(afterRestore.fftGeneration > beforeRestore.fftGeneration);
+            expect(
+                afterRestore.fftConfigurationChanges == beforeRestore.fftConfigurationChanges + 1);
+            expectEquals(afterRestore.capture.attemptedChunks, std::uint64_t { 0 });
+            expectEquals(afterRestore.scheduler.submitted, std::uint64_t { 0 });
+        });
+
+        testCase("Presentation-only analyzer edits do not reconfigure the FFT", [this] {
+            PluginProcessor processor;
+            const auto beforeEdit = processor.getAnalysisTelemetry();
+            auto configuration = processor.getAnalyzerConfiguration();
+            configuration.sharedAnalysis.frequencySpacing = 0.25;
+            configuration.spectrum.floorDb = -120.0;
+            configuration.spectrum.ceilingDb = 6.0;
+            configuration.spectrum.temporalAveraging.milliseconds = 125.0;
+            processor.setAnalyzerConfiguration(configuration);
+            const auto afterEdit = processor.getAnalysisTelemetry();
+
+            expectEquals(afterEdit.fftGeneration, beforeEdit.fftGeneration);
+            expectEquals(afterEdit.fftConfigurationChanges, beforeEdit.fftConfigurationChanges);
+            expect(afterEdit.configuredFftSize == beforeEdit.configuredFftSize);
+            expect(afterEdit.configuredFftWindow == beforeEdit.configuredFftWindow);
+            expect(afterEdit.requestedFftSliceRateHz == beforeEdit.requestedFftSliceRateHz);
+        });
+
         testCase("Fresh state uses responsive time-based averaging defaults", [this] {
             PluginProcessor processor;
             const auto configuration = processor.getAnalyzerConfiguration();
