@@ -34,7 +34,7 @@ an incidental result of analysis.
 | Graphics | Use a native Metal renderer, hosted in a MetalKit view inside the JUCE editor. On the initial macOS baseline, drive its Metal layer with `CAMetalDisplayLink` rather than JUCE repaint timers or MetalKit's internal timer. Do not use deprecated macOS OpenGL. |
 | Signal analysis | Initially use CPU analysis and Apple's Accelerate/vDSP where useful. GPU compute is deferred until profiling demonstrates a benefit. |
 | Frequency presentation | Expose one continuous Linear-to-Logarithmic frequency-spacing control, including intermediate mappings. Spectrum and Spectrogram share the same setting and coordinate transform; they do not have independent frequency scales. |
-| Dashboard interface | Keep one fixed-topology five-tile dashboard with one Spectrum and no separate focus mode. The next UI milestone keeps Spectrum and Peak/RMS live, adds inert placeholders for Spectrogram, Stereo/correlation, and Loudness, and allows only the four grid-snapped width/height splits defined in [the analyzer interface requirements](analyzer-ui.md). |
+| Dashboard interface | Keep one fixed-topology five-tile dashboard with one Spectrum and no separate focus mode. Spectrum, Peak/RMS, and Spectrogram are live; Stereo/correlation and Loudness remain inert placeholders. Allow only the four grid-snapped width/height splits defined in [the analyzer interface requirements](analyzer-ui.md). |
 | Interface state | Save analyzer settings and the Metrics toggle as non-automatable per-instance state, and the four-split layout as one versioned per-user global preference. Do not serialize transient history, holds, integration, Settings/About visibility, or uncommitted edits. |
 | Real-time handoff | The audio callback writes only to bounded, non-blocking data structures. Analysis and rendering never make the audio thread wait. |
 | Overflow policy | Prefer current visual data: coalesce or discard the oldest unclaimed analysis input, detect discontinuities by sequence number, and reset temporal analysis state across a gap. Never overwrite a slot being read or delay audio. |
@@ -44,7 +44,7 @@ an incidental result of analysis.
 | Performance observability | Offer an opt-in, persisted, per-instance metrics panel in Release builds. Show every collected renderer and analysis metric, exact presented-frame pacing history, per-frame callback-to-presentation latency composition, derived rates, and copyable raw reports without mutating the host process. |
 | DPI support | Treat layout units and render pixels separately and support both regular-density and Retina displays, including live movement between them. |
 | Editor lifecycle | Stop sample capture, analysis, history, display-link activity, and Metal submission when the editor is closed, hidden, or occluded beyond a short debounce. Reopening starts with fresh analysis state. |
-| First usable release | Show a large real-time FFT spectrum with compact sample-peak/RMS meters that adapt to mono or stereo input in one resizable layout. Defer history-based and stereo-field views. |
+| Analyzer milestone | The initial usable baseline was a large real-time FFT spectrum with compact mono/stereo sample-peak/RMS meters. The current dashboard also implements bounded shared-FFT Spectrogram history; Stereo field/correlation and Loudness remain deferred. |
 | Portability | Keep DSP, analysis, and product state independent of Metal behind a small renderer boundary. The architecture accommodates a future Windows backend, but Windows is not a near-term supported target. |
 | Distribution | A paid Apple Developer account, Developer ID signing, and notarization are out of scope unless this policy is explicitly revisited. See [macOS distribution](macos-distribution.md). |
 | Visual review | Deliver runnable visual checkpoints and ask the user for DAW testing, observations, or screenshots when appearance and interaction cannot be verified confidently in the development environment. |
@@ -361,15 +361,13 @@ The first usable release deliberately has one layout and two visualizations:
 - a compact vertical meter strip showing honest sample peak and RMS, with one
   meter for mono input or distinct L/R meters for stereo.
 
-The current vertical slice exposes essential spectrum settings in a small
-controls row. The next UI milestone moves those controls into Settings and
-replaces the fixed arrangement with the complete five-tile shell while keeping
-only Spectrum and Peak/RMS live. The other three tiles are titled, inert
-placeholders: they do not show fake data or submit analysis. Four grid-snapped
-splitters resize adjacent fixed tiles; movement, reordering, hiding, detaching,
-overlap, and free-form windowing remain out of scope. Do not label sample peak
-as true peak; that name is reserved for a correctly oversampled true-peak
-implementation.
+The implemented five-tile dashboard keeps Spectrum, Peak/RMS, and Spectrogram
+live. Stereo field/correlation and Loudness remain titled, inert placeholders:
+they do not show fake data or submit analysis. Analyzer controls live in the
+Settings inspector. Four grid-snapped splitters resize adjacent fixed tiles;
+movement, reordering, hiding, detaching, overlap, and free-form windowing remain
+out of scope. Do not label sample peak as true peak; that name is reserved for a
+correctly oversampled true-peak implementation.
 
 Before distributing a binary, the controls must include an About/Legal path that
 shows the confirmed project copyright, AGPL/no-warranty notice, how to view the
@@ -383,10 +381,10 @@ explicit click. The message must not interrupt use, consume visualization space,
 display repeatedly as a prompt, collect telemetry, or initiate network access on
 its own.
 
-After the shell and Settings inspector, implement Spectrogram history, then the
-Stereo field/correlation, then standards-validated Loudness. Phase, surround
-layouts, multi-instance aggregation, Loudness Range, and true peak remain later
-work.
+With the shell, Settings inspector, and Spectrogram history implemented, the
+next analyzer is Stereo field/correlation, followed by standards-validated
+Loudness. Phase, surround layouts, multi-instance aggregation, Loudness Range,
+and true peak remain later work.
 
 ## Performance and validation
 

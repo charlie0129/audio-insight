@@ -19,25 +19,29 @@ recorded in the architecture decision log.
 
 ## Scope and implementation sequence
 
-The current first usable vertical slice remains:
+The current implementation contains:
 
-- one large real-time FFT Spectrum; and
-- one compact vertical stereo sample-peak/RMS meter.
+- one large real-time FFT Spectrum;
+- one compact vertical mono/stereo sample-peak/RMS meter; and
+- one bounded, shared-FFT Spectrogram history view.
 
-The next UI milestone adds the complete dashboard shell, Settings inspector, and
-constrained layout editor. Spectrum and Peak/RMS remain live. Spectrogram, Stereo
-field/correlation, and Loudness initially appear as titled, inert placeholders
-with no fake readings, history allocation, or analysis work.
+The complete dashboard shell, Settings inspector, constrained layout editor,
+Spectrum, Peak/RMS, and Spectrogram are implemented. Stereo field/correlation
+and Loudness remain titled, inert placeholders with no fake readings, history
+allocation, or analysis work.
 
 Implement the remaining dashboard in this order:
 
-1. Add the five-tile shell, numeric-axis text infrastructure, four layout
-   splitters, edit mode, global layout persistence, and Settings inspector.
-2. Finish Spectrum and Peak/RMS presentation and connect the shared settings.
-3. Replace the Spectrogram placeholder with the shared-FFT history view.
-4. Replace the Stereo field/correlation placeholder.
-5. Replace the Loudness placeholder after its standards-based measurements pass
-   reference tests.
+1. Implemented: add the five-tile shell, numeric-axis text infrastructure, four
+   layout splitters, edit mode, global layout persistence, and Settings
+   inspector.
+2. Implemented: finish Spectrum and Peak/RMS presentation and connect the shared
+   settings.
+3. Implemented: replace the Spectrogram placeholder with the shared-FFT history
+   view.
+4. Next: replace the Stereo field/correlation placeholder.
+5. Then: replace the Loudness placeholder after its standards-based measurements
+   pass reference tests.
 
 Replacing a placeholder must preserve its tile identity and default position.
 This sequence does not require an unfinished placeholder to run background

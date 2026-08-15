@@ -6,11 +6,13 @@ Audio Insight is a work-in-progress, open-source AUv2 and VST3 audio analyzer
 for macOS. The project prioritizes smooth display-synchronized Metal graphics,
 real-time-safe audio processing, and low overhead in the host.
 
-The first usable release will combine a real-time FFT spectrum with stereo
-sample-peak and RMS meters. See [the architecture and decision
+The current analyzer dashboard combines a real-time FFT Spectrum, mono/stereo
+sample-peak and RMS meters, and a shared-FFT Spectrogram. Stereo
+field/correlation and Loudness remain visible, inert placeholders while those
+analyzers are developed. See [the architecture and decision
 record](docs/architecture.md) for the accepted system design and current open
-questions. The accepted, staged multi-panel dashboard is specified separately
-in [the analyzer interface requirements](docs/analyzer-ui.md).
+questions. The accepted multi-panel dashboard is specified separately in [the
+analyzer interface requirements](docs/analyzer-ui.md).
 
 ## Development build
 
@@ -86,9 +88,27 @@ project.
 
 Spectrum **Temporal averaging** is in **Settings**, together with its floor,
 ceiling, slope, peak-hold, trace-colour, and fill controls. Fresh instances use
-a responsive 75 ms average; choose **Off** to show each new FFT snapshot without
-analysis averaging. The renderer still applies a fixed, very short interpolation
-between snapshots so a 60 Hz analysis remains fluid on a 120 Hz display.
+a responsive 75 ms average (roughly `0.40` on the former 0-to-1 **Smooth**
+control); choose **Off** to show each new FFT snapshot without analysis
+averaging. The renderer still applies a fixed, very short interpolation between
+snapshots so a 60 Hz analysis remains fluid on a 120 Hz display.
+
+Visible response is adjustable, but an FFT analyzer also has unavoidable window
+latency. The default 4096-sample window spans about 85 ms at 48 kHz, the default
+analysis cadence can add up to about 17 ms, and Temporal averaging deliberately
+adds a smoother 75 ms response. For a more immediate display, turn Temporal
+averaging **Off** or lower it and select a 2048- or 1024-sample FFT; smaller FFTs
+trade low-frequency resolution for faster response. Metal's separate 6 ms
+presentation interpolation is only for motion continuity and is not a
+significant source of lag.
+
+The Spectrogram uses each unsmoothed FFT slice and the same Linear-to-Logarithmic
+frequency spacing as Spectrum. Its literal-black history can use Blue Fire,
+Inferno, Viridis, or Grayscale colours. **Settings** also exposes colour
+response, floor and ceiling, a 2–60 second history duration, and **Scroll** or
+**Overwrite** history mode. Palette, response, range, and mode edits reinterpret
+existing history; FFT, sample-format, history-duration, lifecycle, and frequency
+mapping changes start fresh compatible history.
 
 ## Performance metrics
 
