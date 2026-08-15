@@ -21,6 +21,7 @@
 #include <limits>
 #include <memory>
 #include <string>
+#include <string_view>
 #include <utility>
 
 namespace audio_insight::detail {
@@ -48,18 +49,50 @@ using Clock = std::chrono::steady_clock;
 
 constexpr std::size_t renderBufferCount = 3;
 constexpr std::size_t maximumVertexCount = 8'192;
+constexpr std::size_t printableAsciiFirst = 32;
+constexpr std::size_t printableAsciiLast = 126;
+constexpr std::size_t printableAsciiCount = printableAsciiLast - printableAsciiFirst + 1;
+constexpr std::size_t glyphAtlasColumns = 16;
+constexpr std::size_t glyphAtlasRows
+    = (printableAsciiCount + glyphAtlasColumns - 1) / glyphAtlasColumns;
+constexpr std::size_t maximumCachedTextGlyphs = 24;
+constexpr std::size_t cachedTextRunCount = 6;
+
+constexpr std::array<std::string_view, cachedTextRunCount> cachedTextStrings { "Spectrum",
+    "Peak / RMS", "Spectrogram", "Stereo / Correlation", "Loudness", "Not yet implemented" };
+
+constexpr std::array<std::size_t, dashboardPanelCount> panelTitleTextRunIndices { 0, 1, 2, 3, 4 };
+constexpr std::size_t placeholderTextRunIndex = 5;
 
 // The fixed capacity covers five filled/bordered/header-divided tiles, every
-// accepted grid line, the maximum FFT trace, and both live meter channels. Keep
-// this proof beside the allocation so a future geometry builder cannot quietly
-// rely on the bounds checks to truncate a frame.
+// accepted grid line, the maximum FFT trace, both live meter channels, and all
+// cached tile labels. Keep this proof beside the allocation so a future geometry
+// builder cannot quietly rely on the bounds checks to truncate a frame.
 constexpr std::size_t maximumShellVertices = dashboardPanelCount * 36;
 constexpr std::size_t maximumGridVertices = (10 + 16) * 6;
 constexpr std::size_t maximumSpectrumVertices = 2 * spectrumBinCount;
 constexpr std::size_t maximumMeterVertices = 2 * 3 * 6;
-static_assert(
-    maximumShellVertices + maximumGridVertices + maximumSpectrumVertices + maximumMeterVertices
+constexpr std::size_t maximumTextGlyphs = [] {
+    std::size_t glyphCount = 0;
+
+    for (const auto titleIndex : panelTitleTextRunIndices)
+        glyphCount += cachedTextStrings[titleIndex].size();
+
+    constexpr auto placeholderPanelCount = dashboardPanelCount - 2;
+    return glyphCount + (placeholderPanelCount * cachedTextStrings[placeholderTextRunIndex].size());
+}();
+constexpr std::size_t maximumTextVertices = maximumTextGlyphs * 6;
+static_assert(maximumShellVertices + maximumGridVertices + maximumSpectrumVertices
+        + maximumMeterVertices + maximumTextVertices
     <= maximumVertexCount);
+static_assert([] {
+    for (const auto text : cachedTextStrings) {
+        if (text.size() > maximumCachedTextGlyphs)
+            return false;
+    }
+
+    return true;
+}());
 
 constexpr float minimumSpectrumFrequency = 20.0F;
 constexpr float maximumSpectrumFrequency = 20'000.0F;
@@ -72,6 +105,34 @@ constexpr float minimumSpectrumRange = 6.0F;
 struct MetalVertex {
     simd_float2 position;
     simd_float4 colour;
+    simd_float2 textureCoordinate;
+};
+
+static_assert(offsetof(MetalVertex, position) == 0);
+static_assert(offsetof(MetalVertex, colour) == 16);
+static_assert(offsetof(MetalVertex, textureCoordinate) == 32);
+static_assert(sizeof(MetalVertex) == 48);
+
+struct GlyphAtlasEntry {
+    float leftTextureCoordinate = 0.0F;
+    float bottomTextureCoordinate = 0.0F;
+    float rightTextureCoordinate = 0.0F;
+    float topTextureCoordinate = 0.0F;
+};
+
+struct CachedTextGlyph {
+    float left = 0.0F;
+    float bottom = 0.0F;
+    float right = 0.0F;
+    float top = 0.0F;
+    GlyphAtlasEntry atlas;
+};
+
+struct CachedTextRun {
+    std::array<CachedTextGlyph, maximumCachedTextGlyphs> glyphs { };
+    std::size_t glyphCount = 0;
+    float width = 0.0F;
+    float height = 0.0F;
 };
 
 static_assert(std::atomic<std::uint64_t>::is_always_lock_free);
@@ -241,6 +302,7 @@ struct VertexBatches {
     VertexRange spectrumGrid;
     VertexRange spectrum;
     VertexRange peakRms;
+    std::array<VertexRange, dashboardPanelCount> text;
 };
 
 struct RenderRect {
@@ -547,12 +609,14 @@ struct Vertex
 {
     float2 position;
     float4 colour;
+    float2 textureCoordinate;
 };
 
 struct RasterVertex
 {
     float4 position [[position]];
     float4 colour;
+    float2 textureCoordinate;
 };
 
 vertex RasterVertex audioInsightVertex(const device Vertex* vertices [[buffer(0)]],
@@ -561,12 +625,21 @@ vertex RasterVertex audioInsightVertex(const device Vertex* vertices [[buffer(0)
     RasterVertex output;
     output.position = float4(vertices[vertexId].position, 0.0, 1.0);
     output.colour = vertices[vertexId].colour;
+    output.textureCoordinate = vertices[vertexId].textureCoordinate;
     return output;
 }
 
 fragment half4 audioInsightFragment(RasterVertex input [[stage_in]])
 {
     return half4(input.colour);
+}
+
+fragment half4 audioInsightTextFragment(RasterVertex input [[stage_in]],
+                                        texture2d<float> glyphAtlas [[texture(0)]],
+                                        sampler glyphSampler [[sampler(0)]])
+{
+    const float coverage = glyphAtlas.sample(glyphSampler, input.textureCoordinate).r;
+    return half4(half3(input.colour.rgb), half(input.colour.a * coverage));
 }
 )metal";
 } // namespace
@@ -588,6 +661,9 @@ public:
     ~MetalRenderBackend()
     {
         shutdown();
+        [glyphAtlasTexture release];
+        [glyphSamplerState release];
+        [textPipelineState release];
         [pipelineState release];
         [commandQueue release];
     }
@@ -878,7 +954,9 @@ public:
         telemetry->drawableHeightPixels.store(
             roundedPixelDimension(static_cast<CGFloat>(drawable.texture.height)),
             std::memory_order_relaxed);
-        updateBackingScale();
+        // Keep telemetry current here, but leave atlas rebuilding to AppKit's
+        // existing backing-property and window-lifecycle notifications.
+        updateBackingScale(false);
 
         source.requestAnalysis();
         telemetry->analysisRequestCalls.fetch_add(1, std::memory_order_relaxed);
@@ -963,6 +1041,29 @@ public:
             [encoder drawPrimitives:MTLPrimitiveTypeTriangle
                         vertexStart:batches.peakRms.start
                         vertexCount:batches.peakRms.count];
+        }
+
+        if (glyphAtlasTexture != nil && textPipelineState != nil && glyphSamplerState != nil) {
+            [encoder setRenderPipelineState:textPipelineState];
+            [encoder setFragmentTexture:glyphAtlasTexture atIndex:0];
+            [encoder setFragmentSamplerState:glyphSamplerState atIndex:0];
+
+            for (std::size_t index = 0; index < dashboardPanelCount; ++index) {
+                if (batches.text[index].count == 0)
+                    continue;
+
+                const auto panel = static_cast<DashboardPanel>(index);
+                const auto textScissor = makeScissorRect(dashboardLayout[panel], boundsSize,
+                    drawable.texture.width, drawable.texture.height);
+
+                if (textScissor.width == 0 || textScissor.height == 0)
+                    continue;
+
+                [encoder setScissorRect:textScissor];
+                [encoder drawPrimitives:MTLPrimitiveTypeTriangle
+                            vertexStart:batches.text[index].start
+                            vertexCount:batches.text[index].count];
+            }
         }
 
         [encoder endEncoding];
@@ -1077,6 +1178,11 @@ private:
 
     id<MTLCommandQueue> commandQueue = nil;
     id<MTLRenderPipelineState> pipelineState = nil;
+    id<MTLRenderPipelineState> textPipelineState = nil;
+    id<MTLSamplerState> glyphSamplerState = nil;
+    id<MTLTexture> glyphAtlasTexture = nil;
+    std::array<CachedTextRun, cachedTextRunCount> cachedTextRuns { };
+    double glyphAtlasBackingScale = 0.0;
     juce::String initializationError;
     bool metalReady = false;
     std::atomic<std::uint64_t> packedSpectrumSettings { 0 };
@@ -1132,11 +1238,14 @@ private:
 
         id<MTLFunction> vertexFunction = [library newFunctionWithName:@"audioInsightVertex"];
         id<MTLFunction> fragmentFunction = [library newFunctionWithName:@"audioInsightFragment"];
+        id<MTLFunction> textFragmentFunction =
+            [library newFunctionWithName:@"audioInsightTextFragment"];
 
-        if (vertexFunction == nil || fragmentFunction == nil) {
+        if (vertexFunction == nil || fragmentFunction == nil || textFragmentFunction == nil) {
             initializationError = "Metal could not load the visualization shader functions.";
             [vertexFunction release];
             [fragmentFunction release];
+            [textFragmentFunction release];
             [library release];
             return;
         }
@@ -1159,15 +1268,44 @@ private:
         pipelineState = [view.device newRenderPipelineStateWithDescriptor:descriptor
                                                                     error:&pipelineError];
 
+        NSError* textPipelineError = nil;
+        descriptor.label = @"Audio Insight glyph-atlas text pipeline";
+        descriptor.fragmentFunction = textFragmentFunction;
+        textPipelineState = [view.device newRenderPipelineStateWithDescriptor:descriptor
+                                                                        error:&textPipelineError];
+
         [descriptor release];
         [vertexFunction release];
         [fragmentFunction release];
+        [textFragmentFunction release];
         [library release];
 
         if (pipelineState == nil) {
             initializationError = pipelineError != nil
                 ? juce::String::fromUTF8(pipelineError.localizedDescription.UTF8String)
                 : juce::String("Metal could not create the visualization pipeline.");
+            return;
+        }
+
+        if (textPipelineState == nil) {
+            initializationError = textPipelineError != nil
+                ? juce::String::fromUTF8(textPipelineError.localizedDescription.UTF8String)
+                : juce::String("Metal could not create the glyph-atlas text pipeline.");
+            return;
+        }
+
+        auto* samplerDescriptor = [[MTLSamplerDescriptor alloc] init];
+        samplerDescriptor.label = @"Audio Insight glyph-atlas sampler";
+        samplerDescriptor.minFilter = MTLSamplerMinMagFilterLinear;
+        samplerDescriptor.magFilter = MTLSamplerMinMagFilterLinear;
+        samplerDescriptor.mipFilter = MTLSamplerMipFilterNotMipmapped;
+        samplerDescriptor.sAddressMode = MTLSamplerAddressModeClampToEdge;
+        samplerDescriptor.tAddressMode = MTLSamplerAddressModeClampToEdge;
+        glyphSamplerState = [view.device newSamplerStateWithDescriptor:samplerDescriptor];
+        [samplerDescriptor release];
+
+        if (glyphSamplerState == nil) {
+            initializationError = "Metal could not create the glyph-atlas sampler.";
             return;
         }
 
@@ -1183,7 +1321,169 @@ private:
             }
         }
 
+        if (!rebuildGlyphAtlas(1.0)) {
+            initializationError = "Metal could not create the initial glyph atlas.";
+            return;
+        }
+
         metalReady = true;
+    }
+
+    // Font selection, measurement, rasterization, texture allocation, and fixed
+    // run caching happen only at initialization or a native backing-scale seam.
+    // The display callback later performs bounded arithmetic over these arrays.
+    bool rebuildGlyphAtlas(const double backingScale)
+    {
+        assertMessageThread();
+
+        if (view == nil || view.device == nil || !std::isfinite(backingScale)
+            || backingScale <= 0.0) {
+            return false;
+        }
+
+        constexpr auto logicalFontSize = 11.0;
+        const auto pixelFontSize = static_cast<CGFloat>(logicalFontSize * backingScale);
+        auto* font = [NSFont monospacedSystemFontOfSize:pixelFontSize weight:NSFontWeightRegular];
+
+        if (font == nil)
+            return false;
+
+        auto* attributes = @ {
+            NSFontAttributeName : font,
+            NSForegroundColorAttributeName : [NSColor whiteColor],
+        };
+        const auto advanceMeasurement = [@"M" sizeWithAttributes:attributes];
+        const auto lineMeasurement = [@"Mg" sizeWithAttributes:attributes];
+        const auto advancePixels = std::max<CGFloat>(1.0, advanceMeasurement.width);
+        const auto lineHeightPixels = std::max<CGFloat>(1.0, lineMeasurement.height);
+        const auto paddingPixels
+            = std::max<NSInteger>(1, static_cast<NSInteger>(std::ceil(backingScale)));
+        const auto cellWidth
+            = static_cast<NSInteger>(std::ceil(advancePixels)) + (2 * paddingPixels);
+        const auto cellHeight
+            = static_cast<NSInteger>(std::ceil(lineHeightPixels)) + (2 * paddingPixels);
+        const auto atlasWidth = static_cast<NSInteger>(glyphAtlasColumns) * cellWidth;
+        const auto atlasHeight = static_cast<NSInteger>(glyphAtlasRows) * cellHeight;
+
+        if (cellWidth <= 0 || cellHeight <= 0 || atlasWidth <= 0 || atlasHeight <= 0
+            || atlasWidth > 8'192 || atlasHeight > 8'192) {
+            return false;
+        }
+
+        auto* bitmap = [[NSBitmapImageRep alloc] initWithBitmapDataPlanes:nullptr
+                                                               pixelsWide:atlasWidth
+                                                               pixelsHigh:atlasHeight
+                                                            bitsPerSample:8
+                                                          samplesPerPixel:1
+                                                                 hasAlpha:NO
+                                                                 isPlanar:NO
+                                                           colorSpaceName:NSDeviceWhiteColorSpace
+                                                              bytesPerRow:atlasWidth
+                                                             bitsPerPixel:8];
+
+        auto* bitmapData = bitmap.bitmapData;
+
+        if (bitmap == nil || bitmapData == nullptr) {
+            [bitmap release];
+            return false;
+        }
+
+        std::fill_n(bitmapData, static_cast<std::size_t>(bitmap.bytesPerRow * bitmap.pixelsHigh),
+            static_cast<unsigned char>(0));
+
+        auto* graphicsContext = [NSGraphicsContext graphicsContextWithBitmapImageRep:bitmap];
+
+        if (graphicsContext == nil) {
+            [bitmap release];
+            return false;
+        }
+
+        std::array<GlyphAtlasEntry, printableAsciiCount> atlasEntries { };
+        [NSGraphicsContext saveGraphicsState];
+        [NSGraphicsContext setCurrentContext:graphicsContext];
+        graphicsContext.shouldAntialias = YES;
+        graphicsContext.imageInterpolation = NSImageInterpolationHigh;
+        [[NSColor blackColor] setFill];
+        NSRectFill(NSMakeRect(0.0, 0.0, atlasWidth, atlasHeight));
+
+        for (std::size_t index = 0; index < printableAsciiCount; ++index) {
+            const auto column = index % glyphAtlasColumns;
+            const auto row = index / glyphAtlasColumns;
+            const auto cellLeft
+                = static_cast<CGFloat>(column * static_cast<std::size_t>(cellWidth));
+            const auto cellBottom
+                = static_cast<CGFloat>(row * static_cast<std::size_t>(cellHeight));
+            const auto cellRight = cellLeft + static_cast<CGFloat>(cellWidth);
+            const auto cellTop = cellBottom + static_cast<CGFloat>(cellHeight);
+            const unichar characterValue = static_cast<unichar>(index + printableAsciiFirst);
+            auto* character = [NSString stringWithCharacters:&characterValue length:1];
+            [character drawAtPoint:NSMakePoint(cellLeft + static_cast<CGFloat>(paddingPixels),
+                                       cellBottom + static_cast<CGFloat>(paddingPixels))
+                    withAttributes:attributes];
+
+            atlasEntries[index] = {
+                static_cast<float>(cellLeft / static_cast<CGFloat>(atlasWidth)),
+                static_cast<float>(1.0 - (cellBottom / static_cast<CGFloat>(atlasHeight))),
+                static_cast<float>(cellRight / static_cast<CGFloat>(atlasWidth)),
+                static_cast<float>(1.0 - (cellTop / static_cast<CGFloat>(atlasHeight))),
+            };
+        }
+
+        [NSGraphicsContext restoreGraphicsState];
+
+        auto* textureDescriptor = [MTLTextureDescriptor
+            texture2DDescriptorWithPixelFormat:MTLPixelFormatR8Unorm
+                                         width:static_cast<NSUInteger>(atlasWidth)
+                                        height:static_cast<NSUInteger>(atlasHeight)
+                                     mipmapped:NO];
+        textureDescriptor.storageMode = MTLStorageModeShared;
+        textureDescriptor.usage = MTLTextureUsageShaderRead;
+        id<MTLTexture> newTexture = [view.device newTextureWithDescriptor:textureDescriptor];
+
+        if (newTexture == nil) {
+            [bitmap release];
+            return false;
+        }
+
+        newTexture.label = @"Audio Insight scale-aware glyph atlas";
+        [newTexture replaceRegion:MTLRegionMake2D(0, 0, static_cast<NSUInteger>(atlasWidth),
+                                      static_cast<NSUInteger>(atlasHeight))
+                      mipmapLevel:0
+                        withBytes:bitmapData
+                      bytesPerRow:static_cast<NSUInteger>(bitmap.bytesPerRow)];
+        [bitmap release];
+
+        const auto advancePoints = static_cast<float>(advancePixels / backingScale);
+        const auto cellWidthPoints = static_cast<float>(cellWidth / backingScale);
+        const auto cellHeightPoints = static_cast<float>(cellHeight / backingScale);
+        std::array<CachedTextRun, cachedTextRunCount> newCachedTextRuns { };
+
+        for (std::size_t runIndex = 0; runIndex < cachedTextStrings.size(); ++runIndex) {
+            const auto text = cachedTextStrings[runIndex];
+            auto& run = newCachedTextRuns[runIndex];
+            run.glyphCount = text.size();
+            run.height = cellHeightPoints;
+
+            for (std::size_t glyphIndex = 0; glyphIndex < text.size(); ++glyphIndex) {
+                const auto character = static_cast<unsigned char>(text[glyphIndex]);
+                const auto atlasIndex
+                    = character >= printableAsciiFirst && character <= printableAsciiLast
+                    ? static_cast<std::size_t>(character - printableAsciiFirst)
+                    : static_cast<std::size_t>('?' - printableAsciiFirst);
+                const auto left = static_cast<float>(glyphIndex) * advancePoints;
+                run.glyphs[glyphIndex] = { left, 0.0F, left + cellWidthPoints, cellHeightPoints,
+                    atlasEntries[atlasIndex] };
+            }
+
+            if (!text.empty())
+                run.width = (static_cast<float>(text.size() - 1) * advancePoints) + cellWidthPoints;
+        }
+
+        [glyphAtlasTexture release];
+        glyphAtlasTexture = newTexture;
+        cachedTextRuns = newCachedTextRuns;
+        glyphAtlasBackingScale = backingScale;
+        return true;
     }
 
     static void assertMessageThread() noexcept
@@ -1354,10 +1654,10 @@ private:
         [view setDisplayLinkMaximumFramesPerSecond:maximumFps];
         loadPublishedTelemetry()->configuredMaximumFramesPerSecond.store(
             static_cast<std::uint32_t>(maximumFps), std::memory_order_relaxed);
-        updateBackingScale();
+        updateBackingScale(true);
     }
 
-    void updateBackingScale()
+    void updateBackingScale(const bool mayRebuildDensityDependentResources)
     {
         if (view == nil)
             return;
@@ -1372,6 +1672,11 @@ private:
             scale = 1.0;
 
         loadPublishedTelemetry()->backingScale.store(scale, std::memory_order_relaxed);
+
+        if (mayRebuildDensityDependentResources
+            && std::abs(scale - glyphAtlasBackingScale) > 0.001) {
+            rebuildGlyphAtlas(scale);
+        }
     }
 
     RenderBufferAdmission acquireRenderBuffer() noexcept
@@ -1537,7 +1842,7 @@ private:
             if (cursor >= maximumVertexCount)
                 return;
 
-            vertices[cursor++] = { pointToClip(x, y), colour };
+            vertices[cursor++] = { pointToClip(x, y), colour, simd_make_float2(0.0F, 0.0F) };
         };
 
         const auto appendQuad
@@ -1555,12 +1860,59 @@ private:
                   if (cursor + 6 > maximumVertexCount)
                       return;
 
-                  vertices[cursor++] = { bottomLeft, colour };
-                  vertices[cursor++] = { bottomRight, colour };
-                  vertices[cursor++] = { topLeft, colour };
-                  vertices[cursor++] = { topLeft, colour };
-                  vertices[cursor++] = { bottomRight, colour };
-                  vertices[cursor++] = { topRight, colour };
+                  constexpr auto noTextureCoordinate = simd_float2 { 0.0F, 0.0F };
+                  vertices[cursor++] = { bottomLeft, colour, noTextureCoordinate };
+                  vertices[cursor++] = { bottomRight, colour, noTextureCoordinate };
+                  vertices[cursor++] = { topLeft, colour, noTextureCoordinate };
+                  vertices[cursor++] = { topLeft, colour, noTextureCoordinate };
+                  vertices[cursor++] = { bottomRight, colour, noTextureCoordinate };
+                  vertices[cursor++] = { topRight, colour, noTextureCoordinate };
+              };
+
+        const auto density = static_cast<float>(
+            std::isfinite(glyphAtlasBackingScale) && glyphAtlasBackingScale > 0.0
+                ? glyphAtlasBackingScale
+                : 1.0);
+        const auto snapToPixel = [density](const float value) noexcept {
+            return std::round(value * density) / density;
+        };
+        const auto appendTextRun
+            = [&](const CachedTextRun& run, const float originX, const float originY,
+                  const float textScale, const simd_float4 colour) noexcept {
+                  if (run.glyphCount == 0 || textScale <= 0.0F)
+                      return;
+
+                  jassert(cursor + (run.glyphCount * 6) <= maximumVertexCount);
+
+                  if (cursor + (run.glyphCount * 6) > maximumVertexCount)
+                      return;
+
+                  for (std::size_t index = 0; index < run.glyphCount; ++index) {
+                      const auto& glyph = run.glyphs[index];
+                      const auto left = snapToPixel(originX + (glyph.left * textScale));
+                      const auto bottom = snapToPixel(originY + (glyph.bottom * textScale));
+                      const auto right = snapToPixel(originX + (glyph.right * textScale));
+                      const auto top = snapToPixel(originY + (glyph.top * textScale));
+                      const auto bottomLeft = pointToClip(left, bottom);
+                      const auto bottomRight = pointToClip(right, bottom);
+                      const auto topLeft = pointToClip(left, top);
+                      const auto topRight = pointToClip(right, top);
+                      const auto bottomLeftTexture = simd_make_float2(
+                          glyph.atlas.leftTextureCoordinate, glyph.atlas.bottomTextureCoordinate);
+                      const auto bottomRightTexture = simd_make_float2(
+                          glyph.atlas.rightTextureCoordinate, glyph.atlas.bottomTextureCoordinate);
+                      const auto topLeftTexture = simd_make_float2(
+                          glyph.atlas.leftTextureCoordinate, glyph.atlas.topTextureCoordinate);
+                      const auto topRightTexture = simd_make_float2(
+                          glyph.atlas.rightTextureCoordinate, glyph.atlas.topTextureCoordinate);
+
+                      vertices[cursor++] = { bottomLeft, colour, bottomLeftTexture };
+                      vertices[cursor++] = { bottomRight, colour, bottomRightTexture };
+                      vertices[cursor++] = { topLeft, colour, topLeftTexture };
+                      vertices[cursor++] = { topLeft, colour, topLeftTexture };
+                      vertices[cursor++] = { bottomRight, colour, bottomRightTexture };
+                      vertices[cursor++] = { topRight, colour, topRightTexture };
+                  }
               };
 
         const auto appendBorder = [&](const RenderRect& bounds, float thickness,
@@ -1756,6 +2108,49 @@ private:
         }
 
         batches.peakRms.count = cursor - batches.peakRms.start;
+
+        constexpr auto titleColour = simd_float4 { 0.72F, 0.79F, 0.88F, 0.94F };
+        constexpr auto placeholderTextColour = simd_float4 { 0.39F, 0.46F, 0.55F, 0.72F };
+
+        for (std::size_t index = 0; index < dashboardPanelCount; ++index) {
+            const auto panel = static_cast<DashboardPanel>(index);
+            const auto bounds = toRenderRect(dashboardLayout[panel], height);
+            const auto panelHeaderHeight = headerHeight(bounds);
+            const auto& titleRun = cachedTextRuns[panelTitleTextRunIndices[index]];
+            const auto titleAvailableWidth = std::max(0.0F, bounds.width() - 14.0F);
+            const auto titleScale = titleRun.width > 0.0F
+                ? std::min(1.0F, titleAvailableWidth / titleRun.width)
+                : 1.0F;
+            const auto titleX = bounds.left + 7.0F;
+            const auto titleY = bounds.top - panelHeaderHeight
+                + std::max(0.0F, (panelHeaderHeight - (titleRun.height * titleScale)) * 0.5F);
+
+            batches.text[index].start = cursor;
+            appendTextRun(titleRun, titleX, titleY, titleScale, titleColour);
+
+            if (panel != DashboardPanel::spectrum && panel != DashboardPanel::peakRms) {
+                const auto& placeholderRun = cachedTextRuns[placeholderTextRunIndex];
+                const auto bodyTop = bounds.top - panelHeaderHeight;
+                const auto bodyHeight = std::max(0.0F, bodyTop - bounds.bottom);
+                const auto availableWidth = std::max(0.0F, bounds.width() - 12.0F);
+                const auto availableHeight = std::max(0.0F, bodyHeight - 12.0F);
+                const auto horizontalScale
+                    = placeholderRun.width > 0.0F ? availableWidth / placeholderRun.width : 1.0F;
+                const auto verticalScale
+                    = placeholderRun.height > 0.0F ? availableHeight / placeholderRun.height : 1.0F;
+                const auto placeholderScale
+                    = std::max(0.0F, std::min({ 1.0F, horizontalScale, verticalScale }));
+                const auto placeholderX = bounds.left
+                    + (bounds.width() - (placeholderRun.width * placeholderScale)) * 0.5F;
+                const auto placeholderY = bounds.bottom
+                    + (bodyHeight - (placeholderRun.height * placeholderScale)) * 0.5F;
+                appendTextRun(placeholderRun, placeholderX, placeholderY, placeholderScale,
+                    placeholderTextColour);
+            }
+
+            batches.text[index].count = cursor - batches.text[index].start;
+        }
+
         return batches;
     }
 };

@@ -278,6 +278,13 @@ The rendering toolbox should favor simple, predictable GPU operations:
 - instanced geometry for repeated meter elements;
 - a scale-aware glyph atlas or equivalent GPU text solution.
 
+The first Metal glyph atlas uses macOS's system monospaced font. This avoids a
+bundled font asset and its additional redistribution/license obligations while
+keeping compact analyzer labels predictable. Glyphs and fixed runs are built
+outside the display callback and rebuilt only for density-dependent lifecycle
+changes. A future visual-identity pass may deliberately replace the system font
+after choosing and auditing an AGPL-compatible asset.
+
 Future scrolling history views may add circular or tiled textures after the
 first-release spectrum and meters meet their performance gates.
 
@@ -535,8 +542,8 @@ authorize fake values, background work, or speculative resource allocation.
 - What concrete host or platform requirement would justify adding AUv3?
 - When, if ever, does Windows move from architectural accommodation to an
   implementation commitment, and which GPU backend should it use?
-- Which fonts and visual assets will be used, and under which AGPL-compatible
-  licenses?
+- Should the first-pass macOS system monospaced analyzer font eventually be
+  replaced, and which audited AGPL-compatible visual assets will accompany it?
 - What copyright-holder name should appear in project and in-plugin legal
   notices?
 - Is Audio Insight the final display name or only the working title, and what
@@ -614,3 +621,6 @@ authorize fake values, background work, or speculative resource allocation.
 - Chose a more responsive `0.40` default for the current normalized Smooth
   control and a 75 ms default for its future time-based replacement. Floor,
   Ceiling, and Smooth move from the toolbar into the Spectrum settings section.
+- Chose the macOS system monospaced font for the first scale-aware Metal glyph
+  atlas, avoiding a bundled font asset while keeping rasterization and cached
+  run construction outside the display callback.
