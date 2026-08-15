@@ -71,9 +71,27 @@ Restart or rescan the audio host after copying the bundle.
 
 The editor's **Metrics** toggle opens a per-instance observability panel beside
 the visualization. It works in Release builds, is off by default, and is saved
-with the plugin state. The live summary includes presented-frame rate, an exact
-240-frame pacing graph, CPU encode and GPU execution time, presentation
-lateness, and renderer drops.
+with the plugin state. The live summary separates two measurements that should
+not be conflated:
+
+- **Presented-frame pacing** uses one stem per exact presentation interval from
+  the latest 240 intervals. Its height shows the time between frames reaching
+  the display, so 8.33 ms corresponds to 120 Hz and 16.67 ms to 60 Hz. Green
+  stems stay within 1.25 times the current target, amber stems exceed that
+  tolerance, horizontal guides mark target multiples, and red dashed markers
+  identify presentation-sequence gaps.
+- **Per-frame latency composition** uses one stacked bar per correlated frame.
+  The segments are CPU encode, Submit + queue, GPU execute, and
+  compositor/display wait. Their sum is that frame's callback-to-presentation
+  latency, not the interval between presentations; several frames can overlap
+  in the rendering pipeline. These bars use the same presentation-sequence
+  positions as the pacing graph; a red X marks unavailable or unclassifiable
+  component timing.
+
+Reusable Metal render buffers are released as soon as their GPU command buffer
+completes. Presentation tracking has independent per-submission lifetime state,
+so a compositor retaining a drawable for several refresh periods does not
+artificially exhaust the render-buffer pool and halve the submission cadence.
 
 The scrollable detail view exposes every raw renderer, audio-capture, meter,
 scheduler, analysis-job, publication, and freshness metric currently collected,
@@ -84,12 +102,16 @@ zero latency. **Reset render** starts a new renderer telemetry epoch without
 resetting lifetime analysis counters. At narrow editor sizes, detail rows stack
 their labels and full-width values instead of squeezing the value column.
 
-The panel samples snapshots four times per second on the message thread, while
-the pacing history is recorded once per presented frame without allocation or
-audio-thread work. Native occlusion or minimization stops the sampling timer and
-marks retained values **PAUSED**; it restarts when rendering becomes effective
-again. The complete text export, including the exact history, is formatted only
-when **Copy** is pressed; in particular, the 240-entry history is not serialized
+The lightweight graphs refresh from the editor window's vblank callback while
+either graph is visible in the metrics viewport, so they can remain smooth at
+the active display's actual refresh rate. Numeric summary values are throttled
+to at most ten updates per second, and the full raw metrics model, table, and
+accessibility hierarchy update four times per second. Exact histories are
+recorded once per presented frame without allocation or audio-thread work.
+Native occlusion or minimization stops collection and marks retained values
+**PAUSED**; it restarts when rendering becomes effective again. The complete
+text export, including both exact histories and every component value, is
+formatted only when **Copy** is pressed; neither 240-entry history is serialized
 during live polling. The panel still has some diagnostic overhead, so confirm
 important performance measurements with it disabled. For a useful report, let
 the plugin render for at least 30 seconds and include the host, display refresh

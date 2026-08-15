@@ -38,7 +38,7 @@ an incidental result of analysis.
 | Analysis scheduling | Do not create one thread per visualization. Each instance has a logical coordinator, not a dedicated thread, and submits fairly to a process-wide pool initially bounded to two workers. |
 | Render handoff | Renderers consume stable, immutable snapshots rather than mutable analysis working memory. |
 | Display timing | Pace frames from the active display's refresh cycle, with smooth 60 Hz and 120 Hz/ProMotion behavior where the host and display permit it. Measure the cadence and deadlines actually granted by the display-link update rather than inferring them from the screen's advertised maximum refresh rate. |
-| Performance observability | Offer an opt-in, persisted, per-instance metrics panel in Release builds. Show every collected renderer and analysis metric, exact presented-frame pacing history, derived rates, and copyable raw reports without mutating the host process. |
+| Performance observability | Offer an opt-in, persisted, per-instance metrics panel in Release builds. Show every collected renderer and analysis metric, exact presented-frame pacing history, per-frame callback-to-presentation latency composition, derived rates, and copyable raw reports without mutating the host process. |
 | DPI support | Treat layout units and render pixels separately and support both regular-density and Retina displays, including live movement between them. |
 | Editor lifecycle | Stop sample capture, analysis, history, display-link activity, and Metal submission when the editor is closed, hidden, or occluded beyond a short debounce. Reopening starts with fresh analysis state. |
 | First usable release | Show a large real-time FFT spectrum with compact stereo sample-peak/RMS meters in one resizable layout. Defer history-based and stereo-field views. |
@@ -222,6 +222,15 @@ timing, so its timestamps are telemetry and deadline inputs rather than values
 for `presentAtTime` or other timed presentation APIs, which assert for these
 drawables.
 
+Release reusable per-frame buffers when their GPU command buffers complete, not
+when their drawables are eventually presented. Presentation and compositor
+retention can span several display periods even when GPU execution is short;
+coupling buffer ownership to that later event can exhaust an otherwise healthy
+in-flight pool and turn 120 display-link callbacks per second into roughly 60
+submissions. Each submitted frame instead has lifetime-safe correlation state
+that independently receives the GPU-completion and presentation callbacks. It
+must not retain a raw renderer pointer after teardown.
+
 The editor exposes a built-in performance metrics panel rather than relying on
 Apple's Metal Performance HUD. On macOS 15, `CAMetalLayer.developerHUDProperties`
 configures a HUD only after the hosting process was launched with Apple's
@@ -230,23 +239,34 @@ The layer property alone cannot load the process-wide HUD runtime afterward. An
 Audio Unit or VST3 cannot safely relaunch or mutate its host to impose that launch
 state, and the API offers no reliable per-plugin availability query.
 
-The built-in panel reads immutable renderer and analysis telemetry snapshots at
-four hertz on the message thread while the renderer is effectively active.
+The built-in panel separates exact presentation cadence from per-frame latency.
 Presented handlers insert actual timestamps into a fixed 241-timestamp window
 under a tiny non-audio-thread lock. Sorting by timestamp makes the resulting 240
-intervals exact even if Metal invokes handlers concurrently or out of order. The
-panel exposes all raw fields, derived rates and interval statistics, and a
-copyable text report. GPU completion timing fields are copied under a short
-non-audio-thread lock so their values and validity counters describe the same
-completion group. Explicit valid, unavailable, and unclassifiable counters keep
-missing Metal timestamps distinct from measured zero lateness. Native
-effective-activity transitions stop and restart the sampling timer; retained
+presentation intervals exact even if Metal invokes handlers concurrently or out
+of order. A separate fixed history correlates each submitted frame's display-link
+callback, command submission, GPU start/end, and actual presentation into four
+coarse components: CPU encode, Submit + queue, GPU execute, and
+compositor/display wait. Their sum is callback-to-presentation latency. It is not
+the presented-frame interval because multiple frames overlap in the pipeline.
+
+Lightweight graph snapshots and repaints follow the editor window's vblank at
+the active display cadence while at least one graph intersects the visible
+metrics viewport. Numeric summaries update at no more than ten hertz, and the
+full renderer/analysis model, raw table, and accessibility hierarchy update at
+four hertz on the message thread while the renderer is effectively active.
+The panel exposes every raw field, derived rates and interval statistics, and a
+copyable text report. GPU completion timing fields and histories are copied
+under short non-audio-thread locks so values and validity counters describe
+coherent groups. Explicit valid, unavailable, and unclassifiable counters keep
+missing Metal timestamps distinct from a measured zero duration or lateness.
+Native effective-activity transitions stop and restart collection; retained
 values are explicitly marked paused and may be stale. The full report is
-assembled lazily when the user presses Copy, and the exact 240-entry history is
-not serialized during live polling. It sits beside the native Metal view because
-an overlapping JUCE component cannot reliably appear above an `NSViewComponent`.
-The panel defaults to off because formatting and painting diagnostics has
-measurable overhead; important results should also be confirmed with it hidden.
+assembled lazily when the user presses Copy, and neither exact 240-entry history
+is serialized during live polling. The panel sits beside the native Metal view
+because an overlapping JUCE component cannot reliably appear above an
+`NSViewComponent`. It defaults to off because formatting and painting
+diagnostics has measurable overhead; important results should also be confirmed
+with it hidden.
 
 The rendering toolbox should favor simple, predictable GPU operations:
 
@@ -370,6 +390,11 @@ and record the reason in the decision log.
 - **Render CPU time** includes drawable acquisition, buffer updates, command
   encoding, and command-buffer submission. **GPU time** uses command-buffer GPU
   start/end timestamps where available.
+- **Presented-frame pacing** is the interval between consecutive actual
+  presentation timestamps. **Per-frame latency** starts at that frame's
+  display-link callback and ends at its actual presentation. Decompose the
+  latter into CPU encode, Submit + queue, GPU execute, and compositor/display
+  wait. Do not sum overlapping frames or present per-frame latency as cadence.
 - A frame has a specific deadline supplied by the display-linked timing source.
   Attribute a miss to the plugin when its CPU submission or GPU completion
   crosses that deadline. Classify a callback that arrives already late, or
@@ -513,3 +538,7 @@ order of visualizations.
   be assessed confidently in the development environment.
 - Replaced the host-dependent Metal Performance HUD experiment with an opt-in,
   per-instance metrics panel and exact presented-frame pacing history.
+- Decoupled reusable render-buffer release from drawable presentation and added
+  exact per-frame callback-to-presentation latency composition beside the
+  separate pacing history. Lightweight graphs follow display vblank while the
+  full raw metrics table remains throttled.
