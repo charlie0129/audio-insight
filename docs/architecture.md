@@ -34,7 +34,8 @@ an incidental result of analysis.
 | Graphics | Use a native Metal renderer, hosted in a MetalKit view inside the JUCE editor. On the initial macOS baseline, drive its Metal layer with `CAMetalDisplayLink` rather than JUCE repaint timers or MetalKit's internal timer. Do not use deprecated macOS OpenGL. |
 | Signal analysis | Initially use CPU analysis and Apple's Accelerate/vDSP where useful. GPU compute is deferred until profiling demonstrates a benefit. |
 | Frequency presentation | Expose one continuous Linear-to-Logarithmic frequency-spacing control, including intermediate mappings. Spectrum and Spectrogram share the same setting and coordinate transform; they do not have independent frequency scales. |
-| Dashboard interface | Keep one dashboard view with one Spectrum and no separate focus mode. After the fixed first-release vertical slice, add constrained grid-snapped width/height editing and the staged panels defined in [the analyzer interface requirements](analyzer-ui.md). |
+| Dashboard interface | Keep one fixed-topology five-tile dashboard with one Spectrum and no separate focus mode. The next UI milestone keeps Spectrum and Peak/RMS live, adds inert placeholders for Spectrogram, Stereo/correlation, and Loudness, and allows only the four grid-snapped width/height splits defined in [the analyzer interface requirements](analyzer-ui.md). |
+| Interface state | Save analyzer settings and the Metrics toggle as non-automatable per-instance state, and the four-split layout as one versioned per-user global preference. Do not serialize transient history, holds, integration, Settings/About visibility, or uncommitted edits. |
 | Real-time handoff | The audio callback writes only to bounded, non-blocking data structures. Analysis and rendering never make the audio thread wait. |
 | Overflow policy | Prefer current visual data: coalesce or discard the oldest unclaimed analysis input, detect discontinuities by sequence number, and reset temporal analysis state across a gap. Never overwrite a slot being read or delay audio. |
 | Analysis scheduling | Do not create one thread per visualization. Each instance has a logical coordinator, not a dedicated thread, and submits fairly to a process-wide pool initially bounded to two workers. |
@@ -43,7 +44,7 @@ an incidental result of analysis.
 | Performance observability | Offer an opt-in, persisted, per-instance metrics panel in Release builds. Show every collected renderer and analysis metric, exact presented-frame pacing history, per-frame callback-to-presentation latency composition, derived rates, and copyable raw reports without mutating the host process. |
 | DPI support | Treat layout units and render pixels separately and support both regular-density and Retina displays, including live movement between them. |
 | Editor lifecycle | Stop sample capture, analysis, history, display-link activity, and Metal submission when the editor is closed, hidden, or occluded beyond a short debounce. Reopening starts with fresh analysis state. |
-| First usable release | Show a large real-time FFT spectrum with compact stereo sample-peak/RMS meters in one resizable layout. Defer history-based and stereo-field views. |
+| First usable release | Show a large real-time FFT spectrum with compact sample-peak/RMS meters that adapt to mono or stereo input in one resizable layout. Defer history-based and stereo-field views. |
 | Portability | Keep DSP, analysis, and product state independent of Metal behind a small renderer boundary. The architecture accommodates a future Windows backend, but Windows is not a near-term supported target. |
 | Distribution | A paid Apple Developer account, Developer ID signing, and notarization are out of scope unless this policy is explicitly revisited. See [macOS distribution](macos-distribution.md). |
 | Visual review | Deliver runnable visual checkpoints and ask the user for DAW testing, observations, or screenshots when appearance and interaction cannot be verified confidently in the development environment. |
@@ -194,8 +195,9 @@ pass-through and host-required parameter/state handling continue.
 Some hosts cache an editor instead of destroying it, so lifecycle control must
 consider visibility, attachment, and occlusion rather than relying only on the
 editor destructor. A short debounce is acceptable to avoid start/stop churn.
-When the editor becomes active again, advance an analysis generation, discard
-stale snapshots, reset holds/smoothing/history, and warm up from current audio.
+When the editor becomes active again, advance the capture/lifecycle generation,
+discard stale snapshots, reset holds/smoothing/history, and warm up from current
+audio.
 
 | Editor state | Sample handoff | Analysis | Display link and Metal |
 | --- | --- | --- | --- |
@@ -203,8 +205,8 @@ stale snapshots, reset holds/smoothing/history, and warm up from current audio.
 | Minimized, host-hidden, or occluded beyond the debounce | Disabled | Cancelled and quiesced | Stopped |
 | Detached, closed, or destroyed | Disabled | Cancelled and quiesced | Stopped and resources released as appropriate |
 
-Returning from either inactive state begins a new analysis generation; the first
-release does not attempt to reconstruct the missing interval.
+Returning from either inactive state begins a new capture/lifecycle generation;
+the first release does not attempt to reconstruct the missing interval.
 
 ### Metal rendering
 
@@ -319,10 +321,10 @@ Spectrum and Spectrogram use the same continuous frequency-coordinate mapping.
 The control ranges from linear through intermediate spacing to logarithmic and
 applies to the Spectrum frequency axis and the Spectrogram frequency axis.
 
-The Spectrogram renders time-frequency energy over a near-black background. Its
-intensity palette should read as energy traces: by default, dark blue for lower
-energy rising through orange and near-white for stronger energy. It must not
-look like broad decorative color stripes.
+The Spectrogram renders time-frequency energy over a literal black background.
+Its intensity palette should read as energy traces: by default, dark blue for
+lower energy rising through orange and near-white for stronger energy. It must
+not look like broad decorative color stripes.
 
 Spectrogram chrome shows only numeric frequency tick labels, using Hz or kHz as
 appropriate. Omit axis-title text, time/history labels, and dB/color-legend
@@ -334,15 +336,17 @@ The first usable release deliberately has one layout and two visualizations:
 
 - a large real-time FFT spectrum occupying most of the surface, using the
   shared adjustable frequency-spacing transform; and
-- a compact vertical stereo meter strip showing honest sample peak and RMS.
+- a compact vertical meter strip showing honest sample peak and RMS, with one
+  meter for mono input or distinct L/R meters for stereo.
 
 A small controls row may expose essential spectrum and meter settings. The
-window is resizable. The first vertical slice may retain its fixed default
-arrangement; the accepted later dashboard adds constrained, grid-snapped tile
-resizing in both dimensions. Detached panels, overlapping floating windows, and
-arbitrary free-form windowing remain out of scope. Do not label sample peak as
-true peak; that name is reserved for a correctly oversampled true-peak
-implementation.
+window is resizable. The next UI milestone replaces that fixed arrangement with
+the complete five-tile shell while keeping only Spectrum and Peak/RMS live. The
+other three tiles are titled, inert placeholders: they do not show fake data or
+submit analysis. Four grid-snapped splitters resize adjacent fixed tiles;
+movement, reordering, hiding, detaching, overlap, and free-form windowing remain
+out of scope. Do not label sample peak as true peak; that name is reserved for a
+correctly oversampled true-peak implementation.
 
 Before distributing a binary, the controls must include an About/Legal path that
 shows the confirmed project copyright, AGPL/no-warranty notice, how to view the
@@ -356,9 +360,10 @@ explicit click. The message must not interrupt use, consume visualization space,
 display repeatedly as a prompt, collect telemetry, or initiate network access on
 its own.
 
-Spectrogram history, LUFS and loudness history, vectorscope/goniometer,
-correlation, phase, surround layouts, and multi-instance aggregation can follow
-after this vertical slice is smooth, correct, and measured.
+After the shell and Settings inspector, implement Spectrogram history, then the
+Stereo field/correlation, then standards-validated Loudness. Phase, surround
+layouts, multi-instance aggregation, Loudness Range, and true peak remain later
+work.
 
 ## Performance and validation
 
@@ -500,9 +505,22 @@ files with that copyright plus `SPDX-License-Identifier: AGPL-3.0-or-later`.
 5. Add the shared 4096-point FFT path and main spectrum visualization.
 6. Meet the preliminary budgets, run host and multi-instance checks, gather user
    visual feedback, and document source/prebuilt distribution.
+7. Build the fixed-topology five-tile Metal shell, numeric-axis text
+   infrastructure, four constrained splitters, edit interaction, and global
+   layout persistence. Keep unfinished tiles inert.
+8. Add the mutually exclusive Settings inspector, migrate analyzer configuration
+   to versioned non-automatable per-instance state, connect the shared FFT and
+   frequency controls, and finish Spectrum and Peak/RMS presentation.
+9. Implement the literal-black Spectrogram with shared frequency mapping,
+   bounded Scroll/Overwrite history, and palette/response controls.
+10. Implement the mono-aware Stereo field and stereo correlation view from the
+    shared captured samples and statistics.
+11. Implement Momentary, Short-term, and Integrated Loudness only after the
+    ITU-R BS.1770-5/EBU R128 path passes published reference tests.
 
-This sequence is a starting plan rather than a promise about the exact set or
-order of visualizations.
+The detailed defaults and acceptance behavior for steps 7–11 live in
+[the analyzer interface requirements](analyzer-ui.md). A placeholder does not
+authorize fake values, background work, or speculative resource allocation.
 
 ## Open questions
 
@@ -541,7 +559,7 @@ order of visualizations.
   ownership and telemetry.
 - Chose to stop capture, analysis, history, display timing, and rendering when
   the editor is closed, then warm up fresh on reopen.
-- Scoped the first usable release to stereo sample-peak/RMS meters and a
+- Scoped the first usable release to mono/stereo sample-peak/RMS meters and a
   real-time FFT spectrum in one resizable layout.
 - Set preliminary M1 Max performance budgets for audio, analysis, rendering,
   frame pacing, closed editors, and multiple instances.
@@ -570,8 +588,25 @@ order of visualizations.
 - Chose one continuous Linear-to-Logarithmic frequency mapping shared by
   Spectrum and Spectrogram, including intermediate spacing.
 - Set the Spectrogram presentation target to intensity-colored energy traces
-  over near-black, with only numeric frequency ticks shown.
-- Accepted one dashboard with no Focus Spectrum mode, a temporary right-side
-  Settings inspector, constrained width/height tile editing after the first
-  vertical slice, and staged presentation requirements for every analyzer
-  panel. See `docs/analyzer-ui.md`.
+  over literal black, with only numeric frequency ticks shown.
+- Accepted one fixed-topology, five-tile dashboard with no Focus Spectrum mode,
+  tile movement, reordering, hiding, detaching, or overlap. Four clamped splitters
+  provide width/height adjustment on a normalized grid.
+- Chose one versioned per-user global layout. Analyzer settings remain
+  non-automatable per-instance project state, while live histories, holds,
+  Loudness integration, Settings/About visibility, and unfinished layout edits
+  remain transient; the Metrics toggle remains persisted per instance.
+- Made Settings and Metrics mutually exclusive with deterministic Metrics
+  restoration. Settings may cover and pause the canvas at narrow widths;
+  Metrics always retains a compact live Metal preview so observation does not
+  stop the renderer.
+- Chose inert placeholders for unfinished dashboard panels, followed by
+  Spectrogram, Stereo field/correlation, and standards-validated Loudness in
+  that order.
+- Accepted both Scroll and Overwrite Spectrogram modes on bounded circular
+  `R16Float` history, with frequency rows encoded in the shared mapping.
+- Required real mono/stereo channel-layout metadata throughout analysis. Mono is
+  never duplicated for BS.1770 summation or presented as a synthetic stereo
+  correlation result.
+- Resolved the remaining panel algorithms, scales, labels, controls, defaults,
+  persistence, accessibility, and reset behavior in `docs/analyzer-ui.md`.
