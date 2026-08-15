@@ -262,21 +262,24 @@ FrequencyAxisTickSelection selectFrequencyAxisTicks(const FrequencyAxisMapping& 
     trySelect(0);
     trySelect(candidateCount - 1);
 
-    // Prefer decade labels before the remaining 2x and 5x multiples. Endpoints
-    // above were already reserved, so narrow panels retain useful anchors at
-    // both ends rather than allowing a low-frequency greedy pass to crowd out
-    // the upper scale.
+    // Prefer decade labels before the remaining 2x and 5x multiples. The
+    // secondary 15/12/18 kHz order then fills the widest high-frequency gap
+    // from its centre outward when the transformed axis has room. Endpoints
+    // above were already reserved, so narrow panels retain both anchors.
     constexpr std::array<std::size_t, frequencyAxisTickCandidateCount> priority {
         2,
         5,
         8,
         3,
         6,
-        9,
+        12,
         0,
         1,
         4,
         7,
+        10,
+        9,
+        11,
     };
     for (const auto candidateIndex : priority) {
         for (std::size_t candidate = 0; candidate < candidateCount; ++candidate) {
@@ -1126,7 +1129,7 @@ constexpr std::array<std::string_view, cachedFixedTextRunCount> cachedFixedTextS
 
 constexpr std::array<std::string_view, frequencyAxisTickCandidateCount>
     cachedFrequencyAxisTextStrings { "20 Hz", "50 Hz", "100 Hz", "200 Hz", "500 Hz", "1 kHz",
-        "2 kHz", "5 kHz", "10 kHz", "20 kHz" };
+        "2 kHz", "5 kHz", "10 kHz", "12 kHz", "15 kHz", "18 kHz", "20 kHz" };
 
 constexpr std::array<std::string_view, peakRmsMajorDecibelTicks.size()>
     cachedPeakRmsTickTextStrings { "-60", "-48", "-36", "-24", "-12", "-6", "0", "+3" };

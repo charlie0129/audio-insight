@@ -19,8 +19,7 @@
 
 namespace audio_insight {
 namespace detail {
-inline constexpr std::size_t frequencyAxisTickCandidateCount = 10;
-inline constexpr std::array<float, frequencyAxisTickCandidateCount> frequencyAxisTickCandidates {
+inline constexpr std::array frequencyAxisTickCandidates {
     20.0F,
     50.0F,
     100.0F,
@@ -30,8 +29,12 @@ inline constexpr std::array<float, frequencyAxisTickCandidateCount> frequencyAxi
     2'000.0F,
     5'000.0F,
     10'000.0F,
+    12'000.0F,
+    15'000.0F,
+    18'000.0F,
     20'000.0F,
 };
+inline constexpr std::size_t frequencyAxisTickCandidateCount = frequencyAxisTickCandidates.size();
 inline constexpr std::size_t maximumFrequencyAxisTickCount = frequencyAxisTickCandidateCount + 1;
 inline constexpr std::size_t maximumFrequencyAxisLabelGlyphs = 10;
 inline constexpr std::size_t frequencyAxisLabelStorage = maximumFrequencyAxisLabelGlyphs + 1;
