@@ -68,6 +68,8 @@ target_sources(AudioInsight
     PRIVATE
         src/analysis/HannSpectrumAnalyzer.cpp
         src/analysis/HannSpectrumAnalyzer.h
+        src/analysis/SharedAnalysisScheduler.cpp
+        src/analysis/SharedAnalysisScheduler.h
         src/analysis/StereoMeterAccumulator.cpp
         src/analysis/StereoMeterAccumulator.h
         src/analysis/StereoSampleCapture.cpp
@@ -104,6 +106,8 @@ target_link_libraries(AudioInsight
 source_group(TREE "${CMAKE_CURRENT_SOURCE_DIR}" FILES
     src/analysis/HannSpectrumAnalyzer.cpp
     src/analysis/HannSpectrumAnalyzer.h
+    src/analysis/SharedAnalysisScheduler.cpp
+    src/analysis/SharedAnalysisScheduler.h
     src/analysis/StereoMeterAccumulator.cpp
     src/analysis/StereoMeterAccumulator.h
     src/analysis/StereoSampleCapture.cpp
@@ -125,6 +129,8 @@ if(BUILD_TESTING)
         PRIVATE
             src/analysis/HannSpectrumAnalyzer.cpp
             src/analysis/HannSpectrumAnalyzer.h
+            src/analysis/SharedAnalysisScheduler.cpp
+            src/analysis/SharedAnalysisScheduler.h
             src/analysis/StereoMeterAccumulator.cpp
             src/analysis/StereoMeterAccumulator.h
             src/analysis/StereoSampleCapture.cpp
@@ -135,6 +141,7 @@ if(BUILD_TESTING)
             src/plugin/PluginProcessor.h
             tests/AnalysisCoreTests.cpp
             tests/PluginProcessorTests.cpp
+            tests/SharedAnalysisSchedulerTests.cpp
             tests/TestMain.cpp
     )
 
@@ -167,6 +174,8 @@ if(BUILD_TESTING)
     source_group(TREE "${CMAKE_CURRENT_SOURCE_DIR}" FILES
         src/analysis/HannSpectrumAnalyzer.cpp
         src/analysis/HannSpectrumAnalyzer.h
+        src/analysis/SharedAnalysisScheduler.cpp
+        src/analysis/SharedAnalysisScheduler.h
         src/analysis/StereoMeterAccumulator.cpp
         src/analysis/StereoMeterAccumulator.h
         src/analysis/StereoSampleCapture.cpp
@@ -177,6 +186,7 @@ if(BUILD_TESTING)
         src/plugin/PluginProcessor.h
         tests/AnalysisCoreTests.cpp
         tests/PluginProcessorTests.cpp
+        tests/SharedAnalysisSchedulerTests.cpp
         tests/TestMain.cpp
     )
 endif()
