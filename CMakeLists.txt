@@ -4,6 +4,8 @@ cmake_minimum_required(VERSION 3.25)
 
 project(AudioInsight VERSION 0.1.0 LANGUAGES C CXX OBJCXX)
 
+include(CTest)
+
 if(NOT APPLE)
     message(FATAL_ERROR "Audio Insight currently supports the macOS development target only")
 endif()
@@ -99,3 +101,56 @@ source_group(TREE "${CMAKE_CURRENT_SOURCE_DIR}" FILES
     src/plugin/PluginProcessor.cpp
     src/plugin/PluginProcessor.h
 )
+
+if(BUILD_TESTING)
+    juce_add_console_app(AudioInsightTests
+        PRODUCT_NAME "Audio Insight Tests"
+        NEEDS_CURL FALSE
+        NEEDS_WEB_BROWSER FALSE
+    )
+
+    target_sources(AudioInsightTests
+        PRIVATE
+            src/core/VisualizationDataSource.h
+            src/core/VisualizationFrame.h
+            src/plugin/PluginProcessor.cpp
+            src/plugin/PluginProcessor.h
+            tests/PluginProcessorTests.cpp
+            tests/TestMain.cpp
+    )
+
+    target_include_directories(AudioInsightTests PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/src")
+
+    target_compile_definitions(AudioInsightTests
+        PRIVATE
+            JUCE_MODAL_LOOPS_PERMITTED=0
+            JUCE_REPORT_APP_USAGE=0
+            JUCE_UNIT_TESTS=1
+            JUCE_USE_CURL=0
+            JUCE_VST3_CAN_REPLACE_VST2=0
+            JUCE_WEB_BROWSER=0
+            JucePlugin_Name="Audio Insight"
+    )
+
+    target_link_libraries(AudioInsightTests
+        PRIVATE
+            juce::juce_audio_processors
+            juce::juce_audio_utils
+            juce::juce_dsp
+            juce::juce_gui_extra
+        PUBLIC
+            juce::juce_recommended_config_flags
+            juce::juce_recommended_warning_flags
+    )
+
+    add_test(NAME AudioInsightTests COMMAND AudioInsightTests)
+
+    source_group(TREE "${CMAKE_CURRENT_SOURCE_DIR}" FILES
+        src/core/VisualizationDataSource.h
+        src/core/VisualizationFrame.h
+        src/plugin/PluginProcessor.cpp
+        src/plugin/PluginProcessor.h
+        tests/PluginProcessorTests.cpp
+        tests/TestMain.cpp
+    )
+endif()
