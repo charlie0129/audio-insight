@@ -2,11 +2,13 @@
 
 #pragma once
 
+#include "analysis/AnalysisCoordinator.h"
+
 #include <juce_audio_processors/juce_audio_processors.h>
 
 namespace audio_insight
 {
-class PluginProcessor final : public juce::AudioProcessor
+class PluginProcessor final : public juce::AudioProcessor, public VisualizationDataSource
 {
 public:
     PluginProcessor();
@@ -37,11 +39,19 @@ public:
     void setStateInformation(const void* data, int sizeInBytes) override;
 
     [[nodiscard]] juce::AudioProcessorValueTreeState& getParameters() noexcept;
+    [[nodiscard]] AnalysisTelemetry getAnalysisTelemetry() const noexcept;
+
+    void requestAnalysis() noexcept override;
+    void setVisualizationActive(bool shouldBeActive) noexcept override;
+    [[nodiscard]] bool
+    copyLatestVisualizationFrame(VisualizationFrame& destination) const noexcept override;
 
 private:
     static juce::AudioProcessorValueTreeState::ParameterLayout createParameterLayout();
 
     juce::AudioProcessorValueTreeState parameters;
+    AnalysisCoordinator analysisCoordinator;
+    double currentSampleRate = 0.0;
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR(PluginProcessor)
 };

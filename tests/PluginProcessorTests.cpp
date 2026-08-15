@@ -60,6 +60,9 @@ public:
             juce::MidiBuffer midi;
             processor.processBlock(audio, midi);
 
+            // A closed editor must not pay the sample-copy/analysis cost.
+            expect(processor.getAnalysisTelemetry().capture.attemptedChunks == 0);
+
             for (auto channel = 0; channel < audio.getNumChannels(); ++channel)
                 expect(audio.getMagnitude(channel, 0, 128) > 0.0F);
 
@@ -68,6 +71,25 @@ public:
                 for (auto sample = 0; sample < audio.getNumSamples(); ++sample)
                     expectEquals(audio.getSample(channel, sample), expected.getSample(channel, sample));
             }
+        });
+
+        testCase("An active editor forwards audio into the bounded capture path", [this]
+        {
+            PluginProcessor processor;
+            processor.prepareToPlay(48'000.0, 128);
+            processor.setVisualizationActive(true);
+
+            juce::AudioBuffer<float> audio(2, 128);
+            audio.clear();
+            juce::MidiBuffer midi;
+            processor.processBlock(audio, midi);
+
+            const auto telemetry = processor.getAnalysisTelemetry();
+            expect(telemetry.capture.attemptedChunks == 1);
+            expect(telemetry.meters.attemptedBlocks == 1);
+            expect(telemetry.latestCaptureRevision == 1);
+
+            processor.setVisualizationActive(false);
         });
 
         testCase("Parameter state round-trips", [this]

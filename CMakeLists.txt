@@ -66,6 +66,8 @@ juce_add_plugin(AudioInsight
 
 target_sources(AudioInsight
     PRIVATE
+        src/analysis/AnalysisCoordinator.cpp
+        src/analysis/AnalysisCoordinator.h
         src/analysis/HannSpectrumAnalyzer.cpp
         src/analysis/HannSpectrumAnalyzer.h
         src/analysis/SharedAnalysisScheduler.cpp
@@ -104,6 +106,8 @@ target_link_libraries(AudioInsight
 )
 
 source_group(TREE "${CMAKE_CURRENT_SOURCE_DIR}" FILES
+    src/analysis/AnalysisCoordinator.cpp
+    src/analysis/AnalysisCoordinator.h
     src/analysis/HannSpectrumAnalyzer.cpp
     src/analysis/HannSpectrumAnalyzer.h
     src/analysis/SharedAnalysisScheduler.cpp
@@ -127,6 +131,8 @@ if(BUILD_TESTING)
 
     target_sources(AudioInsightTests
         PRIVATE
+            src/analysis/AnalysisCoordinator.cpp
+            src/analysis/AnalysisCoordinator.h
             src/analysis/HannSpectrumAnalyzer.cpp
             src/analysis/HannSpectrumAnalyzer.h
             src/analysis/SharedAnalysisScheduler.cpp
@@ -139,6 +145,7 @@ if(BUILD_TESTING)
             src/core/VisualizationFrame.h
             src/plugin/PluginProcessor.cpp
             src/plugin/PluginProcessor.h
+            tests/AnalysisCoordinatorTests.cpp
             tests/AnalysisCoreTests.cpp
             tests/PluginProcessorTests.cpp
             tests/SharedAnalysisSchedulerTests.cpp
@@ -172,6 +179,8 @@ if(BUILD_TESTING)
     add_test(NAME AudioInsightTests COMMAND AudioInsightTests)
 
     source_group(TREE "${CMAKE_CURRENT_SOURCE_DIR}" FILES
+        src/analysis/AnalysisCoordinator.cpp
+        src/analysis/AnalysisCoordinator.h
         src/analysis/HannSpectrumAnalyzer.cpp
         src/analysis/HannSpectrumAnalyzer.h
         src/analysis/SharedAnalysisScheduler.cpp
@@ -184,6 +193,7 @@ if(BUILD_TESTING)
         src/core/VisualizationFrame.h
         src/plugin/PluginProcessor.cpp
         src/plugin/PluginProcessor.h
+        tests/AnalysisCoordinatorTests.cpp
         tests/AnalysisCoreTests.cpp
         tests/PluginProcessorTests.cpp
         tests/SharedAnalysisSchedulerTests.cpp

@@ -22,12 +22,14 @@ PluginProcessor::PluginProcessor()
 {
 }
 
-void PluginProcessor::prepareToPlay(double, int)
+void PluginProcessor::prepareToPlay(const double sampleRate, int)
 {
+    currentSampleRate = sampleRate;
 }
 
 void PluginProcessor::releaseResources()
 {
+    currentSampleRate = 0.0;
 }
 
 void PluginProcessor::processBlock(juce::AudioBuffer<float>& audio, juce::MidiBuffer&)
@@ -39,6 +41,15 @@ void PluginProcessor::processBlock(juce::AudioBuffer<float>& audio, juce::MidiBu
 
     for (auto channel = inputChannels; channel < outputChannels; ++channel)
         audio.clear(channel, 0, audio.getNumSamples());
+
+    if (inputChannels > 0 && audio.getNumSamples() > 0 && currentSampleRate > 0.0)
+    {
+        const auto* const left = audio.getReadPointer(0);
+        const auto* const right = inputChannels > 1 ? audio.getReadPointer(1) : left;
+        analysisCoordinator.captureAudioBlock(left, right,
+                                              static_cast<std::size_t>(audio.getNumSamples()),
+                                              currentSampleRate);
+    }
 
     // The processor is intentionally transparent. JUCE supplies the input and
     // output in the same buffer for this effect, so no sample copy is needed.
@@ -130,6 +141,26 @@ void PluginProcessor::setStateInformation(const void* data, int sizeInBytes)
 juce::AudioProcessorValueTreeState& PluginProcessor::getParameters() noexcept
 {
     return parameters;
+}
+
+AnalysisTelemetry PluginProcessor::getAnalysisTelemetry() const noexcept
+{
+    return analysisCoordinator.telemetry();
+}
+
+void PluginProcessor::requestAnalysis() noexcept
+{
+    analysisCoordinator.requestAnalysis();
+}
+
+void PluginProcessor::setVisualizationActive(const bool shouldBeActive) noexcept
+{
+    analysisCoordinator.setVisualizationActive(shouldBeActive);
+}
+
+bool PluginProcessor::copyLatestVisualizationFrame(VisualizationFrame& destination) const noexcept
+{
+    return analysisCoordinator.copyLatestVisualizationFrame(destination);
 }
 
 juce::AudioProcessorValueTreeState::ParameterLayout PluginProcessor::createParameterLayout()
