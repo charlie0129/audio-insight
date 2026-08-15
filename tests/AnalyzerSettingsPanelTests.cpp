@@ -82,6 +82,23 @@ public:
                 1.0e-9);
             expectWithinAbsoluteError(frequencySpacing->getInterval(), 0.0, 1.0e-12);
 
+            constexpr std::array<const char*, 3> markIds { "settingsFrequencySpacingMark1",
+                "settingsFrequencySpacingMark2", "settingsFrequencySpacingMark3" };
+            constexpr std::array<const char*, 3> markText { "0.25", "0.5", "0.75" };
+            auto previousMarkX = -1;
+            for (auto index = std::size_t { 0 }; index < markIds.size(); ++index) {
+                auto* mark
+                    = dynamic_cast<juce::Label*>(findDescendantWithId(panel, markIds[index]));
+                expect(mark != nullptr);
+                if (mark == nullptr)
+                    continue;
+
+                expectEquals(mark->getText(), juce::String(markText[index]));
+                expect(mark->isVisible());
+                expect(mark->getBounds().getCentreX() > previousMarkX);
+                previousMarkX = mark->getBounds().getCentreX();
+            }
+
             floor->setValue(-110.0, juce::sendNotificationSync);
             expectEquals(callbackCount, 1);
             expectWithinAbsoluteError(lastPublished.spectrum.floorDb, -110.0, 1.0e-12);

@@ -23,8 +23,12 @@ constexpr int contentHeight = 1210;
 constexpr int sectionGap = 10;
 constexpr int sectionHeaderHeight = 34;
 constexpr int rowHeight = 34;
+constexpr int frequencySpacingMarkHeight = 16;
+constexpr int frequencySpacingTextBoxWidth = 72;
 constexpr double temporalAveragingOffTrackProportion = 0.04;
 constexpr std::array spectrogramHistoryDurations { 2, 5, 10, 20, 30, 60 };
+constexpr std::array frequencySpacingMarkValues { 0.25, 0.5, 0.75 };
+constexpr std::array frequencySpacingMarkText { "0.25", "0.5", "0.75" };
 
 enum SectionIndex : std::size_t {
     sharedSection,
@@ -264,6 +268,15 @@ public:
         };
         frequencySpacing_.addListener(this);
         addAndMakeVisible(frequencySpacing_);
+
+        for (auto index = std::size_t { 0 }; index < frequencySpacingMarks_.size(); ++index) {
+            configureLabel(frequencySpacingMarks_[index], frequencySpacingMarkText[index]);
+            frequencySpacingMarks_[index].setFont(juce::Font { juce::FontOptions { 10.0F } });
+            frequencySpacingMarks_[index].setJustificationType(juce::Justification::centredTop);
+            frequencySpacingMarks_[index].setComponentID(
+                "settingsFrequencySpacingMark" + juce::String(index + 1));
+            addAndMakeVisible(frequencySpacingMarks_[index]);
+        }
 
         configureLabel(floorLabel_, "Floor");
         configureLabel(ceilingLabel_, "Ceiling");
@@ -599,6 +612,13 @@ public:
             graphics.setColour(panelOutline);
             graphics.drawRoundedRectangle(area.reduced(0.5F), 7.0F, 1.0F);
         }
+
+        graphics.setColour(panelOutline.brighter(0.18F));
+        for (const auto& label : frequencySpacingMarks_) {
+            const auto x = static_cast<float>(label.getBounds().getCentreX());
+            const auto top = static_cast<float>(frequencySpacingMarkArea_.getY());
+            graphics.drawVerticalLine(juce::roundToInt(x), top, top + 3.0F);
+        }
     }
 
     void resized() override
@@ -623,7 +643,7 @@ public:
         layoutLabeledRow(shared.removeFromTop(rowHeight), rowLabels_[0], fftSize_);
         layoutLabeledRow(shared.removeFromTop(rowHeight), rowLabels_[1], window_);
         layoutLabeledRow(shared.removeFromTop(rowHeight), rowLabels_[2], fftRate_);
-        layoutLabeledRow(shared.removeFromTop(rowHeight), rowLabels_[3], frequencySpacing_);
+        layoutFrequencySpacingRow(shared.removeFromTop(rowHeight + frequencySpacingMarkHeight));
 
         auto spectrum = sectionAreas_[spectrumSection].reduced(12, 8);
         spectrum.removeFromTop(sectionHeaderHeight - 8);
@@ -822,6 +842,28 @@ private:
         control.setBounds(row);
     }
 
+    void layoutFrequencySpacingRow(juce::Rectangle<int> row)
+    {
+        const auto labelWidth = std::clamp(row.getWidth() * 2 / 5, 106, 148);
+        rowLabels_[3].setBounds(row.removeFromLeft(labelWidth).removeFromTop(rowHeight));
+        row.removeFromLeft(8);
+
+        frequencySpacing_.setBounds(row.removeFromTop(rowHeight));
+        frequencySpacingMarkArea_ = row;
+
+        const auto trackWidth
+            = std::max(1, frequencySpacingMarkArea_.getWidth() - frequencySpacingTextBoxWidth);
+        constexpr int markLabelWidth = 34;
+        for (auto index = std::size_t { 0 }; index < frequencySpacingMarks_.size(); ++index) {
+            const auto centreX = frequencySpacingMarkArea_.getX()
+                + juce::roundToInt(
+                    frequencySpacingMarkValues[index] * static_cast<double>(trackWidth));
+            frequencySpacingMarks_[index].setBounds(centreX - (markLabelWidth / 2),
+                frequencySpacingMarkArea_.getY(), markLabelWidth,
+                frequencySpacingMarkArea_.getHeight());
+        }
+    }
+
     ConfigurationChanged configurationChanged_;
     CloseRequested closeRequested_;
     AnalyzerConfiguration configuration_;
@@ -833,6 +875,8 @@ private:
     std::array<juce::Label, 7> rowLabels_;
     std::array<juce::Label, 5> spectrumLabels_;
     std::array<juce::Label, 4> spectrogramLabels_;
+    std::array<juce::Label, frequencySpacingMarkValues.size()> frequencySpacingMarks_;
+    juce::Rectangle<int> frequencySpacingMarkArea_;
 
     juce::Label sharedStatus_;
     juce::ComboBox fftSize_;
