@@ -190,6 +190,8 @@ target_sources(AudioInsight
     PRIVATE
         src/analysis/AnalysisCoordinator.cpp
         src/analysis/AnalysisCoordinator.h
+        src/analysis/LoudnessAnalyzer.cpp
+        src/analysis/LoudnessAnalyzer.h
         src/analysis/SpectrogramColumnMapper.cpp
         src/analysis/SpectrogramColumnMapper.h
         src/analysis/SpectrogramColumnQueue.cpp
@@ -268,6 +270,8 @@ target_link_libraries(AudioInsight
 source_group(TREE "${CMAKE_CURRENT_SOURCE_DIR}" FILES
     src/analysis/AnalysisCoordinator.cpp
     src/analysis/AnalysisCoordinator.h
+    src/analysis/LoudnessAnalyzer.cpp
+    src/analysis/LoudnessAnalyzer.h
     src/analysis/SpectrogramColumnMapper.cpp
     src/analysis/SpectrogramColumnMapper.h
     src/analysis/SpectrogramColumnQueue.cpp
@@ -329,6 +333,8 @@ if(BUILD_TESTING)
         PRIVATE
             src/analysis/AnalysisCoordinator.cpp
             src/analysis/AnalysisCoordinator.h
+            src/analysis/LoudnessAnalyzer.cpp
+            src/analysis/LoudnessAnalyzer.h
             src/analysis/SpectrogramColumnMapper.cpp
             src/analysis/SpectrogramColumnMapper.h
             src/analysis/SpectrogramColumnQueue.cpp
@@ -386,6 +392,7 @@ if(BUILD_TESTING)
             tests/DashboardLayoutStoreTests.cpp
             tests/EditorUtilityStateTests.cpp
             tests/FrameLatencyHistoryTests.cpp
+            tests/LoudnessAnalyzerTests.cpp
             tests/MetalVisualizationTests.cpp
             tests/PeakRmsBallisticsTests.cpp
             tests/PerformanceMetricsModelTests.cpp
@@ -438,6 +445,8 @@ if(BUILD_TESTING)
     source_group(TREE "${CMAKE_CURRENT_SOURCE_DIR}" FILES
         src/analysis/AnalysisCoordinator.cpp
         src/analysis/AnalysisCoordinator.h
+        src/analysis/LoudnessAnalyzer.cpp
+        src/analysis/LoudnessAnalyzer.h
         src/analysis/SpectrogramColumnMapper.cpp
         src/analysis/SpectrogramColumnMapper.h
         src/analysis/SpectrogramColumnQueue.cpp
@@ -495,6 +504,7 @@ if(BUILD_TESTING)
         tests/DashboardLayoutStoreTests.cpp
         tests/EditorUtilityStateTests.cpp
         tests/FrameLatencyHistoryTests.cpp
+        tests/LoudnessAnalyzerTests.cpp
         tests/MetalVisualizationTests.cpp
         tests/PeakRmsBallisticsTests.cpp
         tests/PerformanceMetricsModelTests.cpp
