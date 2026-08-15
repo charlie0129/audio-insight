@@ -5,13 +5,47 @@
 #include <juce_core/juce_core.h>
 
 #include <array>
-#include <barrier>
+#include <condition_variable>
 #include <cstddef>
 #include <cstdint>
+#include <mutex>
 #include <thread>
 
 namespace audio_insight {
 namespace {
+// Xcode's out-of-line libc++ barrier algorithm is not visible to Darwin TSan.
+// Keep test coordination on intercepted primitives so submission races remain observable.
+class TestBarrier final {
+public:
+    explicit TestBarrier(const std::size_t participantCount) : participantCount_(participantCount)
+    {
+        jassert(participantCount_ > 0);
+    }
+
+    void arriveAndWait()
+    {
+        std::unique_lock lock(mutex_);
+        const auto arrivingPhase = phase_;
+
+        if (++arrivalCount_ == participantCount_) {
+            arrivalCount_ = 0;
+            ++phase_;
+            lock.unlock();
+            condition_.notify_all();
+            return;
+        }
+
+        condition_.wait(lock, [this, arrivingPhase] { return phase_ != arrivingPhase; });
+    }
+
+private:
+    const std::size_t participantCount_;
+    std::size_t arrivalCount_ = 0;
+    std::uint64_t phase_ = 0;
+    std::mutex mutex_;
+    std::condition_variable condition_;
+};
+
 class FrameLatencyHistoryTests final : public juce::UnitTest {
 public:
     FrameLatencyHistoryTests() : UnitTest("Frame-latency history", "audio-insight")
@@ -94,8 +128,8 @@ public:
         beginTest("Concurrent callbacks publish one complete sample and a stable outcome");
         {
             constexpr auto iterations = std::size_t { 10'000 };
-            auto startBarrier = std::barrier { 3 };
-            auto finishBarrier = std::barrier { 3 };
+            TestBarrier startBarrier { 3 };
+            TestBarrier finishBarrier { 3 };
             FrameLatencySubmission* submission = nullptr;
             std::uint64_t baseTimestamp = 0;
             FrameLatencySample completionSample;
@@ -107,20 +141,20 @@ public:
 
             std::thread completionThread([&] {
                 for (std::size_t iteration = 0; iteration < iterations; ++iteration) {
-                    startBarrier.arrive_and_wait();
+                    startBarrier.arriveAndWait();
                     completionEmitted = submission->recordGpuCompletion(
                         baseTimestamp + 400, baseTimestamp + 600, completionSample);
                     skippedTransition = submission->classifySkipped();
-                    finishBarrier.arrive_and_wait();
+                    finishBarrier.arriveAndWait();
                 }
             });
             std::thread presentationThread([&] {
                 for (std::size_t iteration = 0; iteration < iterations; ++iteration) {
-                    startBarrier.arrive_and_wait();
+                    startBarrier.arriveAndWait();
                     presentationEmitted
                         = submission->recordPresentation(baseTimestamp + 1'000, presentationSample);
                     presentedTransition = submission->classifyPresented();
-                    finishBarrier.arrive_and_wait();
+                    finishBarrier.arriveAndWait();
                 }
             });
 
@@ -141,8 +175,8 @@ public:
                 skippedTransition = PresentationOutcomeTransition::none;
                 presentedTransition = PresentationOutcomeTransition::none;
 
-                startBarrier.arrive_and_wait();
-                finishBarrier.arrive_and_wait();
+                startBarrier.arriveAndWait();
+                finishBarrier.arriveAndWait();
 
                 const auto emittedExactlyOnce = completionEmitted != presentationEmitted;
 
