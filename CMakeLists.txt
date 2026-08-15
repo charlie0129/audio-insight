@@ -210,6 +210,8 @@ target_sources(AudioInsight
         src/ui/DashboardLayoutEdit.h
         src/ui/DashboardLayoutStore.cpp
         src/ui/DashboardLayoutStore.h
+        src/ui/EditorUtilityState.cpp
+        src/ui/EditorUtilityState.h
         src/ui/FrameLatencyHistory.cpp
         src/ui/FrameLatencyHistory.h
         src/ui/MetalVisualization.h
@@ -270,6 +272,8 @@ source_group(TREE "${CMAKE_CURRENT_SOURCE_DIR}" FILES
     src/ui/DashboardLayoutEdit.h
     src/ui/DashboardLayoutStore.cpp
     src/ui/DashboardLayoutStore.h
+    src/ui/EditorUtilityState.cpp
+    src/ui/EditorUtilityState.h
     src/ui/FrameLatencyHistory.cpp
     src/ui/FrameLatencyHistory.h
     src/ui/MetalVisualization.h
@@ -313,6 +317,8 @@ if(BUILD_TESTING)
             src/ui/DashboardLayoutEdit.h
             src/ui/DashboardLayoutStore.cpp
             src/ui/DashboardLayoutStore.h
+            src/ui/EditorUtilityState.cpp
+            src/ui/EditorUtilityState.h
             src/ui/FrameLatencyHistory.cpp
             src/ui/FrameLatencyHistory.h
             src/ui/MetalVisualization.h
@@ -328,6 +334,7 @@ if(BUILD_TESTING)
             tests/DashboardLayoutTests.cpp
             tests/DashboardLayoutEditTests.cpp
             tests/DashboardLayoutStoreTests.cpp
+            tests/EditorUtilityStateTests.cpp
             tests/FrameLatencyHistoryTests.cpp
             tests/MetalVisualizationTests.cpp
             tests/PerformanceMetricsModelTests.cpp
@@ -398,6 +405,8 @@ if(BUILD_TESTING)
         src/ui/DashboardLayoutEdit.h
         src/ui/DashboardLayoutStore.cpp
         src/ui/DashboardLayoutStore.h
+        src/ui/EditorUtilityState.cpp
+        src/ui/EditorUtilityState.h
         src/ui/FrameLatencyHistory.cpp
         src/ui/FrameLatencyHistory.h
         src/ui/MetalVisualization.h
@@ -413,6 +422,7 @@ if(BUILD_TESTING)
         tests/DashboardLayoutTests.cpp
         tests/DashboardLayoutEditTests.cpp
         tests/DashboardLayoutStoreTests.cpp
+        tests/EditorUtilityStateTests.cpp
         tests/FrameLatencyHistoryTests.cpp
         tests/MetalVisualizationTests.cpp
         tests/PerformanceMetricsModelTests.cpp
