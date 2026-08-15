@@ -173,6 +173,12 @@ renderer separately applies a fixed 6 ms interpolation to bridge analysis
 snapshots smoothly at display refresh rate; that short presentation step is not
 user-adjustable or serialized.
 
+Temporal averaging is the Settings-inspector replacement for the earlier
+normalized `Smooth` control. Its 75 ms default is approximately `0.37` on that
+legacy control's response curve, keeping the initial amount within the requested
+`0.3–0.5` range without retaining an ambiguous unitless control or duplicating it
+in the toolbar.
+
 ### Settings and Metrics exclusivity
 
 Settings and Metrics do not coexist:
