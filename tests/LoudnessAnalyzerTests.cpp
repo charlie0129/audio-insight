@@ -453,6 +453,11 @@ private:
         IntegratedLoudnessIndex index(
             static_cast<std::size_t>(LoudnessAnalyzer::integrationBlockCapacity));
         const auto initial = index.statistics();
+#if defined(__aarch64__) || defined(__arm64__) || defined(_M_ARM64)
+        // Lock the accepted reference arm64 ABI footprint while keeping the
+        // portable arena ceiling below for other architectures.
+        expect(initial.reservedBytes == 7'606'712);
+#endif
         expect(initial.reservedBytes < 8ULL * 1024ULL * 1024ULL);
         expect(initial.leafNodeCount == 1);
         expect(initial.internalNodeCount == 0);
