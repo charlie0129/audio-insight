@@ -24,6 +24,7 @@ constexpr int sectionGap = 10;
 constexpr int sectionHeaderHeight = 34;
 constexpr int rowHeight = 34;
 constexpr double temporalAveragingOffTrackProportion = 0.04;
+constexpr std::array spectrogramHistoryDurations { 2, 5, 10, 20, 30, 60 };
 
 enum SectionIndex : std::size_t {
     sharedSection,
@@ -384,8 +385,10 @@ public:
         peakRmsStatus_.setMinimumHorizontalScale(0.8F);
         addAndMakeVisible(peakRmsStatus_);
 
-        configureLabel(spectrogramStatus_, "Not yet implemented", false);
-        spectrogramStatus_.setComponentID("settingsSpectrogramUnavailable");
+        configureLabel(
+            spectrogramStatus_, "Controls apply immediately and are saved with this instance.");
+        spectrogramStatus_.setComponentID("settingsSpectrogramStatus");
+        spectrogramStatus_.setMinimumHorizontalScale(0.8F);
         addAndMakeVisible(spectrogramStatus_);
 
         palette_.addItemList({ "Blue Fire", "Inferno", "Viridis", "Grayscale" }, 1);
@@ -393,49 +396,80 @@ public:
         palette_.setName("Spectrogram palette");
         palette_.setTitle("Spectrogram palette");
         palette_.setDescription("Colour palette for Spectrogram energy");
+        palette_.setTooltip("Select the colour palette used to render Spectrogram energy");
         palette_.setComponentID("settingsSpectrogramPalette");
-        addAndMakeVisible(palette_);
-        configureUnavailableControl(palette_, "Spectrogram is not yet implemented");
+        palette_.setWantsKeyboardFocus(true);
+        palette_.onChange = [this] {
+            if (synchronizing_)
+                return;
 
-        configureSlider(historyDuration_, "Spectrogram history duration",
-            "Visible Spectrogram history duration", " s");
+            configuration_.spectrogram.palette
+                = static_cast<SpectrogramPalette>(std::max(1, palette_.getSelectedId()) - 1);
+            publishSanitizedConfiguration();
+        };
+        addAndMakeVisible(palette_);
+
+        historyDuration_.addItemList({ "2 s", "5 s", "10 s", "20 s", "30 s", "60 s" }, 1);
+        historyDuration_.setSelectedId(3, juce::dontSendNotification);
+        historyDuration_.setName("Spectrogram history duration");
+        historyDuration_.setTitle("Spectrogram history duration");
+        historyDuration_.setDescription("Visible Spectrogram history duration");
+        historyDuration_.setTooltip("Select how many seconds of Spectrogram history are visible");
         historyDuration_.setComponentID("settingsSpectrogramHistory");
-        historyDuration_.setRange(2.0, 60.0, 1.0);
-        historyDuration_.setValue(10.0, juce::dontSendNotification);
+        historyDuration_.setWantsKeyboardFocus(true);
+        historyDuration_.onChange = [this] {
+            if (synchronizing_)
+                return;
+
+            const auto index
+                = static_cast<std::size_t>(std::max(1, historyDuration_.getSelectedId()) - 1);
+            configuration_.spectrogram.historyDurationSeconds
+                = spectrogramHistoryDurations[std::min(
+                    index, spectrogramHistoryDurations.size() - 1)];
+            publishSanitizedConfiguration();
+        };
         addAndMakeVisible(historyDuration_);
-        configureUnavailableControl(historyDuration_, "Spectrogram is not yet implemented");
 
         configureSlider(colorResponse_, "Spectrogram colour response",
             "Response curve applied when mapping calibrated dB to the Spectrogram palette", "");
         colorResponse_.setComponentID("settingsSpectrogramColorResponse");
         colorResponse_.setRange(SpectrogramSettings::minimumColorResponse,
             SpectrogramSettings::maximumColorResponse, 0.01);
+        colorResponse_.addListener(this);
         addAndMakeVisible(colorResponse_);
-        configureUnavailableControl(colorResponse_, "Spectrogram is not yet implemented");
 
         configureSlider(colorFloor_, "Spectrogram colour floor",
             "Lower decibel limit mapped by the Spectrogram palette", " dB");
         colorFloor_.setComponentID("settingsSpectrogramColorFloor");
         colorFloor_.setRange(SpectrogramSettings::minimumColorFloorDb,
             SpectrogramSettings::maximumColorFloorDb, 1.0);
+        colorFloor_.addListener(this);
         addAndMakeVisible(colorFloor_);
-        configureUnavailableControl(colorFloor_, "Spectrogram is not yet implemented");
 
         configureSlider(colorCeiling_, "Spectrogram colour ceiling",
             "Upper decibel limit mapped by the Spectrogram palette", " dB");
         colorCeiling_.setComponentID("settingsSpectrogramColorCeiling");
         colorCeiling_.setRange(SpectrogramSettings::minimumColorCeilingDb,
             SpectrogramSettings::maximumColorCeilingDb, 1.0);
+        colorCeiling_.addListener(this);
         addAndMakeVisible(colorCeiling_);
-        configureUnavailableControl(colorCeiling_, "Spectrogram is not yet implemented");
 
         historyMode_.addItemList({ "Scroll", "Overwrite" }, 1);
         historyMode_.setName("Spectrogram history mode");
         historyMode_.setTitle("Spectrogram history mode");
         historyMode_.setDescription("Whether Spectrogram history scrolls or overwrites in place");
+        historyMode_.setTooltip("Select scrolling history or a wrapping overwrite head");
         historyMode_.setComponentID("settingsSpectrogramHistoryMode");
+        historyMode_.setWantsKeyboardFocus(true);
+        historyMode_.onChange = [this] {
+            if (synchronizing_)
+                return;
+
+            configuration_.spectrogram.historyMode = static_cast<SpectrogramHistoryMode>(
+                std::max(1, historyMode_.getSelectedId()) - 1);
+            publishSanitizedConfiguration();
+        };
         addAndMakeVisible(historyMode_);
-        configureUnavailableControl(historyMode_, "Spectrogram is not yet implemented");
 
         configureLabel(stereoStatus_, "Not yet implemented", false);
         stereoStatus_.setComponentID("settingsStereoUnavailable");
@@ -471,13 +505,11 @@ public:
             addAndMakeVisible(spectrumLabels_[index]);
         }
 
-        const std::array<const char*, 4> spectrogramUnavailableLabelText { "Colour response",
-            "Colour floor", "Colour ceiling", "History mode" };
-        for (auto index = std::size_t { 0 }; index < spectrogramUnavailableLabels_.size();
-            ++index) {
-            configureLabel(spectrogramUnavailableLabels_[index],
-                spectrogramUnavailableLabelText[index], false);
-            addAndMakeVisible(spectrogramUnavailableLabels_[index]);
+        const std::array<const char*, 4> spectrogramLabelText { "Colour response", "Colour floor",
+            "Colour ceiling", "History mode" };
+        for (auto index = std::size_t { 0 }; index < spectrogramLabels_.size(); ++index) {
+            configureLabel(spectrogramLabels_[index], spectrogramLabelText[index]);
+            addAndMakeVisible(spectrogramLabels_[index]);
         }
 
         resetButtons_[spectrumSection].setComponentID("settingsSpectrumReset");
@@ -497,8 +529,14 @@ public:
         peakHoldDuration_.setExplicitFocusOrder(13);
         traceColor_.setExplicitFocusOrder(14);
         fillOpacity_.setExplicitFocusOrder(15);
+        resetButtons_[spectrogramSection].setExplicitFocusOrder(16);
+        palette_.setExplicitFocusOrder(17);
+        colorResponse_.setExplicitFocusOrder(18);
+        colorFloor_.setExplicitFocusOrder(19);
+        colorCeiling_.setExplicitFocusOrder(20);
+        historyDuration_.setExplicitFocusOrder(21);
+        historyMode_.setExplicitFocusOrder(22);
         resetButtons_[peakRmsSection].setEnabled(false);
-        resetButtons_[spectrogramSection].setEnabled(false);
         resetButtons_[stereoSection].setEnabled(false);
         resetButtons_[loudnessSection].setEnabled(false);
 
@@ -512,6 +550,9 @@ public:
         fftRate_.onChange = nullptr;
         slope_.onChange = nullptr;
         peakHoldMode_.onChange = nullptr;
+        palette_.onChange = nullptr;
+        historyDuration_.onChange = nullptr;
+        historyMode_.onChange = nullptr;
         traceColor_.onReturnKey = nullptr;
         traceColor_.onFocusLost = nullptr;
         traceColor_.onEscapeKey = nullptr;
@@ -521,6 +562,9 @@ public:
         frequencySpacing_.removeListener(this);
         peakHoldDuration_.removeListener(this);
         fillOpacity_.removeListener(this);
+        colorResponse_.removeListener(this);
+        colorFloor_.removeListener(this);
+        colorCeiling_.removeListener(this);
         for (auto& reset : resetButtons_)
             reset.onClick = nullptr;
     }
@@ -591,14 +635,12 @@ public:
         spectrogramStatus_.setBounds(spectrogram.removeFromTop(26));
         layoutLabeledRow(spectrogram.removeFromTop(rowHeight), rowLabels_[4], palette_);
         layoutLabeledRow(
-            spectrogram.removeFromTop(rowHeight), spectrogramUnavailableLabels_[0], colorResponse_);
+            spectrogram.removeFromTop(rowHeight), spectrogramLabels_[0], colorResponse_);
+        layoutLabeledRow(spectrogram.removeFromTop(rowHeight), spectrogramLabels_[1], colorFloor_);
         layoutLabeledRow(
-            spectrogram.removeFromTop(rowHeight), spectrogramUnavailableLabels_[1], colorFloor_);
-        layoutLabeledRow(
-            spectrogram.removeFromTop(rowHeight), spectrogramUnavailableLabels_[2], colorCeiling_);
+            spectrogram.removeFromTop(rowHeight), spectrogramLabels_[2], colorCeiling_);
         layoutLabeledRow(spectrogram.removeFromTop(rowHeight), rowLabels_[5], historyDuration_);
-        layoutLabeledRow(
-            spectrogram.removeFromTop(rowHeight), spectrogramUnavailableLabels_[3], historyMode_);
+        layoutLabeledRow(spectrogram.removeFromTop(rowHeight), spectrogramLabels_[3], historyMode_);
 
         auto stereo = sectionAreas_[stereoSection].reduced(12, 8);
         stereo.removeFromTop(sectionHeaderHeight - 8);
@@ -631,6 +673,12 @@ private:
             configuration_.spectrum.finitePeakHoldSeconds = peakHoldDuration_.getValue();
         else if (slider == &fillOpacity_)
             configuration_.spectrum.fillOpacity = fillOpacity_.getValue() / 100.0;
+        else if (slider == &colorResponse_)
+            configuration_.spectrogram.colorResponse = colorResponse_.getValue();
+        else if (slider == &colorFloor_)
+            configuration_.spectrogram.colorFloorDb = colorFloor_.getValue();
+        else if (slider == &colorCeiling_)
+            configuration_.spectrogram.colorCeilingDb = colorCeiling_.getValue();
         else
             return;
 
@@ -647,6 +695,9 @@ private:
             publishSanitizedConfiguration();
         } else if (section == spectrumSection) {
             configuration_.spectrum = AnalyzerConfigurationCodec::defaults().spectrum;
+            publishSanitizedConfiguration();
+        } else if (section == spectrogramSection) {
+            configuration_.spectrogram = AnalyzerConfigurationCodec::defaults().spectrogram;
             publishSanitizedConfiguration();
         }
     }
@@ -735,8 +786,12 @@ private:
         colorFloor_.setValue(configuration_.spectrogram.colorFloorDb, juce::dontSendNotification);
         colorCeiling_.setValue(
             configuration_.spectrogram.colorCeilingDb, juce::dontSendNotification);
-        historyDuration_.setValue(
-            configuration_.spectrogram.historyDurationSeconds, juce::dontSendNotification);
+        const auto historyDuration = std::find(spectrogramHistoryDurations.begin(),
+            spectrogramHistoryDurations.end(), configuration_.spectrogram.historyDurationSeconds);
+        historyDuration_.setSelectedId(
+            static_cast<int>(std::distance(spectrogramHistoryDurations.begin(), historyDuration))
+                + 1,
+            juce::dontSendNotification);
         historyMode_.setSelectedId(static_cast<int>(configuration_.spectrogram.historyMode) + 1,
             juce::dontSendNotification);
         loudnessReference_.setValue(
@@ -762,7 +817,7 @@ private:
     std::array<juce::TextButton, sectionCount> resetButtons_;
     std::array<juce::Label, 7> rowLabels_;
     std::array<juce::Label, 5> spectrumLabels_;
-    std::array<juce::Label, 4> spectrogramUnavailableLabels_;
+    std::array<juce::Label, 4> spectrogramLabels_;
 
     juce::Label sharedStatus_;
     juce::ComboBox fftSize_;
@@ -789,7 +844,7 @@ private:
     juce::Slider colorResponse_;
     juce::Slider colorFloor_;
     juce::Slider colorCeiling_;
-    juce::Slider historyDuration_;
+    juce::ComboBox historyDuration_;
     juce::ComboBox historyMode_;
 
     juce::Label stereoStatus_;

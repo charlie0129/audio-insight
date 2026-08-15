@@ -227,7 +227,8 @@ public:
             expectWithinAbsoluteError(lastPublished.sharedAnalysis.frequencySpacing, 1.0, 1.0e-12);
         }
 
-        beginTest("Spectrum controls are live while unfinished analyzer sections stay disabled");
+        beginTest(
+            "Spectrum and Spectrogram controls are live while unfinished sections stay disabled");
         {
             AnalyzerSettingsPanel panel(
                 AnalyzerConfigurationCodec::defaults(), [](const AnalyzerConfiguration&) { },
@@ -251,6 +252,14 @@ public:
             expectAvailable("settingsSpectrumPeakHoldMode");
             expectAvailable("settingsSpectrumTraceColor");
             expectAvailable("settingsSpectrumFillOpacity");
+            expectAvailable("settingsSpectrogramStatus");
+            expectAvailable("settingsSpectrogramPalette");
+            expectAvailable("settingsSpectrogramColorResponse");
+            expectAvailable("settingsSpectrogramColorFloor");
+            expectAvailable("settingsSpectrogramColorCeiling");
+            expectAvailable("settingsSpectrogramHistory");
+            expectAvailable("settingsSpectrogramHistoryMode");
+            expectAvailable("settingsSpectrogramReset");
 
             const auto* peakHoldDuration
                 = findDescendantWithId(panel, "settingsSpectrumPeakHoldDuration");
@@ -258,20 +267,25 @@ public:
             expect(peakHoldDuration != nullptr && !peakHoldDuration->isEnabled());
             expect(peakHoldDuration != nullptr && !peakHoldDuration->getWantsKeyboardFocus());
 
-            expectUnavailable("settingsSpectrogramUnavailable");
-            expectUnavailable("settingsSpectrogramPalette");
-            expectUnavailable("settingsSpectrogramColorResponse");
-            expectUnavailable("settingsSpectrogramColorFloor");
-            expectUnavailable("settingsSpectrogramColorCeiling");
-            expectUnavailable("settingsSpectrogramHistory");
-            expectUnavailable("settingsSpectrogramHistoryMode");
             expectUnavailable("settingsStereoUnavailable");
             expectUnavailable("settingsLoudnessUnavailable");
             expectUnavailable("settingsLoudnessReference");
-            expectUnavailable("settingsSpectrogramReset");
+
+            auto* history = dynamic_cast<juce::ComboBox*>(
+                findDescendantWithId(panel, "settingsSpectrogramHistory"));
+            expect(history != nullptr);
+            if (history != nullptr) {
+                expectEquals(history->getNumItems(), 6);
+                expectEquals(history->getItemText(0), juce::String("2 s"));
+                expectEquals(history->getItemText(1), juce::String("5 s"));
+                expectEquals(history->getItemText(2), juce::String("10 s"));
+                expectEquals(history->getItemText(3), juce::String("20 s"));
+                expectEquals(history->getItemText(4), juce::String("30 s"));
+                expectEquals(history->getItemText(5), juce::String("60 s"));
+            }
         }
 
-        beginTest("Spectrum controls reflect saved presentation values");
+        beginTest("Spectrum and Spectrogram controls reflect saved presentation values");
         {
             auto configuration = AnalyzerConfigurationCodec::defaults();
             configuration.spectrum.slope = SpectrumSlope::db4Point5PerOctave;
@@ -279,9 +293,11 @@ public:
             configuration.spectrum.finitePeakHoldSeconds = 5.25;
             configuration.spectrum.traceColor = SrgbColor::fromPackedRgb(0x12ab34U);
             configuration.spectrum.fillOpacity = 0.42;
+            configuration.spectrogram.palette = SpectrogramPalette::grayscale;
             configuration.spectrogram.colorResponse = -1.25;
             configuration.spectrogram.colorFloorDb = -150.0;
             configuration.spectrogram.colorCeilingDb = 6.0;
+            configuration.spectrogram.historyDurationSeconds = 20;
             configuration.spectrogram.historyMode = SpectrogramHistoryMode::overwrite;
 
             AnalyzerSettingsPanel panel(
@@ -298,24 +314,28 @@ public:
                 findDescendantWithId(panel, "settingsSpectrumTraceColor"));
             auto* fillOpacity = dynamic_cast<juce::Slider*>(
                 findDescendantWithId(panel, "settingsSpectrumFillOpacity"));
+            auto* palette = dynamic_cast<juce::ComboBox*>(
+                findDescendantWithId(panel, "settingsSpectrogramPalette"));
             auto* colorResponse = dynamic_cast<juce::Slider*>(
                 findDescendantWithId(panel, "settingsSpectrogramColorResponse"));
             auto* colorFloor = dynamic_cast<juce::Slider*>(
                 findDescendantWithId(panel, "settingsSpectrogramColorFloor"));
             auto* colorCeiling = dynamic_cast<juce::Slider*>(
                 findDescendantWithId(panel, "settingsSpectrogramColorCeiling"));
+            auto* history = dynamic_cast<juce::ComboBox*>(
+                findDescendantWithId(panel, "settingsSpectrogramHistory"));
             auto* historyMode = dynamic_cast<juce::ComboBox*>(
                 findDescendantWithId(panel, "settingsSpectrogramHistoryMode"));
 
-            const std::array<juce::Component*, 4> enabledControls { slope, peakHoldMode, traceColor,
-                fillOpacity };
+            const std::array<juce::Component*, 10> enabledControls { slope, peakHoldMode,
+                traceColor, fillOpacity, palette, colorResponse, colorFloor, colorCeiling, history,
+                historyMode };
             for (const auto* control : enabledControls) {
                 expect(control != nullptr);
                 expect(control != nullptr && control->isEnabled());
             }
 
-            const std::array<juce::Component*, 5> disabledControls { peakHoldDuration,
-                colorResponse, colorFloor, colorCeiling, historyMode };
+            const std::array<juce::Component*, 1> disabledControls { peakHoldDuration };
             for (const auto* control : disabledControls) {
                 expect(control != nullptr);
                 expect(control != nullptr && !control->isEnabled());
@@ -333,12 +353,16 @@ public:
             }
             if (fillOpacity != nullptr)
                 expectWithinAbsoluteError(fillOpacity->getValue(), 42.0, 1.0e-12);
+            if (palette != nullptr)
+                expectEquals(palette->getText(), juce::String("Grayscale"));
             if (colorResponse != nullptr)
                 expectWithinAbsoluteError(colorResponse->getValue(), -1.25, 1.0e-12);
             if (colorFloor != nullptr)
                 expectWithinAbsoluteError(colorFloor->getValue(), -150.0, 1.0e-12);
             if (colorCeiling != nullptr)
                 expectWithinAbsoluteError(colorCeiling->getValue(), 6.0, 1.0e-12);
+            if (history != nullptr)
+                expectEquals(history->getText(), juce::String("20 s"));
             if (historyMode != nullptr)
                 expectEquals(historyMode->getText(), juce::String("Overwrite"));
         }
@@ -422,6 +446,139 @@ public:
             expect(!peakHoldDuration->getWantsKeyboardFocus());
         }
 
+        beginTest("Each Spectrogram edit publishes immediately and history choices are discrete");
+        {
+            auto callbackCount = 0;
+            AnalyzerConfiguration lastPublished;
+            AnalyzerSettingsPanel panel(
+                AnalyzerConfigurationCodec::defaults(),
+                [&](const AnalyzerConfiguration& published) {
+                    ++callbackCount;
+                    lastPublished = published;
+                },
+                [] { });
+            panel.setBounds(0, 0, 360, 720);
+
+            auto* palette = dynamic_cast<juce::ComboBox*>(
+                findDescendantWithId(panel, "settingsSpectrogramPalette"));
+            auto* colorResponse = dynamic_cast<juce::Slider*>(
+                findDescendantWithId(panel, "settingsSpectrogramColorResponse"));
+            auto* colorFloor = dynamic_cast<juce::Slider*>(
+                findDescendantWithId(panel, "settingsSpectrogramColorFloor"));
+            auto* colorCeiling = dynamic_cast<juce::Slider*>(
+                findDescendantWithId(panel, "settingsSpectrogramColorCeiling"));
+            auto* history = dynamic_cast<juce::ComboBox*>(
+                findDescendantWithId(panel, "settingsSpectrogramHistory"));
+            auto* historyMode = dynamic_cast<juce::ComboBox*>(
+                findDescendantWithId(panel, "settingsSpectrogramHistoryMode"));
+
+            expect(palette != nullptr);
+            expect(colorResponse != nullptr);
+            expect(colorFloor != nullptr);
+            expect(colorCeiling != nullptr);
+            expect(history != nullptr);
+            expect(historyMode != nullptr);
+            if (palette == nullptr || colorResponse == nullptr || colorFloor == nullptr
+                || colorCeiling == nullptr || history == nullptr || historyMode == nullptr) {
+                return;
+            }
+
+            expect(!colorResponse->isScrollWheelEnabled());
+            expect(!colorFloor->isScrollWheelEnabled());
+            expect(!colorCeiling->isScrollWheelEnabled());
+
+            palette->setSelectedId(2, juce::sendNotificationSync);
+            expectEquals(callbackCount, 1);
+            expect(lastPublished.spectrogram.palette == SpectrogramPalette::inferno);
+
+            colorResponse->setValue(-1.25, juce::sendNotificationSync);
+            expectEquals(callbackCount, 2);
+            expectWithinAbsoluteError(lastPublished.spectrogram.colorResponse, -1.25, 1.0e-12);
+
+            colorFloor->setValue(-150.0, juce::sendNotificationSync);
+            expectEquals(callbackCount, 3);
+            expectWithinAbsoluteError(lastPublished.spectrogram.colorFloorDb, -150.0, 1.0e-12);
+
+            colorCeiling->setValue(6.0, juce::sendNotificationSync);
+            expectEquals(callbackCount, 4);
+            expectWithinAbsoluteError(lastPublished.spectrogram.colorCeilingDb, 6.0, 1.0e-12);
+
+            constexpr std::array historyChoiceIds { 1, 2, 4, 5, 6, 3 };
+            constexpr std::array historyDurations { 2, 5, 20, 30, 60, 10 };
+            for (auto index = std::size_t { 0 }; index < historyChoiceIds.size(); ++index) {
+                history->setSelectedId(historyChoiceIds[index], juce::sendNotificationSync);
+                expectEquals(callbackCount, static_cast<int>(index) + 5);
+                expectEquals(
+                    lastPublished.spectrogram.historyDurationSeconds, historyDurations[index]);
+            }
+
+            historyMode->setSelectedId(2, juce::sendNotificationSync);
+            expectEquals(callbackCount, 11);
+            expect(lastPublished.spectrogram.historyMode == SpectrogramHistoryMode::overwrite);
+        }
+
+        beginTest("Spectrogram reset restores every Spectrogram default in one publication");
+        {
+            auto configuration = AnalyzerConfigurationCodec::defaults();
+            configuration.spectrogram.palette = SpectrogramPalette::grayscale;
+            configuration.spectrogram.colorResponse = 1.5;
+            configuration.spectrogram.colorFloorDb = -160.0;
+            configuration.spectrogram.colorCeilingDb = 6.0;
+            configuration.spectrogram.historyDurationSeconds = 60;
+            configuration.spectrogram.historyMode = SpectrogramHistoryMode::overwrite;
+
+            auto callbackCount = 0;
+            AnalyzerConfiguration lastPublished;
+            AnalyzerSettingsPanel panel(
+                configuration,
+                [&](const AnalyzerConfiguration& published) {
+                    ++callbackCount;
+                    lastPublished = published;
+                },
+                [] { });
+            panel.setBounds(0, 0, 360, 720);
+
+            auto* reset = dynamic_cast<juce::Button*>(
+                findDescendantWithId(panel, "settingsSpectrogramReset"));
+            auto* palette = dynamic_cast<juce::ComboBox*>(
+                findDescendantWithId(panel, "settingsSpectrogramPalette"));
+            auto* colorResponse = dynamic_cast<juce::Slider*>(
+                findDescendantWithId(panel, "settingsSpectrogramColorResponse"));
+            auto* colorFloor = dynamic_cast<juce::Slider*>(
+                findDescendantWithId(panel, "settingsSpectrogramColorFloor"));
+            auto* colorCeiling = dynamic_cast<juce::Slider*>(
+                findDescendantWithId(panel, "settingsSpectrogramColorCeiling"));
+            auto* history = dynamic_cast<juce::ComboBox*>(
+                findDescendantWithId(panel, "settingsSpectrogramHistory"));
+            auto* historyMode = dynamic_cast<juce::ComboBox*>(
+                findDescendantWithId(panel, "settingsSpectrogramHistoryMode"));
+            expect(reset != nullptr);
+            if (reset == nullptr)
+                return;
+
+            reset->onClick();
+            expectEquals(callbackCount, 1);
+            expect(lastPublished.spectrogram.palette == SpectrogramPalette::blueFire);
+            expectWithinAbsoluteError(lastPublished.spectrogram.colorResponse, 0.0, 1.0e-12);
+            expectWithinAbsoluteError(lastPublished.spectrogram.colorFloorDb, -120.0, 1.0e-12);
+            expectWithinAbsoluteError(lastPublished.spectrogram.colorCeilingDb, 0.0, 1.0e-12);
+            expectEquals(lastPublished.spectrogram.historyDurationSeconds, 10);
+            expect(lastPublished.spectrogram.historyMode == SpectrogramHistoryMode::scroll);
+
+            expect(palette != nullptr && palette->getText() == "Blue Fire");
+            expect(colorResponse != nullptr);
+            if (colorResponse != nullptr)
+                expectWithinAbsoluteError(colorResponse->getValue(), 0.0, 1.0e-12);
+            expect(colorFloor != nullptr);
+            if (colorFloor != nullptr)
+                expectWithinAbsoluteError(colorFloor->getValue(), -120.0, 1.0e-12);
+            expect(colorCeiling != nullptr);
+            if (colorCeiling != nullptr)
+                expectWithinAbsoluteError(colorCeiling->getValue(), 0.0, 1.0e-12);
+            expect(history != nullptr && history->getText() == "10 s");
+            expect(historyMode != nullptr && historyMode->getText() == "Scroll");
+        }
+
         beginTest("External state refresh does not publish and Escape requests close");
         {
             auto callbackCount = 0;
@@ -443,7 +600,11 @@ public:
             replacement.spectrum.traceColor = SrgbColor::fromPackedRgb(0xfedcbaU);
             replacement.spectrum.fillOpacity = 0.27;
             replacement.spectrogram.palette = SpectrogramPalette::viridis;
+            replacement.spectrogram.colorResponse = -0.75;
+            replacement.spectrogram.colorFloorDb = -144.0;
+            replacement.spectrogram.colorCeilingDb = 6.0;
             replacement.spectrogram.historyDurationSeconds = 30;
+            replacement.spectrogram.historyMode = SpectrogramHistoryMode::overwrite;
             replacement.loudness.referenceLufs = -14.5;
             panel.setConfiguration(replacement);
             expectEquals(callbackCount, 0);
@@ -472,8 +633,16 @@ public:
                 findDescendantWithId(panel, "settingsSpectrumFillOpacity"));
             auto* palette = dynamic_cast<juce::ComboBox*>(
                 findDescendantWithId(panel, "settingsSpectrogramPalette"));
-            auto* history = dynamic_cast<juce::Slider*>(
+            auto* colorResponse = dynamic_cast<juce::Slider*>(
+                findDescendantWithId(panel, "settingsSpectrogramColorResponse"));
+            auto* colorFloor = dynamic_cast<juce::Slider*>(
+                findDescendantWithId(panel, "settingsSpectrogramColorFloor"));
+            auto* colorCeiling = dynamic_cast<juce::Slider*>(
+                findDescendantWithId(panel, "settingsSpectrogramColorCeiling"));
+            auto* history = dynamic_cast<juce::ComboBox*>(
                 findDescendantWithId(panel, "settingsSpectrogramHistory"));
+            auto* historyMode = dynamic_cast<juce::ComboBox*>(
+                findDescendantWithId(panel, "settingsSpectrogramHistoryMode"));
             auto* reference = dynamic_cast<juce::Slider*>(
                 findDescendantWithId(panel, "settingsLoudnessReference"));
             expect(fftSizeControl != nullptr && fftSizeControl->getText() == "8192");
@@ -493,9 +662,17 @@ public:
             if (fillOpacity != nullptr)
                 expectWithinAbsoluteError(fillOpacity->getValue(), 27.0, 1.0e-12);
             expect(palette != nullptr && palette->getText() == "Viridis");
-            expect(history != nullptr);
-            if (history != nullptr)
-                expectWithinAbsoluteError(history->getValue(), 30.0, 1.0e-12);
+            expect(colorResponse != nullptr);
+            if (colorResponse != nullptr)
+                expectWithinAbsoluteError(colorResponse->getValue(), -0.75, 1.0e-12);
+            expect(colorFloor != nullptr);
+            if (colorFloor != nullptr)
+                expectWithinAbsoluteError(colorFloor->getValue(), -144.0, 1.0e-12);
+            expect(colorCeiling != nullptr);
+            if (colorCeiling != nullptr)
+                expectWithinAbsoluteError(colorCeiling->getValue(), 6.0, 1.0e-12);
+            expect(history != nullptr && history->getText() == "30 s");
+            expect(historyMode != nullptr && historyMode->getText() == "Overwrite");
             expect(reference != nullptr);
             if (reference != nullptr)
                 expectWithinAbsoluteError(reference->getValue(), -14.5, 1.0e-12);
@@ -547,6 +724,14 @@ public:
                 ExpectedControl { "settingsSpectrumPeakHoldMode", "Spectrum peak hold mode" },
                 ExpectedControl { "settingsSpectrumTraceColor", "Spectrum trace colour" },
                 ExpectedControl { "settingsSpectrumFillOpacity", "Spectrum fill opacity" },
+                ExpectedControl { "settingsSpectrogramReset", "Spectrogram" },
+                ExpectedControl { "settingsSpectrogramPalette", "Spectrogram palette" },
+                ExpectedControl {
+                    "settingsSpectrogramColorResponse", "Spectrogram colour response" },
+                ExpectedControl { "settingsSpectrogramColorFloor", "Spectrogram colour floor" },
+                ExpectedControl { "settingsSpectrogramColorCeiling", "Spectrogram colour ceiling" },
+                ExpectedControl { "settingsSpectrogramHistory", "Spectrogram history duration" },
+                ExpectedControl { "settingsSpectrogramHistoryMode", "Spectrogram history mode" },
             };
 
             const auto focusComponents = traverser->getAllComponents(&panel);
