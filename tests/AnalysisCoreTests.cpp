@@ -344,37 +344,53 @@ public:
 
     void runTest() override
     {
+        testBinCentredFullScaleSine();
+        testSupportedSizesAndWindows();
+        testDcAndNyquistNormalization();
+        testSliceRates();
+        testStereoGreaterMagnitude();
+        testTemporalAveraging();
+        testFinitePeakHold();
+        testInfinitePeakHoldAndClear();
+        testChunkSequenceGap();
+        testInvalidCapturedFrameRange();
+        testMonoInput();
+    }
+
+private:
+    void testBinCentredFullScaleSine()
+    {
         beginTest("A bin-centred full-scale sine produces the expected dB bin");
-        {
-            constexpr std::size_t sineBin = 128;
-            std::array<float, fftSize> left { };
-            std::array<float, fftSize> right { };
+        constexpr std::size_t sineBin = 128;
+        std::array<float, fftSize> left { };
+        std::array<float, fftSize> right { };
 
-            for (std::size_t frame = 0; frame < fftSize; ++frame) {
-                left[frame] = std::sin(
-                    static_cast<float>(2.0 * std::numbers::pi * static_cast<double>(sineBin)
-                        * static_cast<double>(frame) / static_cast<double>(fftSize)));
-            }
-
-            SpectrumAnalyzer analyzer;
-            VisualizationFrame frame;
-            const CapturedStereoChunkView chunk { left.data(), right.data(), left.size(), 2, 1,
-                fftSize, 48000.0, false };
-            expect(analyzer.process(chunk, frame));
-            expect(frame.spectrumValid);
-            expect(frame.generation == 2);
-            expect(frame.fftGeneration == 1);
-            expect(frame.capturedFrameEnd == fftSize);
-            expect(frame.spectrumFftSize == fftSize);
-            expect(frame.spectrumBinCount == spectrumBinCount);
-            expectWithinAbsoluteError(frame.spectrumDecibels[sineBin], 0.0F, 0.1F);
-
-            const auto maximum = std::max_element(frame.spectrumDecibels.begin() + 1,
-                frame.spectrumDecibels.begin()
-                    + static_cast<std::ptrdiff_t>(frame.spectrumBinCount));
-            expect(static_cast<std::size_t>(maximum - frame.spectrumDecibels.begin()) == sineBin);
+        for (std::size_t frame = 0; frame < fftSize; ++frame) {
+            left[frame]
+                = std::sin(static_cast<float>(2.0 * std::numbers::pi * static_cast<double>(sineBin)
+                    * static_cast<double>(frame) / static_cast<double>(fftSize)));
         }
 
+        SpectrumAnalyzer analyzer;
+        VisualizationFrame frame;
+        const CapturedStereoChunkView chunk { left.data(), right.data(), left.size(), 2, 1, fftSize,
+            48000.0, false };
+        expect(analyzer.process(chunk, frame));
+        expect(frame.spectrumValid);
+        expect(frame.generation == 2);
+        expect(frame.fftGeneration == 1);
+        expect(frame.capturedFrameEnd == fftSize);
+        expect(frame.spectrumFftSize == fftSize);
+        expect(frame.spectrumBinCount == spectrumBinCount);
+        expectWithinAbsoluteError(frame.spectrumDecibels[sineBin], 0.0F, 0.1F);
+
+        const auto maximum = std::max_element(frame.spectrumDecibels.begin() + 1,
+            frame.spectrumDecibels.begin() + static_cast<std::ptrdiff_t>(frame.spectrumBinCount));
+        expect(static_cast<std::size_t>(maximum - frame.spectrumDecibels.begin()) == sineBin);
+    }
+
+    void testSupportedSizesAndWindows()
+    {
         beginTest("Every supported size and window calibrates a full-scale bin to zero dB");
         {
             constexpr std::array supportedFftSizes {
@@ -418,7 +434,10 @@ public:
                 }
             }
         }
+    }
 
+    void testDcAndNyquistNormalization()
+    {
         beginTest("DC and Nyquist bins use edge rather than doubled one-sided normalization");
         {
             constexpr std::array supportedFftSizes {
@@ -461,7 +480,10 @@ public:
                 }
             }
         }
+    }
 
+    void testSliceRates()
+    {
         beginTest("Slice rates set independent sample-domain transform hops");
         {
             constexpr std::array supportedRates { 15, 30, 60, 120 };
@@ -491,7 +513,10 @@ public:
                     == static_cast<std::uint64_t>(rate));
             }
         }
+    }
 
+    void testStereoGreaterMagnitude()
+    {
         beginTest("Stereo keeps the greater magnitude independently in every bin");
         {
             constexpr auto leftBin = std::size_t { 41 };
@@ -513,7 +538,10 @@ public:
             expectWithinAbsoluteError(frame.spectrumDecibels[leftBin], -12.0412F, 0.02F);
             expectWithinAbsoluteError(frame.spectrumDecibels[rightBin], -6.0206F, 0.02F);
         }
+    }
 
+    void testTemporalAveraging()
+    {
         beginTest("Temporal averaging seeds immediately and averages calibrated power");
         {
             constexpr auto configuredSize = std::size_t { 1024 };
@@ -555,7 +583,10 @@ public:
                 immediateFrame));
             expectEquals(immediateFrame.spectrumDecibels[0], minimumSpectrumDecibels);
         }
+    }
 
+    void testFinitePeakHold()
+    {
         beginTest("Peak hold uses unsmoothed power and finite hold decays at twelve dB per second");
         {
             constexpr auto configuredSize = std::size_t { 1024 };
@@ -588,7 +619,10 @@ public:
             // Four 1/15-second silent intervals exceed the 0.25-second hold by 1/60 second.
             expectWithinAbsoluteError(frame.spectrumPeakHoldDecibels[0], -0.2F, 0.002F);
         }
+    }
 
+    void testInfinitePeakHoldAndClear()
+    {
         beginTest("Infinite peak hold and user Clear preserve FFT overlap");
         {
             constexpr auto configuredSize = std::size_t { 1024 };
@@ -629,7 +663,10 @@ public:
             expect(analyzer.statistics().transforms == transformsBefore + 1);
             expect(!frame.spectrumPeakHoldValid);
         }
+    }
 
+    void testChunkSequenceGap()
+    {
         beginTest("A chunk sequence gap clears overlap before another transform");
         {
             std::array<float, fftSize> initial { };
@@ -659,7 +696,10 @@ public:
             expect(frame.capturedFrameEnd == fftSize * 2);
             expect(analyzer.statistics().transforms == 2);
         }
+    }
 
+    void testInvalidCapturedFrameRange()
+    {
         beginTest("An invalid first captured-frame range cannot underflow timing");
         {
             std::array<float, 16> samples { };
@@ -673,7 +713,10 @@ public:
             expect(!frame.spectrumValid);
             expect(analyzer.statistics().sequenceGapResets == 1);
         }
+    }
 
+    void testMonoInput()
+    {
         beginTest("Mono is accepted without a synthetic right channel");
         {
             constexpr std::size_t sineBin = 32;
