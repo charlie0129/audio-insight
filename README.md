@@ -8,11 +8,11 @@ real-time-safe audio processing, and low overhead in the host.
 
 The current analyzer dashboard combines a real-time FFT Spectrum, mono/stereo
 sample-peak and RMS meters, a shared-FFT Spectrogram, and a fixed-scale Stereo
-field/correlation view. Loudness remains a visible, inert placeholder while
-that standards-based analyzer is developed. See [the architecture and decision
-record](docs/architecture.md) for the accepted system design and current open
-questions. The accepted multi-panel dashboard is specified separately in [the
-analyzer interface requirements](docs/analyzer-ui.md).
+field/correlation view, plus BS.1770-5 / EBU R128 Momentary, Short-term, and
+Integrated Loudness. See [the architecture and decision record](docs/architecture.md)
+for the accepted system design and current open questions. The accepted
+multi-panel dashboard is specified separately in [the analyzer interface
+requirements](docs/analyzer-ui.md).
 
 ## Development build
 
@@ -88,7 +88,7 @@ project.
 
 Spectrum **Temporal averaging** is in **Settings**, together with its floor,
 ceiling, slope, peak-hold, trace-colour, and fill controls. Fresh instances use
-a responsive 75 ms average (roughly `0.40` on the former 0-to-1 **Smooth**
+a responsive 75 ms average (roughly `0.37` on the former 0-to-1 **Smooth**
 control); choose **Off** to show each new FFT snapshot without analysis
 averaging. The renderer still applies a fixed, very short interpolation between
 snapshots so a 60 Hz analysis remains fluid on a 120 Hz display.
@@ -117,6 +117,21 @@ the display-decimated points. Mono remains a centered vertical trace labeled
 `MONO`, with correlation shown as unavailable instead of a synthetic `+1`.
 This initial Stereo design has no adjustable controls, so its live Settings
 section says so and leaves Reset unavailable.
+
+The slim Loudness tile shows a `-60..0 LUFS` Momentary bar, a Short-term marker,
+and one-decimal M/S/I readings. Its amber reference line is presentation-only
+and is adjustable from `-36` to `-9 LUFS` in **Settings**, defaulting to
+`-23 LUFS`. The tile's **RESET** action starts a fresh Integrated measurement
+while preserving current Momentary and Short-term readings. Completed silent
+windows show `-∞`; readings that are not ready show an em dash.
+
+Loudness uses BS.1770-5 K-weighting and EBU R128 M/S/I semantics with literal
+400 ms and 3 second windows and strict exact Integrated gates. Exact block
+energies are retained for at most 24 hours (`864,000` blocks, about 6.6 MiB per
+active analyzer). At the first excess block, Integrated becomes unavailable and
+Metrics reports the overflow until RESET or a full analyzer lifecycle reset;
+the implementation never silently rolls or quantizes the gate. This scope does
+not claim complete “EBU Mode compliance,” LRA, or true peak.
 
 ## Performance metrics
 

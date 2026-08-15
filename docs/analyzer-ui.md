@@ -23,13 +23,13 @@ The current implementation contains:
 
 - one large real-time FFT Spectrum;
 - one compact vertical mono/stereo sample-peak/RMS meter; and
-- one bounded, shared-FFT Spectrogram history view; and
-- one fixed-scale Stereo vectorscope with all-sample correlation.
+- one bounded, shared-FFT Spectrogram history view;
+- one fixed-scale Stereo vectorscope with all-sample correlation; and
+- one BS.1770-5 / EBU R128 Momentary, Short-term, and Integrated Loudness meter.
 
 The complete dashboard shell, Settings inspector, constrained layout editor,
-Spectrum, Peak/RMS, Spectrogram, and Stereo field/correlation are implemented.
-Loudness remains a titled, inert placeholder with no fake readings, history
-allocation, or analysis work.
+Spectrum, Peak/RMS, Spectrogram, Stereo field/correlation, and Loudness are
+implemented.
 
 Implement the remaining dashboard in this order:
 
@@ -41,7 +41,7 @@ Implement the remaining dashboard in this order:
 3. Implemented: replace the Spectrogram placeholder with the shared-FFT history
    view.
 4. Implemented: replace the Stereo field/correlation placeholder.
-5. Next: replace the Loudness placeholder after its standards-based
+5. Implemented: replace the Loudness placeholder after its standards-based
    measurements pass reference tests.
 
 Replacing a placeholder must preserve its tile identity and default position.
@@ -161,9 +161,10 @@ that inspector. Changes apply immediately and are saved with the plugin instance
 there is no separate Apply step. Give each section with adjustable settings a
 reset-to-default action. Stereo's initial presentation is deliberately fixed,
 so its live section states that it has no adjustable settings and leaves Reset
-visibly unavailable. Keep settings for the Loudness placeholder visibly disabled
-and labeled as not yet implemented rather than accepting changes that do nothing
-without explanation.
+visibly unavailable. Loudness exposes its presentation-only reference setting;
+the section reset restores `-23 LUFS` and does not reset the transient Integrated
+measurement. Integration is reset only by the Loudness tile's explicit RESET
+action and the lifecycle boundaries specified below.
 
 Floor, Ceiling, and Temporal averaging live in the Spectrum section rather than
 the toolbar; do not duplicate them. Temporal averaging exposes Off plus a
@@ -545,18 +546,24 @@ Metrics table and copied report exactly once.
 ## Loudness
 
 Implement current ITU-R BS.1770-5 K-weighting and channel summation with EBU R128
-measurement semantics. Validate published reference vectors before exposing any
-LUFS label.
+measurement semantics. Published alignment and relative-gating reference cases
+must pass before exposing any LUFS label. Describe the result as
+“BS.1770-5 / EBU R128 M/S/I semantics,” not complete “EBU Mode compliance,”
+which also requires controls and measurements deliberately outside this scope.
 
 Initial measurements are:
 
 - Momentary (`M`): ungated 400 ms;
 - Short-term (`S`): ungated 3 seconds; and
-- Integrated (`I`): gated 400 ms blocks with 75% overlap, an absolute -70 LUFS
-  gate, then a relative -10 LU gate.
+- Integrated (`I`): gated 400 ms blocks with 75% overlap, a strict `>-70 LUFS`
+  absolute gate, then one non-iterative strict `>-10 LU` relative gate computed
+  from the absolute-passing blocks.
 
-Complete measurements every 100 ms. Rendering remains display-linked but does
-not invent new values between analysis updates.
+Complete measurements on rational nearest-sample 100 ms boundaries so unusual
+sample rates alternate adjacent integer hop lengths without cumulative drift.
+Momentary and Short-term retain literal nearest-sample 400 ms and 3 second
+rectangular windows. Apply no additional user smoothing to Loudness. Rendering
+remains display-linked but does not invent new values between analysis updates.
 
 - Use a particularly slim tile with a centered vertical bar.
 - The bar and primary value above it show Momentary loudness.
@@ -574,6 +581,16 @@ loudness** begins a new integration. Its state is transient and also resets on
 sample-rate/channel-layout change, capture discontinuity, or editor
 reactivation. Do not reset merely on host play, stop, seek, or loop, and do not
 serialize integrated state.
+
+Retain exact Integrated block energies for at most 24 hours (`864,000` 100 ms
+blocks, approximately 6.6 MiB per active analyzer). Reserve that storage away
+from the audio callback and perform no allocation while processing a captured
+chunk. If the first excess block arrives, invalidate Integrated, expose the
+capacity-exceeded state and overflow count in Metrics, and require RESET or a
+full lifecycle reset before integration can resume. Do not silently roll the
+window or substitute quantized/approximate gating. Exact gate reduction is
+bounded but scans retained blocks, so long-duration cost remains observable in
+the existing analysis-job timing metrics.
 
 Carry the actual host channel layout into Loudness analysis. A mono sample is
 summed once with the BS.1770 mono channel weight; never pass duplicated mono as
@@ -601,7 +618,9 @@ before reference tests pass.
 - Publish stable immutable snapshots to the renderer. Settings and layout
   changes must not make the render thread read mutable analysis working memory.
 - Keep the audio callback bounded and non-blocking regardless of visible panels.
-- The Loudness placeholder submits no analysis.
+- Loudness consumes every retained raw capture chunk on the existing shared
+  worker path before Spectrum freshness coalescing. It does not add a thread or
+  perform work on the audio callback.
 
 ## Resizing, Retina, and responsive behavior
 

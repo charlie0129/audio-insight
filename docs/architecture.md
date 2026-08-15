@@ -34,7 +34,7 @@ an incidental result of analysis.
 | Graphics | Use a native Metal renderer, hosted in a MetalKit view inside the JUCE editor. On the initial macOS baseline, drive its Metal layer with `CAMetalDisplayLink` rather than JUCE repaint timers or MetalKit's internal timer. Do not use deprecated macOS OpenGL. |
 | Signal analysis | Initially use CPU analysis and Apple's Accelerate/vDSP where useful. GPU compute is deferred until profiling demonstrates a benefit. |
 | Frequency presentation | Expose one continuous Linear-to-Logarithmic frequency-spacing control, including intermediate mappings. Spectrum and Spectrogram share the same setting and coordinate transform; they do not have independent frequency scales. |
-| Dashboard interface | Keep one fixed-topology five-tile dashboard with one Spectrum and no separate focus mode. Spectrum, Peak/RMS, Spectrogram, and Stereo/correlation are live; Loudness remains an inert placeholder. Allow only the four grid-snapped width/height splits defined in [the analyzer interface requirements](analyzer-ui.md). |
+| Dashboard interface | Keep one fixed-topology five-tile dashboard with one Spectrum and no separate focus mode. Spectrum, Peak/RMS, Spectrogram, Stereo/correlation, and standards-based Loudness are live. Allow only the four grid-snapped width/height splits defined in [the analyzer interface requirements](analyzer-ui.md). |
 | Interface state | Save analyzer settings and the Metrics toggle as non-automatable per-instance state, and the four-split layout as one versioned per-user global preference. Do not serialize transient history, holds, integration, Settings/About visibility, or uncommitted edits. |
 | Real-time handoff | The audio callback writes only to bounded, non-blocking data structures. Analysis and rendering never make the audio thread wait. |
 | Overflow policy | Prefer current visual data: coalesce or discard the oldest unclaimed analysis input, detect discontinuities by sequence number, and reset temporal analysis state across a gap. Never overwrite a slot being read or delay audio. |
@@ -44,7 +44,7 @@ an incidental result of analysis.
 | Performance observability | Offer an opt-in, persisted, per-instance metrics panel in Release builds. Show every collected renderer and analysis metric, exact presented-frame pacing history, per-frame callback-to-presentation latency composition, derived rates, and copyable raw reports without mutating the host process. |
 | DPI support | Treat layout units and render pixels separately and support both regular-density and Retina displays, including live movement between them. |
 | Editor lifecycle | Stop sample capture, analysis, history, display-link activity, and Metal submission when the editor is closed, hidden, or occluded beyond a short debounce. Reopening starts with fresh analysis state. |
-| Analyzer milestone | The initial usable baseline was a large real-time FFT spectrum with compact mono/stereo sample-peak/RMS meters. The current dashboard also implements bounded shared-FFT Spectrogram history and fixed-scale Stereo field/correlation; standards-validated Loudness remains deferred. |
+| Analyzer milestone | The initial usable baseline was a large real-time FFT spectrum with compact mono/stereo sample-peak/RMS meters. The current dashboard also implements bounded shared-FFT Spectrogram history, fixed-scale Stereo field/correlation, and BS.1770-5 / EBU R128 M/S/I Loudness semantics. |
 | Portability | Keep DSP, analysis, and product state independent of Metal behind a small renderer boundary. The architecture accommodates a future Windows backend, but Windows is not a near-term supported target. |
 | Distribution | A paid Apple Developer account, Developer ID signing, and notarization are out of scope unless this policy is explicitly revisited. See [macOS distribution](macos-distribution.md). |
 | Visual review | Deliver runnable visual checkpoints and ask the user for DAW testing, observations, or screenshots when appearance and interaction cannot be verified confidently in the development environment. |
@@ -375,9 +375,8 @@ The first usable release deliberately has one layout and two visualizations:
 - a compact vertical meter strip showing honest sample peak and RMS, with one
   meter for mono input or distinct L/R meters for stereo.
 
-The implemented five-tile dashboard keeps Spectrum, Peak/RMS, Spectrogram, and
-Stereo field/correlation live. Loudness remains a titled, inert placeholder: it
-does not show fake data or submit analysis. Analyzer controls live in the
+The implemented five-tile dashboard keeps Spectrum, Peak/RMS, Spectrogram,
+Stereo field/correlation, and Loudness live. Analyzer controls live in the
 Settings inspector. Four grid-snapped splitters resize adjacent fixed tiles;
 movement, reordering, hiding, detaching, overlap, and free-form windowing remain
 out of scope. Do not label sample peak as true peak; that name is reserved for a
@@ -395,10 +394,10 @@ explicit click. The message must not interrupt use, consume visualization space,
 display repeatedly as a prompt, collect telemetry, or initiate network access on
 its own.
 
-With the shell, Settings inspector, Spectrogram history, and Stereo
-field/correlation implemented, the next analyzer is standards-validated
-Loudness. Phase, surround layouts, multi-instance aggregation, Loudness Range,
-and true peak remain later work.
+With the shell, Settings inspector, Spectrogram history, Stereo
+field/correlation, and standards-validated Loudness implemented, Phase,
+surround layouts, multi-instance aggregation, Loudness Range, and true peak
+remain later work.
 
 ## Performance and validation
 
@@ -417,6 +416,13 @@ worker vectorscope chunks and point publications. It also exposes scoped reset
 and discontinuity counts, channel/correlation validity, current point count,
 capture endpoints, snapshot sequences, and derived rates. As with all collected
 telemetry, each raw field appears exactly once in Metrics and its copied report.
+
+Loudness observability exposes worker input/completion counts, exact-gate block
+counts, classified resets, readiness and completed-silence values, capture
+endpoints, the 24-hour block capacity, capacity overflow, and renderer-accepted
+state. Only cumulative counters receive derived rates. Exact Integrated gating
+scans its retained energies twice per 100 ms update; analysis-job timing keeps
+the resulting long-duration cost visible rather than hiding it.
 
 ### Preliminary reference workload and budgets
 
@@ -557,8 +563,9 @@ files with that copyright plus `SPDX-License-Identifier: AGPL-3.0-or-later`.
 10. Implemented: add the mono-aware Stereo field from worker-owned, uniformly
     decimated captured-sample history and all-sample, producer-owned correlation
     statistics.
-11. Next: implement Momentary, Short-term, and Integrated Loudness only after
-    the ITU-R BS.1770-5/EBU R128 path passes published reference tests.
+11. Implemented: add Momentary, Short-term, and Integrated Loudness after the
+    ITU-R BS.1770-5 / EBU R128 path passes published alignment and relative-gate
+    reference tests.
 
 The detailed defaults and acceptance behavior for steps 7–11 live in
 [the analyzer interface requirements](analyzer-ui.md). A placeholder does not
@@ -672,3 +679,11 @@ authorize fake values, background work, or speculative resource allocation.
 - Scoped Stereo resets to capture/lifecycle generations and discontinuities;
   FFT-only changes preserve Stereo state. Added separate producer, worker,
   publication, validity, endpoint, and reset telemetry to Metrics.
+- Implemented BS.1770-5 K-weighted mono/stereo Momentary, Short-term, and exact
+  two-gate Integrated Loudness on the shared worker path. Rational nearest-sample
+  100 ms boundaries preserve literal 400 ms and 3 second windows without drift.
+- Bounded exact Integrated retention at 864,000 blocks (24 hours). The first
+  excess block invalidates I and reports capacity overflow instead of rolling or
+  approximating the gate.
+- Kept Loudness RESET boundary-aware across queued capture data, made stale input
+  clear only M/S, and preserved Loudness across FFT-only configuration changes.
