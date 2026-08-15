@@ -59,7 +59,7 @@ juce_add_plugin(AudioInsight
     NEEDS_MIDI_INPUT FALSE
     NEEDS_MIDI_OUTPUT FALSE
     IS_MIDI_EFFECT FALSE
-    EDITOR_WANTS_KEYBOARD_FOCUS FALSE
+    EDITOR_WANTS_KEYBOARD_FOCUS TRUE
     COPY_PLUGIN_AFTER_BUILD FALSE
     AU_SANDBOX_SAFE TRUE
     HARDENED_RUNTIME_ENABLED FALSE
@@ -82,6 +82,8 @@ target_sources(AudioInsight
         src/analysis/StereoSampleCapture.h
         src/core/VisualizationDataSource.h
         src/core/VisualizationFrame.h
+        src/plugin/PluginEditor.cpp
+        src/plugin/PluginEditor.h
         src/plugin/PluginProcessor.cpp
         src/plugin/PluginProcessor.h
         src/ui/MetalVisualization.h
@@ -126,6 +128,8 @@ source_group(TREE "${CMAKE_CURRENT_SOURCE_DIR}" FILES
     src/analysis/StereoSampleCapture.h
     src/core/VisualizationDataSource.h
     src/core/VisualizationFrame.h
+    src/plugin/PluginEditor.cpp
+    src/plugin/PluginEditor.h
     src/plugin/PluginProcessor.cpp
     src/plugin/PluginProcessor.h
     src/ui/MetalVisualization.h
@@ -153,6 +157,8 @@ if(BUILD_TESTING)
             src/analysis/StereoSampleCapture.h
             src/core/VisualizationDataSource.h
             src/core/VisualizationFrame.h
+            src/plugin/PluginEditor.cpp
+            src/plugin/PluginEditor.h
             src/plugin/PluginProcessor.cpp
             src/plugin/PluginProcessor.h
             src/ui/MetalVisualization.h
@@ -205,6 +211,8 @@ if(BUILD_TESTING)
         src/analysis/StereoSampleCapture.h
         src/core/VisualizationDataSource.h
         src/core/VisualizationFrame.h
+        src/plugin/PluginEditor.cpp
+        src/plugin/PluginEditor.h
         src/plugin/PluginProcessor.cpp
         src/plugin/PluginProcessor.h
         src/ui/MetalVisualization.h

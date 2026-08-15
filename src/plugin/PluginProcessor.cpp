@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 
 #include "PluginProcessor.h"
+#include "PluginEditor.h"
 
 #include <memory>
 
@@ -67,7 +68,7 @@ bool PluginProcessor::isBusesLayoutSupported(const BusesLayout& layouts) const
 
 juce::AudioProcessorEditor* PluginProcessor::createEditor()
 {
-    return new juce::GenericAudioProcessorEditor(*this);
+    return new PluginEditor(*this, *this);
 }
 
 bool PluginProcessor::hasEditor() const

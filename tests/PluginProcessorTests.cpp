@@ -5,6 +5,7 @@
 #include <juce_core/juce_core.h>
 
 #include <cmath>
+#include <memory>
 
 namespace audio_insight
 {
@@ -115,6 +116,25 @@ public:
 
             if (restoredFloor != nullptr)
                 expectWithinAbsoluteError(restoredFloor->getValue(), 0.375F, 0.0001F);
+        });
+
+        testCase("The custom editor starts detached and inactive", [this]
+        {
+            PluginProcessor processor;
+            std::unique_ptr<juce::AudioProcessorEditor> editor { processor.createEditor() };
+
+            expect(editor != nullptr);
+
+            if (editor == nullptr)
+                return;
+
+            expect(editor->isResizable());
+            expectEquals(editor->getWidth(), 1200);
+            expectEquals(editor->getHeight(), 800);
+
+            const auto telemetry = processor.getAnalysisTelemetry();
+            expectEquals(telemetry.capture.attemptedChunks, std::uint64_t { 0 });
+            expectEquals(telemetry.scheduler.submitted, std::uint64_t { 0 });
         });
     }
 };
