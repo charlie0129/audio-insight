@@ -218,6 +218,7 @@ struct SpectrumDecibelTicks final {
 struct MetalVisualizationGeometryLimits final {
     static constexpr std::size_t vertexCapacity = 24'576;
     static constexpr std::size_t maximumShellVertices = dashboardPanelCount * 36;
+    static constexpr std::size_t maximumDashboardSplitterVertices = dashboardSplitterCount * 6;
     static constexpr std::size_t maximumGridVertices
         = ((2 * maximumFrequencyAxisTickCount) + cachedDecibelTickCount) * 6;
     static constexpr std::size_t maximumSpectrumVertices = 2 * maximumSpectrumBinCount;
@@ -236,8 +237,8 @@ struct MetalVisualizationGeometryLimits final {
     static constexpr std::size_t maximumTextVertices
         = (maximumFixedTextGlyphs + maximumNumericAxisTextGlyphs + maximumPeakRmsTextGlyphs) * 6;
     static constexpr std::size_t maximumGeneratedVertices = maximumShellVertices
-        + maximumGridVertices + maximumSpectrumVertices + maximumMeterVertices
-        + maximumTextVertices;
+        + maximumDashboardSplitterVertices + maximumGridVertices + maximumSpectrumVertices
+        + maximumMeterVertices + maximumTextVertices;
 };
 } // namespace detail
 
@@ -347,6 +348,7 @@ struct SpectrumRenderSettings {
 class MetalVisualization final : public juce::NSViewComponent {
 public:
     using EffectiveActivityCallback = std::function<void(bool)>;
+    using DashboardLayoutEditCancelCallback = std::function<void()>;
 
     explicit MetalVisualization(VisualizationDataSource& dataSource);
     ~MetalVisualization() override;
@@ -381,6 +383,16 @@ public:
     */
     void setDashboardLayoutSplits(DashboardLayoutSplits splits) noexcept;
     [[nodiscard]] DashboardLayoutSplits getDashboardLayoutSplits() const noexcept;
+
+    /**
+        Shows native Metal splitter handles and enables pointer, keyboard, and
+        accessibility editing inside the dashboard. This is a message-thread
+        UI boundary; the four working split values remain available through
+        getDashboardLayoutSplits().
+    */
+    void setDashboardLayoutEditing(bool shouldEdit);
+    [[nodiscard]] bool isDashboardLayoutEditing() const noexcept;
+    void setDashboardLayoutEditCancelCallback(DashboardLayoutEditCancelCallback callback);
 
     [[nodiscard]] MetalRenderTelemetry getRenderTelemetry() const noexcept;
 

@@ -384,7 +384,7 @@ public:
         beginTest("Axis and meter geometry remain within the fixed Metal vertex buffer");
 
         expectEquals(detail::MetalVisualizationGeometryLimits::maximumGeneratedVertices,
-            std::size_t { 20'694 });
+            std::size_t { 20'718 });
         expect(detail::MetalVisualizationGeometryLimits::maximumGeneratedVertices
             <= detail::MetalVisualizationGeometryLimits::vertexCapacity);
 
@@ -463,6 +463,22 @@ public:
 
         visualization.setDashboardLayoutSplits({ 22, 36, 35, 36 });
         expect(visualization.getDashboardLayoutSplits() == DashboardLayout::defaultSplits);
+
+        beginTest("Dashboard layout editing is opt-in and preserves valid working splits");
+
+        expect(!visualization.isDashboardLayoutEditing());
+        visualization.setDashboardLayoutEditCancelCallback([] { });
+        visualization.setDashboardLayoutEditing(true);
+        expect(visualization.isDashboardLayoutEditing());
+
+        constexpr DashboardLayoutSplits editingSplits { 26, 40, 20, 38 };
+        visualization.setDashboardLayoutSplits(editingSplits);
+        expect(visualization.getDashboardLayoutSplits() == editingSplits);
+
+        visualization.setDashboardLayoutEditing(false);
+        expect(!visualization.isDashboardLayoutEditing());
+        expect(visualization.getDashboardLayoutSplits() == editingSplits);
+        visualization.setDashboardLayoutEditCancelCallback({ });
 
         beginTest("Spectrum render settings publish the shared frequency spacing atomically");
 

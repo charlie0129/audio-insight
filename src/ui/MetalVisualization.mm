@@ -21,6 +21,7 @@
 #include <cstdint>
 #include <limits>
 #include <memory>
+#include <optional>
 #include <string>
 #include <string_view>
 #include <utility>
@@ -29,11 +30,25 @@ namespace audio_insight::detail {
 class MetalRenderBackend;
 }
 
+@class AIAudioInsightMetalView;
+
+@interface AIAudioInsightDashboardSplitterAccessibilityElement : NSAccessibilityElement {
+@private
+    AIAudioInsightMetalView* ownerView;
+    NSUInteger splitterIndex;
+}
+
+- (instancetype)initWithOwnerView:(AIAudioInsightMetalView*)view splitterIndex:(NSUInteger)index;
+- (void)detachOwnerView;
+
+@end
+
 @interface AIAudioInsightMetalView : MTKView <CAMetalDisplayLinkDelegate> {
 @private
     audio_insight::detail::MetalRenderBackend* renderBackend;
     NSWindow* observedWindow;
     CAMetalDisplayLink* metalDisplayLink;
+    NSArray* dashboardSplitterAccessibilityElements;
 }
 
 - (void)attachRenderBackend:(audio_insight::detail::MetalRenderBackend*)backend;
@@ -42,6 +57,26 @@ class MetalRenderBackend;
 - (void)setDisplayLinkMaximumFramesPerSecond:(NSInteger)maximumFramesPerSecond;
 - (BOOL)hasDisplayLink;
 - (BOOL)performPeakRmsClearAccessibilityAction;
+- (void)dashboardLayoutEditingStateChanged;
+- (void)dashboardLayoutGeometryChanged;
+- (void)dashboardSplitterFocusChangedFromIndex:(NSUInteger)previousIndex
+                                       toIndex:(NSUInteger)nextIndex;
+- (void)dashboardSplitterValueChangedAtIndex:(NSUInteger)index;
+- (BOOL)isDashboardLayoutEditing;
+- (BOOL)isDashboardSplitterFocusedAtIndex:(NSUInteger)index;
+- (BOOL)focusDashboardSplitterAtIndex:(NSUInteger)index;
+- (BOOL)incrementDashboardSplitterAtIndex:(NSUInteger)index;
+- (BOOL)decrementDashboardSplitterAtIndex:(NSUInteger)index;
+- (NSRect)dashboardSplitterAccessibilityFrameAtIndex:(NSUInteger)index;
+- (NSString*)dashboardSplitterAccessibilityLabelAtIndex:(NSUInteger)index;
+- (NSString*)dashboardSplitterAccessibilityValueDescriptionAtIndex:(NSUInteger)index;
+- (NSNumber*)dashboardSplitterAccessibilityValueAtIndex:(NSUInteger)index;
+- (NSNumber*)dashboardSplitterAccessibilityMinimumAtIndex:(NSUInteger)index;
+- (NSNumber*)dashboardSplitterAccessibilityMaximumAtIndex:(NSUInteger)index;
+- (NSAccessibilityOrientation)dashboardSplitterAccessibilityOrientationAtIndex:(NSUInteger)index;
+- (NSRect)dashboardSplitterLocalBoundsAtIndex:(NSUInteger)index;
+- (AIAudioInsightDashboardSplitterAccessibilityElement*)
+    dashboardSplitterAccessibilityElementAtIndex:(NSUInteger)index;
 
 @end
 
@@ -592,6 +627,21 @@ constexpr float maximumAllowedSpectrumFloor = -36.0F;
 constexpr float minimumAllowedSpectrumCeiling = -24.0F;
 constexpr float maximumAllowedSpectrumCeiling = 12.0F;
 constexpr float minimumSpectrumRange = 24.0F;
+constexpr std::size_t noDashboardSplitterIndex = dashboardSplitterCount;
+
+DashboardSplitter dashboardSplitterAtIndex(const std::size_t index) noexcept
+{
+    return dashboardSplitterTabOrder[std::min(index, dashboardSplitterTabOrder.size() - 1)];
+}
+
+std::size_t dashboardSplitterIndex(const DashboardSplitter splitter) noexcept
+{
+    const auto found
+        = std::find(dashboardSplitterTabOrder.begin(), dashboardSplitterTabOrder.end(), splitter);
+    return found != dashboardSplitterTabOrder.end()
+        ? static_cast<std::size_t>(std::distance(dashboardSplitterTabOrder.begin(), found))
+        : noDashboardSplitterIndex;
+}
 
 struct MetalVertex {
     simd_float2 position;
@@ -892,6 +942,7 @@ struct VertexBatches {
     VertexRange spectrum;
     VertexRange spectrogramAxis;
     VertexRange peakRms;
+    VertexRange dashboardSplitters;
     std::array<VertexRange, dashboardPanelCount> text;
 };
 
@@ -1316,6 +1367,12 @@ public:
         requestedActive.store(false, std::memory_order_relaxed);
         loadPublishedTelemetry()->renderingRequested.store(false, std::memory_order_relaxed);
         setEffectiveActive(false);
+        dashboardLayoutEditing.store(false, std::memory_order_release);
+        draggedDashboardSplitter.reset();
+        focusedDashboardSplitterIndex.store(
+            static_cast<std::uint32_t>(noDashboardSplitterIndex), std::memory_order_release);
+        activeDashboardSplitterIndex.store(
+            static_cast<std::uint32_t>(noDashboardSplitterIndex), std::memory_order_release);
 
         if (view != nil) {
             view.paused = YES;
@@ -1384,14 +1441,249 @@ public:
 
     void setDashboardLayoutSplits(DashboardLayoutSplits splits) noexcept
     {
-        packedDashboardLayoutSplits.store(
-            packDashboardLayoutSplits(splits), std::memory_order_release);
+        const auto packed = packDashboardLayoutSplits(splits);
+        if (packedDashboardLayoutSplits.exchange(packed, std::memory_order_acq_rel) == packed)
+            return;
+
+        auto* const messageManager = juce::MessageManager::getInstanceWithoutCreating();
+        if (messageManager != nullptr && messageManager->isThisTheMessageThread() && view != nil)
+            [view dashboardLayoutGeometryChanged];
     }
 
     [[nodiscard]] DashboardLayoutSplits getDashboardLayoutSplits() const noexcept
     {
         return unpackDashboardLayoutSplits(
             packedDashboardLayoutSplits.load(std::memory_order_acquire));
+    }
+
+    void setDashboardLayoutEditing(const bool shouldEdit)
+    {
+        assertMessageThread();
+        if (dashboardLayoutEditing.exchange(shouldEdit, std::memory_order_acq_rel) == shouldEdit)
+            return;
+
+        draggedDashboardSplitter.reset();
+        activeDashboardSplitterIndex.store(
+            static_cast<std::uint32_t>(noDashboardSplitterIndex), std::memory_order_release);
+        focusedDashboardSplitterIndex.store(
+            static_cast<std::uint32_t>(noDashboardSplitterIndex), std::memory_order_release);
+
+        if (view != nil) {
+            [view dashboardLayoutEditingStateChanged];
+
+            if (shouldEdit)
+                static_cast<void>(focusDashboardSplitter(0));
+        }
+    }
+
+    [[nodiscard]] bool isDashboardLayoutEditing() const noexcept
+    {
+        return dashboardLayoutEditing.load(std::memory_order_acquire);
+    }
+
+    void setDashboardLayoutEditCancelCallback(
+        MetalVisualization::DashboardLayoutEditCancelCallback callback)
+    {
+        assertMessageThread();
+        dashboardLayoutEditCancelCallback = std::move(callback);
+    }
+
+    [[nodiscard]] DashboardSplitterLayout dashboardSplitterLayout() const noexcept
+    {
+        return DashboardLayout::calculateSplitterLayout(
+            dashboardLogicalBounds(), getDashboardLayoutSplits());
+    }
+
+    [[nodiscard]] DashboardSplitterAccessibilityValue dashboardSplitterAccessibilityValue(
+        const std::size_t index) const noexcept
+    {
+        return DashboardLayout::accessibilityValue(
+            getDashboardLayoutSplits(), dashboardSplitterAtIndex(index));
+    }
+
+    [[nodiscard]] DashboardSplitterRange dashboardSplitterAccessibilityRange(
+        const std::size_t index) const noexcept
+    {
+        return DashboardLayout::legalRange(
+            getDashboardLayoutSplits(), dashboardSplitterAtIndex(index));
+    }
+
+    [[nodiscard]] int dashboardSplitterAccessibilityPosition(const std::size_t index) const noexcept
+    {
+        return DashboardLayout::splitterPosition(
+            getDashboardLayoutSplits(), dashboardSplitterAtIndex(index));
+    }
+
+    [[nodiscard]] DashboardSplitterAxis dashboardSplitterAxis(
+        const std::size_t index) const noexcept
+    {
+        if (index >= dashboardSplitterCount)
+            return DashboardSplitterAxis::horizontal;
+
+        return dashboardSplitterLayout().splitters[index].axis;
+    }
+
+    [[nodiscard]] DashboardLogicalBounds dashboardSplitterPointerHitBounds(
+        const std::size_t index) const noexcept
+    {
+        if (index >= dashboardSplitterCount)
+            return { };
+
+        return dashboardSplitterLayout().splitters[index].pointerHitBounds;
+    }
+
+    [[nodiscard]] bool isDashboardSplitterFocused(const std::size_t index) const noexcept
+    {
+        return isDashboardLayoutEditing()
+            && focusedDashboardSplitterIndex.load(std::memory_order_acquire) == index && view != nil
+            && view.window != nil && view.window.firstResponder == view;
+    }
+
+    [[nodiscard]] bool focusDashboardSplitter(const std::size_t index)
+    {
+        assertMessageThread();
+        if (!isDashboardLayoutEditing() || index >= dashboardSplitterCount || view == nil
+            || view.window == nil || ![view.window makeFirstResponder:view]) {
+            return false;
+        }
+
+        setFocusedDashboardSplitterIndex(index);
+        return true;
+    }
+
+    [[nodiscard]] bool beginDashboardSplitterDrag(const NSPoint point)
+    {
+        assertMessageThread();
+        if (!isDashboardLayoutEditing())
+            return false;
+
+        draggedDashboardSplitter.reset();
+        activeDashboardSplitterIndex.store(
+            static_cast<std::uint32_t>(noDashboardSplitterIndex), std::memory_order_release);
+
+        const auto hit = DashboardLayout::hitTestSplitter(
+            dashboardSplitterLayout(), dashboardPointFromNativePoint(point));
+        if (!hit.has_value())
+            return false;
+
+        draggedDashboardSplitter = *hit;
+        const auto index = dashboardSplitterIndex(*hit);
+        activeDashboardSplitterIndex.store(
+            static_cast<std::uint32_t>(index), std::memory_order_release);
+        static_cast<void>(focusDashboardSplitter(index));
+        return true;
+    }
+
+    [[nodiscard]] bool dragDashboardSplitter(const NSPoint point)
+    {
+        assertMessageThread();
+        if (!isDashboardLayoutEditing() || !draggedDashboardSplitter.has_value())
+            return false;
+
+        const auto splitter = *draggedDashboardSplitter;
+        const auto moved = DashboardLayout::moveSplitterToPointer(getDashboardLayoutSplits(),
+            splitter, dashboardLogicalBounds(), dashboardPointFromNativePoint(point));
+        publishDashboardLayoutEdit(moved, dashboardSplitterIndex(splitter));
+        return true;
+    }
+
+    [[nodiscard]] bool endDashboardSplitterDrag(const NSPoint point)
+    {
+        assertMessageThread();
+        if (!draggedDashboardSplitter.has_value())
+            return false;
+
+        static_cast<void>(dragDashboardSplitter(point));
+        draggedDashboardSplitter.reset();
+        activeDashboardSplitterIndex.store(
+            static_cast<std::uint32_t>(noDashboardSplitterIndex), std::memory_order_release);
+        return true;
+    }
+
+    [[nodiscard]] bool handleDashboardLayoutKeyDown(NSEvent* const event)
+    {
+        assertMessageThread();
+        if (!isDashboardLayoutEditing() || event == nil)
+            return false;
+
+        constexpr unsigned short tabKeyCode = 48;
+        constexpr unsigned short escapeKeyCode = 53;
+        constexpr unsigned short homeKeyCode = 115;
+        constexpr unsigned short endKeyCode = 119;
+        constexpr unsigned short leftArrowKeyCode = 123;
+        constexpr unsigned short rightArrowKeyCode = 124;
+        constexpr unsigned short downArrowKeyCode = 125;
+        constexpr unsigned short upArrowKeyCode = 126;
+
+        const auto keyCode = event.keyCode;
+        if (keyCode == escapeKeyCode) {
+            invokeDashboardLayoutEditCancelCallback();
+            return true;
+        }
+
+        auto focusedIndex = static_cast<std::size_t>(
+            focusedDashboardSplitterIndex.load(std::memory_order_acquire));
+        if (focusedIndex >= dashboardSplitterCount)
+            focusedIndex = 0;
+
+        if (keyCode == tabKeyCode) {
+            const auto backwards = (event.modifierFlags & NSEventModifierFlagShift) != 0;
+            const auto nextIndex = backwards
+                ? (focusedIndex + dashboardSplitterCount - 1) % dashboardSplitterCount
+                : (focusedIndex + 1) % dashboardSplitterCount;
+            setFocusedDashboardSplitterIndex(nextIndex);
+            return true;
+        }
+
+        const auto splitter = dashboardSplitterAtIndex(focusedIndex);
+        const auto geometry = dashboardSplitterLayout().splitters[focusedIndex];
+        auto requestedPosition
+            = DashboardLayout::splitterPosition(getDashboardLayoutSplits(), splitter);
+        auto handled = true;
+
+        if (keyCode == homeKeyCode) {
+            requestedPosition
+                = DashboardLayout::legalRange(getDashboardLayoutSplits(), splitter).minimum;
+        } else if (keyCode == endKeyCode) {
+            requestedPosition
+                = DashboardLayout::legalRange(getDashboardLayoutSplits(), splitter).maximum;
+        } else if (geometry.axis == DashboardSplitterAxis::horizontal
+            && (keyCode == upArrowKeyCode || keyCode == downArrowKeyCode)) {
+            requestedPosition += keyCode == upArrowKeyCode ? -1 : 1;
+        } else if (geometry.axis == DashboardSplitterAxis::vertical
+            && (keyCode == leftArrowKeyCode || keyCode == rightArrowKeyCode)) {
+            requestedPosition += keyCode == leftArrowKeyCode ? -1 : 1;
+        } else {
+            handled = false;
+        }
+
+        if (!handled)
+            return false;
+
+        publishDashboardLayoutEdit(
+            DashboardLayout::moveSplitter(getDashboardLayoutSplits(), splitter, requestedPosition),
+            focusedIndex);
+        return true;
+    }
+
+    [[nodiscard]] bool adjustDashboardSplitter(const std::size_t index, const int deltaTracks)
+    {
+        assertMessageThread();
+        if (!isDashboardLayoutEditing() || index >= dashboardSplitterCount || deltaTracks == 0)
+            return false;
+
+        if (!focusDashboardSplitter(index))
+            return false;
+
+        const auto current = getDashboardLayoutSplits();
+        const auto splitter = dashboardSplitterAtIndex(index);
+        const auto requested = DashboardLayout::splitterPosition(current, splitter) + deltaTracks;
+        const auto moved = DashboardLayout::moveSplitter(current, splitter, requested);
+        if (moved == current)
+            return false;
+
+        publishDashboardLayoutEdit(moved, index);
+        return true;
     }
 
     [[nodiscard]] MetalRenderTelemetry getTelemetry() const noexcept
@@ -1532,6 +1824,10 @@ public:
     bool performPeakRmsClearAction() noexcept
     {
         assertMessageThread();
+
+        if (isDashboardLayoutEditing())
+            return false;
+
         source.resetPeakRms();
         return true;
     }
@@ -1700,6 +1996,15 @@ public:
                         vertexCount:batches.peakRms.count];
         }
 
+        if (batches.dashboardSplitters.count != 0) {
+            const MTLScissorRect fullScissor { 0, 0, drawable.texture.width,
+                drawable.texture.height };
+            [encoder setScissorRect:fullScissor];
+            [encoder drawPrimitives:MTLPrimitiveTypeTriangle
+                        vertexStart:batches.dashboardSplitters.start
+                        vertexCount:batches.dashboardSplitters.count];
+        }
+
         if (glyphAtlasTexture != nil && textPipelineState != nil && glyphSamplerState != nil) {
             [encoder setRenderPipelineState:textPipelineState];
             [encoder setFragmentTexture:glyphAtlasTexture atIndex:0];
@@ -1853,6 +2158,11 @@ private:
     bool metalReady = false;
     std::atomic<std::uint64_t> packedSpectrumSettings { 0 };
     std::atomic<std::uint32_t> packedDashboardLayoutSplits { 0 };
+    std::atomic<bool> dashboardLayoutEditing { false };
+    std::atomic<std::uint32_t> focusedDashboardSplitterIndex { static_cast<std::uint32_t>(
+        noDashboardSplitterIndex) };
+    std::atomic<std::uint32_t> activeDashboardSplitterIndex { static_cast<std::uint32_t>(
+        noDashboardSplitterIndex) };
     std::atomic<std::uint64_t> requestedTelemetryEpoch { 1 };
 
     std::atomic<bool> requestedActive { false };
@@ -1860,6 +2170,8 @@ private:
     std::atomic<bool> effectiveActive { false };
     std::atomic<bool> hasShutDown { false };
     MetalVisualization::EffectiveActivityCallback effectiveActivityCallback;
+    MetalVisualization::DashboardLayoutEditCancelCallback dashboardLayoutEditCancelCallback;
+    std::optional<DashboardSplitter> draggedDashboardSplitter;
 
     VisualizationFrame targetFrame;
     std::array<float, maximumSpectrumBinCount> displayedSpectrum { };
@@ -1873,6 +2185,64 @@ private:
     CFTimeInterval previousDisplayCallbackHostTime = 0.0;
     CFTimeInterval previousTargetTimestamp = 0.0;
     CFTimeInterval previousTargetPresentationTimestamp = 0.0;
+
+    [[nodiscard]] DashboardLogicalBounds dashboardLogicalBounds() const noexcept
+    {
+        if (view == nil)
+            return { };
+
+        const auto size = view.bounds.size;
+        return { 0.0, 0.0, std::max(0.0, static_cast<double>(size.width)),
+            std::max(0.0, static_cast<double>(size.height)) };
+    }
+
+    [[nodiscard]] DashboardLogicalPoint dashboardPointFromNativePoint(
+        const NSPoint point) const noexcept
+    {
+        if (view == nil)
+            return { };
+
+        const auto bounds = view.bounds;
+        const auto height = std::max(0.0, static_cast<double>(bounds.size.height));
+        const auto x = static_cast<double>(point.x - bounds.origin.x);
+        const auto y = static_cast<double>(point.y - bounds.origin.y);
+        return { x, view.isFlipped ? y : height - y };
+    }
+
+    void setFocusedDashboardSplitterIndex(const std::size_t nextIndex)
+    {
+        const auto boundedNext
+            = nextIndex < dashboardSplitterCount ? nextIndex : noDashboardSplitterIndex;
+        const auto previous = static_cast<std::size_t>(focusedDashboardSplitterIndex.exchange(
+            static_cast<std::uint32_t>(boundedNext), std::memory_order_acq_rel));
+        if (view != nil && previous != boundedNext)
+            [view dashboardSplitterFocusChangedFromIndex:previous toIndex:boundedNext];
+    }
+
+    void publishDashboardLayoutEdit(
+        const DashboardLayoutSplits& splits, const std::size_t splitterIndex)
+    {
+        const auto packed = packDashboardLayoutSplits(splits);
+        if (packedDashboardLayoutSplits.exchange(packed, std::memory_order_acq_rel) == packed)
+            return;
+
+        if (view != nil) {
+            [view dashboardLayoutGeometryChanged];
+            if (splitterIndex < dashboardSplitterCount)
+                [view dashboardSplitterValueChangedAtIndex:splitterIndex];
+        }
+    }
+
+    void invokeDashboardLayoutEditCancelCallback() noexcept
+    {
+        try {
+            const auto callback = dashboardLayoutEditCancelCallback;
+            if (callback)
+                callback();
+        } catch (...) {
+            // An editor interaction callback must not destabilize its host.
+        }
+    }
 
     void initialiseMetal()
     {
@@ -2958,6 +3328,32 @@ private:
         }
 
         batches.peakRms.count = cursor - batches.peakRms.start;
+        batches.dashboardSplitters.start = cursor;
+
+        if (dashboardLayoutEditing.load(std::memory_order_acquire)) {
+            constexpr auto handleColour = simd_float4 { 0.24F, 0.55F, 0.70F, 0.72F };
+            constexpr auto focusedHandleColour = simd_float4 { 0.30F, 0.82F, 0.96F, 0.96F };
+            constexpr auto activeHandleColour = simd_float4 { 0.64F, 0.92F, 1.0F, 1.0F };
+            const auto splitterLayout = DashboardLayout::calculateSplitterLayout(
+                { 0.0, 0.0, static_cast<double>(logicalSize.width),
+                    static_cast<double>(logicalSize.height) },
+                getDashboardLayoutSplits());
+            const auto focusedIndex = static_cast<std::size_t>(
+                focusedDashboardSplitterIndex.load(std::memory_order_acquire));
+            const auto activeIndex = static_cast<std::size_t>(
+                activeDashboardSplitterIndex.load(std::memory_order_acquire));
+
+            for (std::size_t index = 0; index < splitterLayout.splitters.size(); ++index) {
+                const auto bounds
+                    = toRenderRect(splitterLayout.splitters[index].visualBounds, height);
+                const auto colour = index == activeIndex ? activeHandleColour
+                    : index == focusedIndex              ? focusedHandleColour
+                                                         : handleColour;
+                appendQuad(bounds.left, bounds.bottom, bounds.right, bounds.top, colour);
+            }
+        }
+
+        batches.dashboardSplitters.count = cursor - batches.dashboardSplitters.start;
 
         constexpr auto titleColour = simd_float4 { 0.72F, 0.79F, 0.88F, 0.94F };
         constexpr auto axisTextColour = simd_float4 { 0.54F, 0.62F, 0.72F, 0.90F };
@@ -3169,6 +3565,155 @@ private:
 };
 } // namespace audio_insight::detail
 
+namespace {
+NSString* makeDashboardAccessibilityString(const std::string_view value)
+{
+    if (value.empty())
+        return @"";
+
+    return [[[NSString alloc] initWithBytes:value.data()
+                                     length:value.size()
+                                   encoding:NSUTF8StringEncoding] autorelease];
+}
+} // namespace
+
+@implementation AIAudioInsightDashboardSplitterAccessibilityElement
+
+- (instancetype)initWithOwnerView:(AIAudioInsightMetalView*)view splitterIndex:(NSUInteger)index
+{
+    self = [super init];
+
+    if (self != nil) {
+        ownerView = view;
+        splitterIndex = index;
+    }
+
+    return self;
+}
+
+- (void)detachOwnerView
+{
+    ownerView = nil;
+}
+
+- (BOOL)isAccessibilityElement
+{
+    return ownerView != nil && [ownerView isDashboardLayoutEditing];
+}
+
+- (BOOL)isAccessibilityEnabled
+{
+    return [self isAccessibilityElement];
+}
+
+- (NSAccessibilityRole)accessibilityRole
+{
+    return NSAccessibilitySplitterRole;
+}
+
+- (NSString*)accessibilityLabel
+{
+    return ownerView != nil ? [ownerView dashboardSplitterAccessibilityLabelAtIndex:splitterIndex]
+                            : nil;
+}
+
+- (NSString*)accessibilityIdentifier
+{
+    switch (splitterIndex) {
+    case 0:
+        return @"dashboardSplitter.horizontal";
+    case 1:
+        return @"dashboardSplitter.upper";
+    case 2:
+        return @"dashboardSplitter.lowerLeft";
+    case 3:
+        return @"dashboardSplitter.lowerRight";
+    default:
+        return nil;
+    }
+}
+
+- (NSString*)accessibilityHelp
+{
+    return @"Use the arrow keys, Home, or End to resize the adjacent analyzer panels.";
+}
+
+- (id)accessibilityParent
+{
+    return ownerView;
+}
+
+- (id)accessibilityWindow
+{
+    return ownerView.window;
+}
+
+- (id)accessibilityTopLevelUIElement
+{
+    return ownerView.window;
+}
+
+- (NSRect)accessibilityFrame
+{
+    return ownerView != nil ? [ownerView dashboardSplitterAccessibilityFrameAtIndex:splitterIndex]
+                            : NSZeroRect;
+}
+
+- (BOOL)isAccessibilityFocused
+{
+    return ownerView != nil && [ownerView isDashboardSplitterFocusedAtIndex:splitterIndex];
+}
+
+- (void)setAccessibilityFocused:(BOOL)focused
+{
+    if (focused && ownerView != nil)
+        [ownerView focusDashboardSplitterAtIndex:splitterIndex];
+}
+
+- (id)accessibilityValue
+{
+    return ownerView != nil ? [ownerView dashboardSplitterAccessibilityValueAtIndex:splitterIndex]
+                            : nil;
+}
+
+- (NSString*)accessibilityValueDescription
+{
+    return ownerView != nil
+        ? [ownerView dashboardSplitterAccessibilityValueDescriptionAtIndex:splitterIndex]
+        : nil;
+}
+
+- (id)accessibilityMinValue
+{
+    return ownerView != nil ? [ownerView dashboardSplitterAccessibilityMinimumAtIndex:splitterIndex]
+                            : nil;
+}
+
+- (id)accessibilityMaxValue
+{
+    return ownerView != nil ? [ownerView dashboardSplitterAccessibilityMaximumAtIndex:splitterIndex]
+                            : nil;
+}
+
+- (NSAccessibilityOrientation)accessibilityOrientation
+{
+    return ownerView != nil
+        ? [ownerView dashboardSplitterAccessibilityOrientationAtIndex:splitterIndex]
+        : NSAccessibilityOrientationUnknown;
+}
+
+- (BOOL)accessibilityPerformIncrement
+{
+    return ownerView != nil && [ownerView incrementDashboardSplitterAtIndex:splitterIndex];
+}
+
+- (BOOL)accessibilityPerformDecrement
+{
+    return ownerView != nil && [ownerView decrementDashboardSplitterAtIndex:splitterIndex];
+}
+
+@end
+
 @implementation AIAudioInsightMetalView
 
 - (void)attachRenderBackend:(audio_insight::detail::MetalRenderBackend*)backend
@@ -3187,6 +3732,17 @@ private:
             selector:@selector(performPeakRmsClearAccessibilityAction)];
     self.accessibilityCustomActions = @[ clearAction ];
     [clearAction release];
+
+    auto* accessibilityElements =
+        [[NSMutableArray alloc] initWithCapacity:audio_insight::dashboardSplitterCount];
+    for (NSUInteger index = 0; index < audio_insight::dashboardSplitterCount; ++index) {
+        auto* element =
+            [[AIAudioInsightDashboardSplitterAccessibilityElement alloc] initWithOwnerView:self
+                                                                             splitterIndex:index];
+        [accessibilityElements addObject:element];
+        [element release];
+    }
+    dashboardSplitterAccessibilityElements = accessibilityElements;
 
     if ([self.layer isKindOfClass:[CAMetalLayer class]]) {
         metalDisplayLink =
@@ -3213,8 +3769,27 @@ private:
 
     [[NSNotificationCenter defaultCenter] removeObserver:self];
     self.accessibilityCustomActions = @[];
+
+    for (AIAudioInsightDashboardSplitterAccessibilityElement* element in
+             dashboardSplitterAccessibilityElements) {
+        [element detachOwnerView];
+    }
+    [dashboardSplitterAccessibilityElements release];
+    dashboardSplitterAccessibilityElements = nil;
+
     observedWindow = nil;
     renderBackend = nullptr;
+}
+
+- (void)dealloc
+{
+    [self detachRenderBackend];
+    [super dealloc];
+}
+
+- (BOOL)acceptsFirstResponder
+{
+    return [self isDashboardLayoutEditing];
 }
 
 - (void)mouseDown:(NSEvent*)event
@@ -3222,11 +3797,245 @@ private:
     if (renderBackend != nullptr) {
         const auto point = [self convertPoint:event.locationInWindow fromView:nil];
 
+        if (renderBackend->isDashboardLayoutEditing()) {
+            static_cast<void>(renderBackend->beginDashboardSplitterDrag(point));
+            return;
+        }
+
         if (renderBackend->tryClearPeakRmsAt(point))
             return;
     }
 
     [super mouseDown:event];
+}
+
+- (void)mouseDragged:(NSEvent*)event
+{
+    if (renderBackend != nullptr && renderBackend->isDashboardLayoutEditing()) {
+        const auto point = [self convertPoint:event.locationInWindow fromView:nil];
+        static_cast<void>(renderBackend->dragDashboardSplitter(point));
+        return;
+    }
+
+    [super mouseDragged:event];
+}
+
+- (void)mouseUp:(NSEvent*)event
+{
+    if (renderBackend != nullptr && renderBackend->isDashboardLayoutEditing()) {
+        const auto point = [self convertPoint:event.locationInWindow fromView:nil];
+        static_cast<void>(renderBackend->endDashboardSplitterDrag(point));
+        return;
+    }
+
+    [super mouseUp:event];
+}
+
+- (void)keyDown:(NSEvent*)event
+{
+    if (renderBackend != nullptr && renderBackend->handleDashboardLayoutKeyDown(event))
+        return;
+
+    [super keyDown:event];
+}
+
+- (void)resetCursorRects
+{
+    [super resetCursorRects];
+
+    if (![self isDashboardLayoutEditing])
+        return;
+
+    for (NSUInteger index = 0; index < audio_insight::dashboardSplitterCount; ++index) {
+        const auto bounds = [self dashboardSplitterLocalBoundsAtIndex:index];
+        if (NSIsEmptyRect(bounds))
+            continue;
+
+        auto* cursor = [self dashboardSplitterAccessibilityOrientationAtIndex:index]
+                == NSAccessibilityOrientationHorizontal
+            ? [NSCursor resizeUpDownCursor]
+            : [NSCursor resizeLeftRightCursor];
+        [self addCursorRect:bounds cursor:cursor];
+    }
+}
+
+- (NSArray*)accessibilityChildren
+{
+    return [self isDashboardLayoutEditing] ? dashboardSplitterAccessibilityElements : @[];
+}
+
+- (NSArray*)accessibilityVisibleChildren
+{
+    return [self accessibilityChildren];
+}
+
+- (NSArray<id<NSAccessibilityElement>>*)accessibilityChildrenInNavigationOrder
+{
+    return [self accessibilityChildren];
+}
+
+- (NSArray*)accessibilitySplitters
+{
+    return [self accessibilityChildren];
+}
+
+- (void)dashboardLayoutEditingStateChanged
+{
+    if (self.window != nil)
+        [self.window invalidateCursorRectsForView:self];
+
+    if (![self isDashboardLayoutEditing] && self.window.firstResponder == self)
+        [self.window makeFirstResponder:nil];
+
+    NSAccessibilityPostNotification(self, NSAccessibilityLayoutChangedNotification);
+}
+
+- (void)dashboardLayoutGeometryChanged
+{
+    if (![self isDashboardLayoutEditing])
+        return;
+
+    if (self.window != nil)
+        [self.window invalidateCursorRectsForView:self];
+
+    NSAccessibilityPostNotification(self, NSAccessibilityLayoutChangedNotification);
+}
+
+- (void)dashboardSplitterFocusChangedFromIndex:(NSUInteger)previousIndex
+                                       toIndex:(NSUInteger)nextIndex
+{
+    juce::ignoreUnused(previousIndex);
+
+    auto* focused = [self dashboardSplitterAccessibilityElementAtIndex:nextIndex];
+    if (focused != nil)
+        NSAccessibilityPostNotification(
+            focused, NSAccessibilityFocusedUIElementChangedNotification);
+}
+
+- (void)dashboardSplitterValueChangedAtIndex:(NSUInteger)index
+{
+    auto* element = [self dashboardSplitterAccessibilityElementAtIndex:index];
+    if (element != nil)
+        NSAccessibilityPostNotification(element, NSAccessibilityValueChangedNotification);
+}
+
+- (BOOL)isDashboardLayoutEditing
+{
+    return renderBackend != nullptr && renderBackend->isDashboardLayoutEditing();
+}
+
+- (BOOL)isDashboardSplitterFocusedAtIndex:(NSUInteger)index
+{
+    return renderBackend != nullptr && index < audio_insight::dashboardSplitterCount
+        && renderBackend->isDashboardSplitterFocused(index);
+}
+
+- (BOOL)focusDashboardSplitterAtIndex:(NSUInteger)index
+{
+    return renderBackend != nullptr && index < audio_insight::dashboardSplitterCount
+        && renderBackend->focusDashboardSplitter(index);
+}
+
+- (BOOL)incrementDashboardSplitterAtIndex:(NSUInteger)index
+{
+    return renderBackend != nullptr && index < audio_insight::dashboardSplitterCount
+        && renderBackend->adjustDashboardSplitter(index, 1);
+}
+
+- (BOOL)decrementDashboardSplitterAtIndex:(NSUInteger)index
+{
+    return renderBackend != nullptr && index < audio_insight::dashboardSplitterCount
+        && renderBackend->adjustDashboardSplitter(index, -1);
+}
+
+- (NSRect)dashboardSplitterLocalBoundsAtIndex:(NSUInteger)index
+{
+    if (renderBackend == nullptr || index >= audio_insight::dashboardSplitterCount)
+        return NSZeroRect;
+
+    const auto logicalBounds = renderBackend->dashboardSplitterPointerHitBounds(index);
+    const auto viewBounds = self.bounds;
+    const auto y = self.isFlipped
+        ? viewBounds.origin.y + logicalBounds.y
+        : viewBounds.origin.y + viewBounds.size.height - logicalBounds.y - logicalBounds.height;
+    return NSMakeRect(
+        viewBounds.origin.x + logicalBounds.x, y, logicalBounds.width, logicalBounds.height);
+}
+
+- (NSRect)dashboardSplitterAccessibilityFrameAtIndex:(NSUInteger)index
+{
+    if (![self isDashboardLayoutEditing])
+        return NSZeroRect;
+
+    return NSAccessibilityFrameInView(self, [self dashboardSplitterLocalBoundsAtIndex:index]);
+}
+
+- (NSString*)dashboardSplitterAccessibilityLabelAtIndex:(NSUInteger)index
+{
+    if (renderBackend == nullptr || index >= audio_insight::dashboardSplitterCount)
+        return nil;
+
+    return makeDashboardAccessibilityString(
+        renderBackend->dashboardSplitterAccessibilityValue(index).name);
+}
+
+- (NSString*)dashboardSplitterAccessibilityValueDescriptionAtIndex:(NSUInteger)index
+{
+    if (renderBackend == nullptr || index >= audio_insight::dashboardSplitterCount)
+        return nil;
+
+    const auto value = renderBackend->dashboardSplitterAccessibilityValue(index);
+    auto* firstRegionName = makeDashboardAccessibilityString(value.firstRegionName);
+    auto* secondRegionName = makeDashboardAccessibilityString(value.secondRegionName);
+    return [NSString stringWithFormat:@"%@ %.1f%%, %@ %.1f%%", firstRegionName,
+        value.firstRegionPercentage, secondRegionName, value.secondRegionPercentage];
+}
+
+- (NSNumber*)dashboardSplitterAccessibilityValueAtIndex:(NSUInteger)index
+{
+    if (renderBackend == nullptr || index >= audio_insight::dashboardSplitterCount)
+        return nil;
+
+    return [NSNumber numberWithInt:renderBackend->dashboardSplitterAccessibilityPosition(index)];
+}
+
+- (NSNumber*)dashboardSplitterAccessibilityMinimumAtIndex:(NSUInteger)index
+{
+    if (renderBackend == nullptr || index >= audio_insight::dashboardSplitterCount)
+        return nil;
+
+    return
+        [NSNumber numberWithInt:renderBackend->dashboardSplitterAccessibilityRange(index).minimum];
+}
+
+- (NSNumber*)dashboardSplitterAccessibilityMaximumAtIndex:(NSUInteger)index
+{
+    if (renderBackend == nullptr || index >= audio_insight::dashboardSplitterCount)
+        return nil;
+
+    return
+        [NSNumber numberWithInt:renderBackend->dashboardSplitterAccessibilityRange(index).maximum];
+}
+
+- (NSAccessibilityOrientation)dashboardSplitterAccessibilityOrientationAtIndex:(NSUInteger)index
+{
+    if (renderBackend == nullptr || index >= audio_insight::dashboardSplitterCount)
+        return NSAccessibilityOrientationUnknown;
+
+    return renderBackend->dashboardSplitterAxis(index)
+            == audio_insight::DashboardSplitterAxis::horizontal
+        ? NSAccessibilityOrientationHorizontal
+        : NSAccessibilityOrientationVertical;
+}
+
+- (AIAudioInsightDashboardSplitterAccessibilityElement*)
+    dashboardSplitterAccessibilityElementAtIndex:(NSUInteger)index
+{
+    if (index >= dashboardSplitterAccessibilityElements.count)
+        return nil;
+
+    return static_cast<AIAudioInsightDashboardSplitterAccessibilityElement*>(
+        [dashboardSplitterAccessibilityElements objectAtIndex:index]);
 }
 
 - (BOOL)performPeakRmsClearAccessibilityAction
@@ -3419,6 +4228,22 @@ void MetalVisualization::setDashboardLayoutSplits(DashboardLayoutSplits splits) 
 DashboardLayoutSplits MetalVisualization::getDashboardLayoutSplits() const noexcept
 {
     return impl->backend->getDashboardLayoutSplits();
+}
+
+void MetalVisualization::setDashboardLayoutEditing(const bool shouldEdit)
+{
+    impl->backend->setDashboardLayoutEditing(shouldEdit);
+}
+
+bool MetalVisualization::isDashboardLayoutEditing() const noexcept
+{
+    return impl->backend->isDashboardLayoutEditing();
+}
+
+void MetalVisualization::setDashboardLayoutEditCancelCallback(
+    DashboardLayoutEditCancelCallback callback)
+{
+    impl->backend->setDashboardLayoutEditCancelCallback(std::move(callback));
 }
 
 MetalRenderTelemetry MetalVisualization::getRenderTelemetry() const noexcept
