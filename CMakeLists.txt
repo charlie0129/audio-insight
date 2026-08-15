@@ -316,6 +316,15 @@ if(BUILD_TESTING)
 
     add_test(NAME AudioInsightTests COMMAND AudioInsightTests)
 
+    add_test(
+        NAME MetalDisplayLinkPresentationPolicy
+        COMMAND
+            "${CMAKE_COMMAND}"
+            "-DSOURCE_FILE=${CMAKE_CURRENT_SOURCE_DIR}/src/ui/MetalVisualization.mm"
+            -P
+            "${CMAKE_CURRENT_SOURCE_DIR}/tests/CheckMetalDisplayLinkPresentation.cmake"
+    )
+
     source_group(TREE "${CMAKE_CURRENT_SOURCE_DIR}" FILES
         src/analysis/AnalysisCoordinator.cpp
         src/analysis/AnalysisCoordinator.h

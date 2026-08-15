@@ -215,6 +215,12 @@ and actual presentation separate measurements instead of guessing from
 14, lowering the deployment target below macOS 14 will require a separately
 validated display-link fallback.
 
+Commit the encoded Metal work before calling plain `present()` on the drawable
+provided by the display-link update. `CAMetalDisplayLink` owns presentation
+timing, so its timestamps are telemetry and deadline inputs rather than values
+for `presentAtTime` or other timed presentation APIs, which assert for these
+drawables.
+
 The rendering toolbox should favor simple, predictable GPU operations:
 
 - line or triangle geometry for plots and scopes;

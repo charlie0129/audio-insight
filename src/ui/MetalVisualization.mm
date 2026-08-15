@@ -737,12 +737,11 @@ public:
             completionTelemetry->completedFrames.fetch_add(1, std::memory_order_relaxed);
         }];
 
-        if (std::isfinite(targetPresentationTimestamp) && targetPresentationTimestamp > 0.0)
-            [commandBuffer presentDrawable:drawable atTime:targetPresentationTimestamp];
-        else
-            [commandBuffer presentDrawable:drawable];
-
         [commandBuffer commit];
+
+        // CAMetalDisplayLink owns the drawable's presentation timing. Timed presentation APIs
+        // assert for drawables supplied by its update callback.
+        [drawable present];
 
         const auto commitHostTime = CACurrentMediaTime();
         const auto commitLateness
