@@ -57,16 +57,24 @@ public:
     {
         std::size_t selected = slots_.size();
 
-        for (std::size_t index = 0; index < slots_.size(); ++index) {
-            auto expected = SlotState::free;
-            if (slots_[index].state.compare_exchange_strong(expected, SlotState::writing,
-                    std::memory_order_acquire, std::memory_order_relaxed)) {
-                selected = index;
-                break;
+        // A consumer can retire every ready slot while the producer moves from
+        // its free-slot scan to its reclaim scan. Retry a bounded number of
+        // times so those newly freed slots are observed instead of dropping a
+        // publication even though capacity is available.
+        for (std::size_t attempt = 0; attempt <= slots_.size() && selected == slots_.size();
+            ++attempt) {
+            for (std::size_t index = 0; index < slots_.size(); ++index) {
+                auto expected = SlotState::free;
+                if (slots_[index].state.compare_exchange_strong(expected, SlotState::writing,
+                        std::memory_order_acquire, std::memory_order_relaxed)) {
+                    selected = index;
+                    break;
+                }
             }
-        }
 
-        if (selected == slots_.size()) {
+            if (selected != slots_.size())
+                break;
+
             auto oldestSequence = std::numeric_limits<std::uint64_t>::max();
             for (std::size_t index = 0; index < slots_.size(); ++index) {
                 if (slots_[index].state.load(std::memory_order_acquire) != SlotState::ready)
