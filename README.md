@@ -22,6 +22,33 @@ cmake --preset macos-arm64
 cmake --build --preset macos-arm64-debug --target AudioInsight_AU AudioInsight_VST3
 ```
 
+The final configure message, such as:
+
+```text
+Build files have been written to: /path/to/audio-insight/build/xcode
+```
+
+refers to the generated Xcode project, not the finished plugins. The Debug
+command above writes the plugin bundles to:
+
+```text
+build/xcode/AudioInsight_artefacts/Debug/AU/Audio Insight.component
+build/xcode/AudioInsight_artefacts/Debug/VST3/Audio Insight.vst3
+```
+
+For optimized Release bundles, build with:
+
+```sh
+cmake --build --preset macos-arm64-release --target AudioInsight_AU AudioInsight_VST3
+```
+
+The Release bundles are written to:
+
+```text
+build/xcode/AudioInsight_artefacts/Release/AU/Audio Insight.component
+build/xcode/AudioInsight_artefacts/Release/VST3/Audio Insight.vst3
+```
+
 For an existing clone, initialize the pinned JUCE dependency with:
 
 ```sh

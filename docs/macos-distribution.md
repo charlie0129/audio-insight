@@ -1,7 +1,7 @@
 # macOS development and distribution policy
 
-> **Status:** Accepted policy; exact artifact names and build commands will be
-> finalized with the build system.
+> **Status:** Accepted policy; current artifact names and build locations are
+> documented in the project README.
 >
 > **Established:** 2026-08-15
 
@@ -36,15 +36,15 @@ different nested signing flow. The manual equivalent for a simple plugin bundle
 is:
 
 ```sh
-codesign --force --sign - "/path/to/AudioInsight.component"
-codesign --force --sign - "/path/to/AudioInsight.vst3"
+codesign --force --sign - "/path/to/Audio Insight.component"
+codesign --force --sign - "/path/to/Audio Insight.vst3"
 ```
 
 Verify the resulting bundle rather than assuming the command succeeded:
 
 ```sh
-codesign --verify --strict --verbose=2 "/path/to/AudioInsight.component"
-codesign --verify --strict --verbose=2 "/path/to/AudioInsight.vst3"
+codesign --verify --strict --verbose=2 "/path/to/Audio Insight.component"
+codesign --verify --strict --verbose=2 "/path/to/Audio Insight.vst3"
 ```
 
 Do not use `codesign --deep` as a substitute for understanding bundle contents.
@@ -59,13 +59,12 @@ Prefer the current user's plugin directories so installation does not require
 administrator access. The `.component` is the initial AUv2 artifact:
 
 ```text
-/Users/your-name/Library/Audio/Plug-Ins/Components/AudioInsight.component
-/Users/your-name/Library/Audio/Plug-Ins/VST3/AudioInsight.vst3
+/Users/your-name/Library/Audio/Plug-Ins/Components/Audio Insight.component
+/Users/your-name/Library/Audio/Plug-Ins/VST3/Audio Insight.vst3
 ```
 
 System-wide installation under `/Library/Audio/Plug-Ins` is optional and may
-require administrator privileges. The final build documentation will provide
-exact copy/install targets after the product and bundle identifiers are chosen.
+require administrator privileges.
 
 ## Using a downloaded prebuilt bundle
 
@@ -85,11 +84,11 @@ The safe order is:
 For steps 2 and 3:
 
 ```sh
-xattr -dr com.apple.quarantine "/path/to/AudioInsight.component"
-codesign --force --sign - "/path/to/AudioInsight.component"
+xattr -dr com.apple.quarantine "/path/to/Audio Insight.component"
+codesign --force --sign - "/path/to/Audio Insight.component"
 
-xattr -dr com.apple.quarantine "/path/to/AudioInsight.vst3"
-codesign --force --sign - "/path/to/AudioInsight.vst3"
+xattr -dr com.apple.quarantine "/path/to/Audio Insight.vst3"
+codesign --force --sign - "/path/to/Audio Insight.vst3"
 ```
 
 These commands deliberately target one explicit plugin bundle. Users should not
