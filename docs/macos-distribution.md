@@ -64,7 +64,12 @@ administrator access. The `.component` is the initial AUv2 artifact:
 ```
 
 System-wide installation under `/Library/Audio/Plug-Ins` is optional and may
-require administrator privileges.
+require administrator privileges. The format-specific destinations are:
+
+```text
+Audio Insight.component -> /Library/Audio/Plug-Ins/Components/
+Audio Insight.vst3      -> /Library/Audio/Plug-Ins/VST3/
+```
 
 ## Using a downloaded prebuilt bundle
 

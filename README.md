@@ -49,6 +49,24 @@ build/xcode/AudioInsight_artefacts/Release/AU/Audio Insight.component
 build/xcode/AudioInsight_artefacts/Release/VST3/Audio Insight.vst3
 ```
 
+To install the plugins system-wide, copy each complete bundle to its matching
+macOS plugin directory:
+
+```text
+Audio Insight.component -> /Library/Audio/Plug-Ins/Components/
+Audio Insight.vst3      -> /Library/Audio/Plug-Ins/VST3/
+```
+
+System-wide installation may require administrator privileges. For a per-user
+installation, use the corresponding directories under `~/Library` instead:
+
+```text
+~/Library/Audio/Plug-Ins/Components/
+~/Library/Audio/Plug-Ins/VST3/
+```
+
+Restart or rescan the audio host after copying the bundle.
+
 For an existing clone, initialize the pinned JUCE dependency with:
 
 ```sh
