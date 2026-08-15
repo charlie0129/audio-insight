@@ -238,6 +238,8 @@ public:
         testModuleServiceAcquisition();
         testCoalescing();
         testFairFifoRequeue();
+        testDeadlineTelemetry();
+        testLatestWinsDeadlineTelemetry();
         testGenerationCancellationAndDestruction();
         testExpiredTargetIsNeverCalled();
         testCleanLastOwnerShutdown();
@@ -380,6 +382,114 @@ private:
         expect(destructionFinished.load(std::memory_order_acquire));
 
         blockingJob.reset();
+        scheduler.reset();
+    }
+
+    void testDeadlineTelemetry()
+    {
+        beginTest("Measures queue wait and turnaround deadline misses");
+
+        auto scheduler = Scheduler::acquire(1);
+        auto blocker = std::make_shared<BlockingFirstJob>();
+        auto measuredJob = std::make_shared<CountingJob>();
+        auto blockerClient = scheduler->createClient(blocker);
+        auto measuredClient = scheduler->createClient(measuredJob);
+
+        expect(blockerClient->request());
+        expect(blocker->waitForFirstStart(), "The timing-test blocker did not start");
+        expect(measuredClient->request(1ns));
+        std::this_thread::sleep_for(2ms);
+        blocker->release();
+
+        expect(measuredClient->waitUntilIdle());
+        expect(measuredJob->callCount() == 1);
+
+        const auto counters = measuredClient->counters();
+        expect(counters.submitted == 1);
+        expect(counters.executed == 1);
+        expect(counters.cancelled == 0);
+        expect(counters.queueWaitSamples == 1);
+        expect(counters.lastQueueWaitNanoseconds > 0);
+        expect(counters.maximumQueueWaitNanoseconds == counters.lastQueueWaitNanoseconds);
+        expect(counters.queueWaitDeadlineMisses == 1);
+        expect(counters.jobTurnaroundSamples == 1);
+        expect(counters.lastJobTurnaroundNanoseconds >= counters.lastQueueWaitNanoseconds);
+        expect(counters.maximumJobTurnaroundNanoseconds == counters.lastJobTurnaroundNanoseconds);
+        expect(counters.jobDeadlineMisses == 1);
+        expect(counters.timingUnavailable == 0);
+
+        expect(blockerClient->cancelAndWait());
+        expect(measuredClient->cancelAndWait());
+        blockerClient.reset();
+        measuredClient.reset();
+        blocker.reset();
+        measuredJob.reset();
+        scheduler.reset();
+    }
+
+    void testLatestWinsDeadlineTelemetry()
+    {
+        beginTest("Queued and follow-up timing uses the latest retained request");
+
+        auto scheduler = Scheduler::acquire(1);
+        auto queueBlocker = std::make_shared<BlockingFirstJob>();
+        auto queuedJob = std::make_shared<CountingJob>();
+        auto queueBlockerClient = scheduler->createClient(queueBlocker);
+        auto queuedClient = scheduler->createClient(queuedJob);
+
+        expect(queueBlockerClient->request());
+        expect(queueBlocker->waitForFirstStart(), "The latest-wins queue blocker did not start");
+        expect(queuedClient->request(0ns));
+        expect(queuedClient->request(1s));
+        queueBlocker->release();
+
+        expect(queuedClient->waitUntilIdle());
+        const auto queuedCounters = queuedClient->counters();
+        expect(queuedCounters.submitted == 2);
+        expect(queuedCounters.executed == 1);
+        expect(queuedCounters.cancelled == 1);
+        expect(queuedCounters.queueWaitSamples == 1);
+        expect(queuedCounters.queueWaitDeadlineMisses == 0,
+            "The replaced queued deadline must not be retained");
+        expect(queuedCounters.jobTurnaroundSamples == 1);
+        expect(queuedCounters.jobDeadlineMisses == 0,
+            "Turnaround must use the latest queued deadline");
+
+        expect(queueBlockerClient->cancelAndWait());
+        expect(queuedClient->cancelAndWait());
+        queueBlockerClient.reset();
+        queuedClient.reset();
+        queueBlocker.reset();
+        queuedJob.reset();
+        scheduler.reset();
+
+        scheduler = Scheduler::acquire(1);
+        auto followUpJob = std::make_shared<BlockingFirstJob>();
+        auto followUpClient = scheduler->createClient(followUpJob);
+        expect(followUpClient->request());
+        expect(followUpJob->waitForFirstStart(), "The follow-up timing job did not start");
+        expect(followUpClient->request(0ns));
+        expect(followUpClient->request(1s));
+        followUpJob->release();
+
+        expect(waitFor([&followUpJob] { return followUpJob->callCount() == 2; }),
+            "The latest retained follow-up did not execute");
+        expect(followUpClient->waitUntilIdle());
+        const auto followUpCounters = followUpClient->counters();
+        expect(followUpCounters.submitted == 3);
+        expect(followUpCounters.executed == 2);
+        expect(followUpCounters.cancelled == 1);
+        expect(followUpCounters.queueWaitSamples == 2);
+        expect(followUpCounters.queueWaitDeadlineMisses == 0,
+            "The replaced follow-up deadline must not be retained");
+        expect(followUpCounters.jobTurnaroundSamples == 2);
+        expect(followUpCounters.jobDeadlineMisses == 0,
+            "Turnaround must use the latest follow-up deadline");
+        expect(followUpCounters.timingUnavailable == 0);
+
+        expect(followUpClient->cancelAndWait());
+        followUpClient.reset();
+        followUpJob.reset();
         scheduler.reset();
     }
 

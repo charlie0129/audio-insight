@@ -3,9 +3,11 @@
 #pragma once
 
 #include <atomic>
+#include <chrono>
 #include <cstddef>
 #include <cstdint>
 #include <memory>
+#include <optional>
 #include <utility>
 
 namespace audio_insight {
@@ -83,6 +85,32 @@ public:
         // Accepted submissions discarded before execute(), including replaced
         // coalesced work, queued cancellation, and expired weak targets.
         std::uint64_t cancelled { 0 };
+
+        // Successful monotonic queue-wait measurements. Queue wait begins at
+        // the latest retained latest-wins request and ends when its worker
+        // starts the corresponding execute() invocation.
+        std::uint64_t queueWaitSamples { 0 };
+        std::uint64_t lastQueueWaitNanoseconds { 0 };
+        std::uint64_t maximumQueueWaitNanoseconds { 0 };
+
+        // Queue-wait samples strictly greater than their optional relative
+        // deadline budget. Requests without a deadline never increment this.
+        std::uint64_t queueWaitDeadlineMisses { 0 };
+
+        // Successful monotonic request-to-completion measurements. The start
+        // is the same latest retained request used by queue-wait telemetry.
+        std::uint64_t jobTurnaroundSamples { 0 };
+        std::uint64_t lastJobTurnaroundNanoseconds { 0 };
+        std::uint64_t maximumJobTurnaroundNanoseconds { 0 };
+
+        // Turnaround samples strictly greater than their optional relative
+        // deadline budget. Requests without a deadline never increment this.
+        std::uint64_t jobDeadlineMisses { 0 };
+
+        // Queue-wait or turnaround measurements rejected because the clock was
+        // not steady, a timestamp was unavailable, or time moved backwards.
+        // One job can contribute up to two unavailable measurements.
+        std::uint64_t timingUnavailable { 0 };
     };
 
     class Client final {
@@ -99,14 +127,17 @@ public:
          *
          * If this client already has queued work, that work is replaced in
          * place. If work is running, at most one follow-up request is retained.
-         * Replaced requests contribute to the cancelled counter. Returns false
+         * Replaced requests contribute to the cancelled counter. The optional
+         * relative deadline is diagnostic only; it never cancels or delays
+         * work. Non-positive budgets mean an immediate deadline. Returns false
          * when the client, target, or scheduler is no longer available.
          *
          * This is a non-real-time operation and may take a mutex. Never call it
          * from processBlock(). A message-thread/coordinator timer should observe
          * the audio handoff and call request() instead.
          */
-        [[nodiscard]] bool request();
+        [[nodiscard]] bool request(
+            std::optional<std::chrono::nanoseconds> relativeDeadline = std::nullopt);
 
         /**
          * Invalidates queued work and cooperatively stops running work, then
@@ -175,7 +206,8 @@ public:
 private:
     explicit SharedAnalysisScheduler(std::size_t workerCount);
 
-    [[nodiscard]] bool request(const std::shared_ptr<Client::State>& state);
+    [[nodiscard]] bool request(const std::shared_ptr<Client::State>& state,
+        std::optional<std::chrono::nanoseconds> relativeDeadline);
     [[nodiscard]] Generation cancelAndAdvanceGeneration(
         const std::shared_ptr<Client::State>& state);
     [[nodiscard]] bool waitUntilIdle(const std::shared_ptr<Client::State>& state);

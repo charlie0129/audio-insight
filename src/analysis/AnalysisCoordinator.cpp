@@ -1316,7 +1316,7 @@ void AnalysisCoordinator::requestAnalysis() noexcept
             staleArmed = true;
         }
 
-        if (!client_->request()) {
+        if (!client_->request(std::chrono::nanoseconds { analysisRequestPeriodNanoseconds_ })) {
             if (staleArmed)
                 state_->cancelStaleClear();
             return;

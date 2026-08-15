@@ -3,9 +3,11 @@
 #include "SharedAnalysisScheduler.h"
 
 #include <algorithm>
+#include <chrono>
 #include <condition_variable>
 #include <deque>
 #include <mutex>
+#include <optional>
 #include <stdexcept>
 #include <thread>
 #include <utility>
@@ -16,6 +18,84 @@
 #endif
 
 namespace audio_insight {
+namespace {
+
+using SchedulerClock = std::chrono::steady_clock;
+
+struct ClockSample final {
+    SchedulerClock::time_point time;
+    bool available { false };
+};
+
+struct RequestTiming final {
+    SchedulerClock::time_point requestedAt;
+    std::optional<std::uint64_t> deadlineBudgetNanoseconds;
+    bool requestedAtAvailable { false };
+};
+
+[[nodiscard]] ClockSample sampleSchedulerClock() noexcept
+{
+    if constexpr (SchedulerClock::is_steady)
+        return { SchedulerClock::now(), true };
+
+    return { };
+}
+
+[[nodiscard]] RequestTiming makeRequestTiming(
+    const std::optional<std::chrono::nanoseconds> relativeDeadline) noexcept
+{
+    const auto requestSample = sampleSchedulerClock();
+    RequestTiming timing;
+    timing.requestedAt = requestSample.time;
+    timing.requestedAtAvailable = requestSample.available;
+
+    if (relativeDeadline.has_value()) {
+        timing.deadlineBudgetNanoseconds = relativeDeadline->count() > 0
+            ? static_cast<std::uint64_t>(relativeDeadline->count())
+            : 0;
+    }
+
+    return timing;
+}
+
+[[nodiscard]] std::optional<std::uint64_t> elapsedNanoseconds(
+    const RequestTiming& request, const ClockSample end) noexcept
+{
+    if (!request.requestedAtAvailable || !end.available || end.time < request.requestedAt)
+        return std::nullopt;
+
+    const auto elapsed
+        = std::chrono::duration_cast<std::chrono::nanoseconds>(end.time - request.requestedAt);
+    if (elapsed.count() < 0)
+        return std::nullopt;
+
+    return static_cast<std::uint64_t>(elapsed.count());
+}
+
+void recordTimingSample(const RequestTiming& request, const ClockSample end,
+    std::atomic<std::uint64_t>& samples, std::atomic<std::uint64_t>& lastNanoseconds,
+    std::atomic<std::uint64_t>& maximumNanoseconds, std::atomic<std::uint64_t>& deadlineMisses,
+    std::atomic<std::uint64_t>& timingUnavailable) noexcept
+{
+    const auto duration = elapsedNanoseconds(request, end);
+    if (!duration.has_value()) {
+        timingUnavailable.fetch_add(1, std::memory_order_relaxed);
+        return;
+    }
+
+    samples.fetch_add(1, std::memory_order_relaxed);
+    lastNanoseconds.store(*duration, std::memory_order_relaxed);
+    maximumNanoseconds.store(
+        std::max(maximumNanoseconds.load(std::memory_order_relaxed), *duration),
+        std::memory_order_relaxed);
+
+    if (request.deadlineBudgetNanoseconds.has_value()
+        && *duration > *request.deadlineBudgetNanoseconds) {
+        deadlineMisses.fetch_add(1, std::memory_order_relaxed);
+    }
+}
+
+} // namespace
 
 struct SharedAnalysisScheduler::Client::State final {
     explicit State(std::weak_ptr<JobClient> targetToUse) noexcept : target(std::move(targetToUse))
@@ -31,6 +111,8 @@ struct SharedAnalysisScheduler::Client::State final {
     bool followUpRequested { false };
     Generation queuedGeneration { 1 };
     Generation followUpGeneration { 1 };
+    RequestTiming queuedTiming;
+    RequestTiming followUpTiming;
     std::shared_ptr<std::atomic<bool>> runningStopFlag;
     std::thread::id runningThread;
 
@@ -38,6 +120,15 @@ struct SharedAnalysisScheduler::Client::State final {
     std::atomic<std::uint64_t> submitted { 0 };
     std::atomic<std::uint64_t> executed { 0 };
     std::atomic<std::uint64_t> cancelled { 0 };
+    std::atomic<std::uint64_t> queueWaitSamples { 0 };
+    std::atomic<std::uint64_t> lastQueueWaitNanoseconds { 0 };
+    std::atomic<std::uint64_t> maximumQueueWaitNanoseconds { 0 };
+    std::atomic<std::uint64_t> queueWaitDeadlineMisses { 0 };
+    std::atomic<std::uint64_t> jobTurnaroundSamples { 0 };
+    std::atomic<std::uint64_t> lastJobTurnaroundNanoseconds { 0 };
+    std::atomic<std::uint64_t> maximumJobTurnaroundNanoseconds { 0 };
+    std::atomic<std::uint64_t> jobDeadlineMisses { 0 };
+    std::atomic<std::uint64_t> timingUnavailable { 0 };
 };
 
 struct SharedAnalysisScheduler::Impl final {
@@ -110,6 +201,7 @@ struct SharedAnalysisScheduler::Impl final {
             std::shared_ptr<Client::State> state;
             std::shared_ptr<JobClient> target;
             Generation jobGeneration = 0;
+            RequestTiming jobRequestTiming;
             std::shared_ptr<std::atomic<bool>> generationStopFlag;
 
             {
@@ -132,6 +224,7 @@ struct SharedAnalysisScheduler::Impl final {
 
                 state->queued = false;
                 jobGeneration = state->queuedGeneration;
+                jobRequestTiming = state->queuedTiming;
 
                 if (!state->accepting
                     || jobGeneration != state->currentGeneration.load(std::memory_order_acquire)) {
@@ -153,6 +246,10 @@ struct SharedAnalysisScheduler::Impl final {
                 state->runningStopFlag = std::make_shared<std::atomic<bool>>(false);
                 generationStopFlag = state->runningStopFlag;
                 state->executed.fetch_add(1, std::memory_order_relaxed);
+                recordTimingSample(jobRequestTiming, sampleSchedulerClock(),
+                    state->queueWaitSamples, state->lastQueueWaitNanoseconds,
+                    state->maximumQueueWaitNanoseconds, state->queueWaitDeadlineMisses,
+                    state->timingUnavailable);
             }
 
             const JobContext context(jobGeneration, schedulerStopFlag, generationStopFlag);
@@ -164,8 +261,13 @@ struct SharedAnalysisScheduler::Impl final {
                 // worker and starve every other plugin instance.
             }
 
+            const auto completionTime = sampleSchedulerClock();
+
             {
                 std::lock_guard lock(mutex);
+                recordTimingSample(jobRequestTiming, completionTime, state->jobTurnaroundSamples,
+                    state->lastJobTurnaroundNanoseconds, state->maximumJobTurnaroundNanoseconds,
+                    state->jobDeadlineMisses, state->timingUnavailable);
                 state->running = false;
                 state->runningThread = { };
                 state->runningStopFlag.reset();
@@ -178,6 +280,7 @@ struct SharedAnalysisScheduler::Impl final {
                         == state->currentGeneration.load(std::memory_order_acquire)) {
                         state->queued = true;
                         state->queuedGeneration = followUpGeneration;
+                        state->queuedTiming = state->followUpTiming;
                         readyQueue.emplace_back(state);
                         readyCondition.notify_one();
                     } else {
@@ -268,10 +371,11 @@ SharedAnalysisScheduler::Client::~Client()
     static_cast<void>(cancelAndWait());
 }
 
-bool SharedAnalysisScheduler::Client::request()
+bool SharedAnalysisScheduler::Client::request(
+    const std::optional<std::chrono::nanoseconds> relativeDeadline)
 {
     if (const auto scheduler = scheduler_.lock())
-        return scheduler->request(state_);
+        return scheduler->request(state_, relativeDeadline);
 
     return false;
 }
@@ -311,6 +415,15 @@ SharedAnalysisScheduler::Counters SharedAnalysisScheduler::Client::counters() co
         state_->submitted.load(std::memory_order_relaxed),
         state_->executed.load(std::memory_order_relaxed),
         state_->cancelled.load(std::memory_order_relaxed),
+        state_->queueWaitSamples.load(std::memory_order_relaxed),
+        state_->lastQueueWaitNanoseconds.load(std::memory_order_relaxed),
+        state_->maximumQueueWaitNanoseconds.load(std::memory_order_relaxed),
+        state_->queueWaitDeadlineMisses.load(std::memory_order_relaxed),
+        state_->jobTurnaroundSamples.load(std::memory_order_relaxed),
+        state_->lastJobTurnaroundNanoseconds.load(std::memory_order_relaxed),
+        state_->maximumJobTurnaroundNanoseconds.load(std::memory_order_relaxed),
+        state_->jobDeadlineMisses.load(std::memory_order_relaxed),
+        state_->timingUnavailable.load(std::memory_order_relaxed),
     };
 }
 
@@ -362,7 +475,8 @@ std::size_t SharedAnalysisScheduler::workerCount() const noexcept
     return impl_->configuredWorkerCount;
 }
 
-bool SharedAnalysisScheduler::request(const std::shared_ptr<Client::State>& state)
+bool SharedAnalysisScheduler::request(const std::shared_ptr<Client::State>& state,
+    const std::optional<std::chrono::nanoseconds> relativeDeadline)
 {
     std::lock_guard lock(impl_->mutex);
 
@@ -373,6 +487,7 @@ bool SharedAnalysisScheduler::request(const std::shared_ptr<Client::State>& stat
     }
 
     const auto requestGeneration = state->currentGeneration.load(std::memory_order_acquire);
+    const auto requestTiming = makeRequestTiming(relativeDeadline);
     state->submitted.fetch_add(1, std::memory_order_relaxed);
 
     if (state->running) {
@@ -381,17 +496,20 @@ bool SharedAnalysisScheduler::request(const std::shared_ptr<Client::State>& stat
 
         state->followUpRequested = true;
         state->followUpGeneration = requestGeneration;
+        state->followUpTiming = requestTiming;
         return true;
     }
 
     if (state->queued) {
         state->cancelled.fetch_add(1, std::memory_order_relaxed);
         state->queuedGeneration = requestGeneration;
+        state->queuedTiming = requestTiming;
         return true;
     }
 
     state->queued = true;
     state->queuedGeneration = requestGeneration;
+    state->queuedTiming = requestTiming;
     impl_->readyQueue.emplace_back(state);
     impl_->readyCondition.notify_one();
     return true;
