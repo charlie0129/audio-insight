@@ -11,6 +11,9 @@ namespace audio_insight {
 namespace {
 [[nodiscard]] bool sampleRatesDiffer(const double left, const double right) noexcept
 {
+    if (!std::isfinite(left) || !std::isfinite(right))
+        return true;
+
     const auto scale = std::max({ 1.0, std::abs(left), std::abs(right) });
     return std::abs(left - right) > std::numeric_limits<double>::epsilon() * scale * 4.0;
 }
@@ -41,10 +44,15 @@ StereoMeterAccumulator::PublishResult StereoMeterAccumulator::publishBlock(const
 
     const auto reading = measureEndpoint(left, right, frameCount, sampleRate, generation,
         result.sequence, capturedFrameCursor_, channelCount, followsDiscontinuity);
+    const auto hasCorrelationEndpoint = reading.valid && reading.channelCount == 2;
+    if (hasCorrelationEndpoint)
+        correlationProcessedSamples_.fetch_add(frameCount, std::memory_order_relaxed);
 
     if (publishToFreeSlot(reading)) {
         result.published = true;
         publishedBlocks_.fetch_add(1, std::memory_order_relaxed);
+        if (hasCorrelationEndpoint)
+            correlationPublishedEndpoints_.fetch_add(1, std::memory_order_relaxed);
         updateReadyHighWaterMark();
         return result;
     }
@@ -54,6 +62,8 @@ StereoMeterAccumulator::PublishResult StereoMeterAccumulator::publishBlock(const
         result.coalesced = true;
         publishedBlocks_.fetch_add(1, std::memory_order_relaxed);
         coalescedBlocks_.fetch_add(1, std::memory_order_relaxed);
+        if (hasCorrelationEndpoint)
+            correlationPublishedEndpoints_.fetch_add(1, std::memory_order_relaxed);
         return result;
     }
 
@@ -62,6 +72,8 @@ StereoMeterAccumulator::PublishResult StereoMeterAccumulator::publishBlock(const
     if (publishToFreeSlot(reading)) {
         result.published = true;
         publishedBlocks_.fetch_add(1, std::memory_order_relaxed);
+        if (hasCorrelationEndpoint)
+            correlationPublishedEndpoints_.fetch_add(1, std::memory_order_relaxed);
         updateReadyHighWaterMark();
         return result;
     }
@@ -75,6 +87,7 @@ bool StereoMeterAccumulator::consumeLatest(StereoMeterReading& destination) noex
 {
     std::array<StereoMeterReading, slotCount * 2> acquired { };
     std::size_t acquiredCount = 0;
+    std::uint64_t acquiredCorrelationEndpoints = 0;
 
     // Repeat a fixed number of complete scans. This catches slots published into
     // an index already visited during the first scan without ever waiting.
@@ -87,12 +100,17 @@ bool StereoMeterAccumulator::consumeLatest(StereoMeterReading& destination) noex
             }
 
             acquired[acquiredCount++] = slot.reading;
+            if (slot.reading.valid && slot.reading.channelCount == 2)
+                ++acquiredCorrelationEndpoints;
             slot.state.store(SlotState::free, std::memory_order_release);
         }
     }
 
     if (acquiredCount == 0)
         return false;
+
+    correlationConsumedEndpoints_.fetch_add(
+        acquiredCorrelationEndpoints, std::memory_order_relaxed);
 
     const auto acquiredEnd = acquired.begin() + static_cast<std::ptrdiff_t>(acquiredCount);
     std::sort(acquired.begin(), acquiredEnd,
@@ -156,6 +174,9 @@ bool StereoMeterAccumulator::consumeInto(VisualizationFrame& destination) noexce
     destination.rmsDecibels = reading.rmsDecibels;
     destination.heldPeakDecibels = reading.heldPeakDecibels;
     destination.over = reading.over;
+    destination.stereoCorrelation = reading.correlation;
+    destination.stereoCorrelationValid = reading.correlationValid;
+    destination.stereoMono = reading.valid && reading.channelCount == 1;
     destination.channelCount = reading.channelCount;
     destination.sampleRate = reading.sampleRate;
     destination.meterSequence = reading.lastSequence;
@@ -200,6 +221,17 @@ StereoMeterAccumulator::Telemetry StereoMeterAccumulator::telemetry() const noex
     return result;
 }
 
+StereoMeterAccumulator::CorrelationTelemetry
+StereoMeterAccumulator::correlationTelemetry() const noexcept
+{
+    return {
+        correlationProcessedSamples_.load(std::memory_order_relaxed),
+        correlationPublishedEndpoints_.load(std::memory_order_relaxed),
+        correlationConsumedEndpoints_.load(std::memory_order_relaxed),
+        correlationStateResets_.load(std::memory_order_relaxed),
+    };
+}
+
 void StereoMeterAccumulator::discardPending() noexcept
 {
     for (auto& slot : slots_) {
@@ -228,6 +260,8 @@ StereoMeterReading StereoMeterAccumulator::measureEndpoint(const float* const le
     const auto formatChanged = previous.valid
         && (previous.generation != generation || previous.channelCount != channelCount
             || sampleRatesDiffer(previous.sampleRate, sampleRate));
+    auto correlationWasReset
+        = previous.valid && previous.channelCount == 2 && (formatChanged || followsDiscontinuity);
 
     const auto requestedUserReset = requestedUserResetEpoch_.load(std::memory_order_acquire);
     if (requestedUserReset != appliedUserResetEpoch_) {
@@ -239,19 +273,25 @@ StereoMeterReading StereoMeterAccumulator::measureEndpoint(const float* const le
     if (requestedLiveClear != appliedLiveClearEpoch_) {
         ballistics_.clearLiveMeasurements();
         appliedLiveClearEpoch_ = requestedLiveClear;
+        correlationWasReset = correlationWasReset || (previous.valid && previous.channelCount == 2);
     }
 
     const auto endpoint = ballistics_.processBlock(
         left, right, frameCount, sampleRate, generation, channelCount, followsDiscontinuity);
+    if (correlationWasReset)
+        correlationStateResets_.fetch_add(1, std::memory_order_relaxed);
 
     StereoMeterReading reading;
     reading.peakLinear = endpoint.liveSamplePeakLinear;
     reading.rmsLinear = endpoint.rmsLinear;
     reading.heldPeakLinear = endpoint.heldSamplePeakLinear;
+    reading.rmsMeanSquare = endpoint.rmsMeanSquare;
     reading.peakDecibels = endpoint.liveSamplePeakDecibels;
     reading.rmsDecibels = endpoint.rmsDecibels;
     reading.heldPeakDecibels = endpoint.heldSamplePeakDecibels;
     reading.over = endpoint.over;
+    reading.crossMeanProduct = endpoint.crossMeanProduct;
+    reading.correlation = endpoint.correlation;
     reading.generation = generation;
     reading.firstSequence = sequence;
     reading.lastSequence = sequence;
@@ -262,8 +302,10 @@ StereoMeterReading StereoMeterAccumulator::measureEndpoint(const float* const le
     reading.appliedLiveClearEpoch = appliedLiveClearEpoch_;
     reading.channelCount = endpoint.channelCount;
     reading.sampleRate = endpoint.sampleRate;
+    reading.rawCaptureDiscontinuity = followsDiscontinuity;
     reading.followsDiscontinuity = followsDiscontinuity || formatChanged;
     reading.valid = endpoint.valid;
+    reading.correlationValid = endpoint.correlationValid;
     return reading;
 }
 
@@ -273,8 +315,16 @@ void StereoMeterAccumulator::prependRepresentedMetadata(
     newer.firstSequence = older.firstSequence;
     newer.representedBlocks = saturatingAdd(older.representedBlocks, newer.representedBlocks);
     newer.representedFrames = saturatingAdd(older.representedFrames, newer.representedFrames);
+    newer.rawCaptureDiscontinuity = newer.rawCaptureDiscontinuity || older.rawCaptureDiscontinuity;
     newer.followsDiscontinuity = newer.followsDiscontinuity || older.followsDiscontinuity;
 }
+
+#if defined(JUCE_UNIT_TESTS) && JUCE_UNIT_TESTS
+void StereoMeterAccumulator::skipNextEndpointSequenceForTesting() noexcept
+{
+    ++nextSequence_;
+}
+#endif
 
 bool StereoMeterAccumulator::formatsMatch(
     const StereoMeterReading& left, const StereoMeterReading& right) noexcept

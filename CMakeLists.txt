@@ -201,6 +201,8 @@ target_sources(AudioInsight
         src/analysis/PeakRmsBallistics.h
         src/analysis/SharedAnalysisScheduler.cpp
         src/analysis/SharedAnalysisScheduler.h
+        src/analysis/StereoFieldAnalyzer.cpp
+        src/analysis/StereoFieldAnalyzer.h
         src/analysis/StereoMeterAccumulator.cpp
         src/analysis/StereoMeterAccumulator.h
         src/analysis/StereoSampleCapture.cpp
@@ -277,6 +279,8 @@ source_group(TREE "${CMAKE_CURRENT_SOURCE_DIR}" FILES
     src/analysis/PeakRmsBallistics.h
     src/analysis/SharedAnalysisScheduler.cpp
     src/analysis/SharedAnalysisScheduler.h
+    src/analysis/StereoFieldAnalyzer.cpp
+    src/analysis/StereoFieldAnalyzer.h
     src/analysis/StereoMeterAccumulator.cpp
     src/analysis/StereoMeterAccumulator.h
     src/analysis/StereoSampleCapture.cpp
@@ -336,6 +340,8 @@ if(BUILD_TESTING)
             src/analysis/PeakRmsBallistics.h
             src/analysis/SharedAnalysisScheduler.cpp
             src/analysis/SharedAnalysisScheduler.h
+            src/analysis/StereoFieldAnalyzer.cpp
+            src/analysis/StereoFieldAnalyzer.h
             src/analysis/StereoMeterAccumulator.cpp
             src/analysis/StereoMeterAccumulator.h
             src/analysis/StereoSampleCapture.cpp
@@ -388,6 +394,7 @@ if(BUILD_TESTING)
             tests/PresentedFrameHistoryTests.cpp
             tests/SharedAnalysisSchedulerTests.cpp
             tests/SpectrogramAnalysisTests.cpp
+            tests/StereoFieldAnalyzerTests.cpp
             tests/TestMain.cpp
     )
 
@@ -442,6 +449,8 @@ if(BUILD_TESTING)
         src/analysis/PeakRmsBallistics.h
         src/analysis/SharedAnalysisScheduler.cpp
         src/analysis/SharedAnalysisScheduler.h
+        src/analysis/StereoFieldAnalyzer.cpp
+        src/analysis/StereoFieldAnalyzer.h
         src/analysis/StereoMeterAccumulator.cpp
         src/analysis/StereoMeterAccumulator.h
         src/analysis/StereoSampleCapture.cpp
@@ -494,6 +503,7 @@ if(BUILD_TESTING)
         tests/PresentedFrameHistoryTests.cpp
         tests/SharedAnalysisSchedulerTests.cpp
         tests/SpectrogramAnalysisTests.cpp
+        tests/StereoFieldAnalyzerTests.cpp
         tests/TestMain.cpp
     )
 endif()

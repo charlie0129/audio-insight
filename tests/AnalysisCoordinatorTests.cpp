@@ -166,6 +166,13 @@ public:
             expectWithinAbsoluteError(frame.heldPeakDecibels[0], -6.0206F, 0.02F);
             expectWithinAbsoluteError(frame.heldPeakDecibels[1], -12.0412F, 0.02F);
             expect(!frame.over[0] && !frame.over[1]);
+            expect(frame.stereoFieldValid);
+            expect(!frame.stereoMono);
+            expect(frame.stereoFieldPointCount > 0);
+            expect(frame.stereoFieldPointCount <= maximumStereoFieldPointCount);
+            expect(frame.stereoSequence != 0);
+            expect(frame.stereoCorrelationValid);
+            expectWithinAbsoluteError(frame.stereoCorrelation, 1.0F, 0.0001F);
 
             const auto activeTelemetry = coordinator.telemetry();
             expect(activeTelemetry.capture.attemptedChunks == 2);
@@ -173,6 +180,18 @@ public:
             expect(activeTelemetry.jobsCompleted >= 1);
             expect(activeTelemetry.spectrumCapturedFrameEnd == fftSize);
             expect(activeTelemetry.meterCapturedFrameEnd == fftSize);
+            expect(activeTelemetry.stereoCapturedFrameEnd == fftSize);
+            expect(activeTelemetry.stereoFieldProcessedChunks == 2);
+            expect(activeTelemetry.stereoFieldProcessedFrames == fftSize);
+            expect(activeTelemetry.stereoFieldSelectedPoints == frame.stereoFieldPointCount);
+            expect(activeTelemetry.stereoCorrelationProcessedSamples == fftSize);
+            expect(activeTelemetry.stereoCorrelationPublishedEndpoints == 2);
+            expect(activeTelemetry.stereoCorrelationConsumedEndpoints >= 1);
+            expect(activeTelemetry.stereoSequence == frame.stereoSequence);
+            expect(activeTelemetry.stereoFieldPointCount == frame.stereoFieldPointCount);
+            expect(activeTelemetry.stereoFieldValid);
+            expect(activeTelemetry.stereoCorrelationValid);
+            expect(!activeTelemetry.stereoMono);
             expect(activeTelemetry.latestCaptureRevision == 1);
             expect(activeTelemetry.lastAnalyzedCaptureRevision == 1);
 
@@ -236,6 +255,12 @@ public:
                 expect(invalidated.spectrumBinCount == (replacement.fftSize / 2) + 1);
                 expect(invalidated.meterValid);
                 expect(invalidated.meterSequence == beforeChange.meterSequence);
+                expect(invalidated.stereoSequence == beforeChange.stereoSequence);
+                expect(invalidated.stereoFieldValid == beforeChange.stereoFieldValid);
+                expect(invalidated.stereoFieldPointCount == beforeChange.stereoFieldPointCount);
+                expect(invalidated.stereoCorrelationValid == beforeChange.stereoCorrelationValid);
+                expectWithinAbsoluteError(
+                    invalidated.stereoCorrelation, beforeChange.stereoCorrelation, 0.0001F);
                 expect(invalidated.capturedFrameEnd == beforeChange.capturedFrameEnd);
                 for (std::size_t channel = 0; channel < 2; ++channel) {
                     expectWithinAbsoluteError(invalidated.peakDecibels[channel],
@@ -399,6 +424,46 @@ public:
             expect(invalidated.spectrumSequence > valid.spectrumSequence,
                 "Capture-gap invalidation reused the preceding valid Spectrum sequence");
             expect(coordinator.telemetry().capture.reclaimedReadyChunks > 0);
+        }
+
+        beginTest("A meter-only endpoint gap preserves continuous Stereo field history");
+        {
+            AnalysisCoordinator coordinator;
+            coordinator.setVisualizationActive(true);
+
+            std::array<float, 192> left { };
+            std::array<float, 192> right { };
+            left.fill(0.5F);
+            right.fill(-0.25F);
+            coordinator.captureAudioBlock(left.data(), right.data(), left.size(), 48'000.0);
+
+            VisualizationFrame first;
+            expect(waitForFrame(coordinator, first, [expectedEnd = left.size()](const auto& frame) {
+                return frame.stereoFieldValid && frame.meterValid
+                    && frame.stereoCapturedFrameEnd == expectedEnd;
+            }));
+
+            const auto telemetryBeforeGap = coordinator.telemetry();
+            coordinator.skipNextMeterEndpointSequenceForTesting();
+            coordinator.captureAudioBlock(left.data(), right.data(), left.size(), 48'000.0);
+
+            VisualizationFrame second;
+            expect(waitForFrame(coordinator, second,
+                [expectedEnd = left.size() * 2, firstSequence = first.stereoSequence](
+                    const auto& frame) {
+                    return frame.stereoFieldValid && frame.meterValid
+                        && frame.stereoCapturedFrameEnd == expectedEnd
+                        && frame.stereoSequence > firstSequence;
+                }));
+
+            const auto telemetryAfterGap = coordinator.telemetry();
+            expect(second.stereoFieldPointCount > first.stereoFieldPointCount);
+            expect(telemetryAfterGap.stereoFieldHistoryResets
+                == telemetryBeforeGap.stereoFieldHistoryResets);
+            expect(telemetryAfterGap.capture.consumerDiscontinuities
+                == telemetryBeforeGap.capture.consumerDiscontinuities);
+            expect(telemetryAfterGap.meters.consumerDiscontinuities
+                > telemetryBeforeGap.meters.consumerDiscontinuities);
         }
 
         beginTest("A 15 Hz FFT request rate still services meters at 60 Hz");
@@ -595,6 +660,12 @@ public:
             expectWithinAbsoluteError(frame.peakDecibels[0], -6.0206F, 0.02F);
             expect(isDisplayFloor(frame.peakDecibels[1]));
             expect(isDisplayFloor(frame.rmsDecibels[1]));
+            expect(frame.stereoFieldValid);
+            expect(frame.stereoMono);
+            expect(frame.stereoFieldPointCount > 0);
+            expect(!frame.stereoCorrelationValid);
+            for (std::size_t point = 0; point < frame.stereoFieldPointCount; ++point)
+                expectWithinAbsoluteError(frame.stereoFieldPoints[point].horizontal, 0.0F, 1.0e-7F);
         }
 
         beginTest("Sample-rate changes start a clean capture generation");
@@ -617,7 +688,8 @@ public:
             expect(waitForFrame(
                 coordinator, restarted, [generation = original.generation](const auto& candidate) {
                     return candidate.generation > generation && !candidate.spectrumValid
-                        && !candidate.meterValid;
+                        && !candidate.meterValid && !candidate.stereoFieldValid
+                        && !candidate.stereoCorrelationValid;
                 }));
 
             constexpr std::array<float, 128> shortSignal { };
@@ -708,6 +780,9 @@ public:
             expect(clearedFrame.generation == signalFrame.generation);
             expect(clearedFrame.spectrumSequence > signalFrame.spectrumSequence);
             expect(clearedFrame.meterSequence > signalFrame.meterSequence);
+            expect(clearedFrame.stereoSequence > signalFrame.stereoSequence);
+            expect(!clearedFrame.stereoFieldValid);
+            expect(!clearedFrame.stereoCorrelationValid);
             expectWithinAbsoluteError(
                 clearedFrame.heldPeakDecibels[0], signalFrame.heldPeakDecibels[0], 0.0001F);
             expect(signalFrame.over[0] && signalFrame.over[1]);
@@ -794,6 +869,8 @@ public:
             expect(isDisplayFloor(reopenedFrame.heldPeakDecibels[1]));
             expect(!reopenedFrame.over[0] && !reopenedFrame.over[1]);
             expect(!reopenedFrame.meterValid);
+            expect(!reopenedFrame.stereoFieldValid);
+            expect(!reopenedFrame.stereoCorrelationValid);
         }
 
         beginTest("Peak/RMS user reset clears holds and OVER without clearing live values");
@@ -806,8 +883,10 @@ public:
             coordinator.captureAudioBlock(signal.data(), signal.data(), signal.size(), 48'000.0);
 
             VisualizationFrame beforeReset;
-            expect(waitForFrame(coordinator, beforeReset,
-                [](const auto& candidate) { return candidate.meterValid && candidate.over[0]; }));
+            expect(waitForFrame(coordinator, beforeReset, [](const auto& candidate) {
+                return candidate.meterValid && candidate.over[0]
+                    && candidate.stereoCorrelationValid;
+            }));
 
             coordinator.resetPeakRms();
             coordinator.resetPeakRms();
@@ -821,6 +900,10 @@ public:
                 afterReset.peakDecibels[0], beforeReset.peakDecibels[0], 0.0001F);
             expectWithinAbsoluteError(
                 afterReset.rmsDecibels[0], beforeReset.rmsDecibels[0], 0.0001F);
+            expect(afterReset.stereoSequence == beforeReset.stereoSequence);
+            expect(afterReset.stereoCorrelationValid);
+            expectWithinAbsoluteError(
+                afterReset.stereoCorrelation, beforeReset.stereoCorrelation, 0.0001F);
             expect(coordinator.telemetry().peakRmsUserResets == 2);
         }
 
@@ -854,6 +937,7 @@ public:
             VisualizationFrame beforeGap;
             expect(waitForFrame(coordinator, beforeGap,
                 [](const auto& candidate) { return candidate.meterValid && candidate.over[0]; }));
+            const auto historyResetsBeforeGap = coordinator.telemetry().stereoFieldHistoryResets;
 
             block.fill(0.1F);
             for (std::size_t index = 0; index < StereoSampleCapture::slotCount + 2; ++index)
@@ -866,7 +950,11 @@ public:
                 }));
             expect(!afterGap.over[0] && !afterGap.over[1]);
             expectWithinAbsoluteError(afterGap.heldPeakDecibels[0], -20.0F, 0.01F);
-            expect(coordinator.telemetry().capture.reclaimedReadyChunks > 0);
+            const auto afterGapTelemetry = coordinator.telemetry();
+            expect(afterGapTelemetry.capture.reclaimedReadyChunks > 0);
+            expect(afterGapTelemetry.stereoFieldHistoryResets > historyResetsBeforeGap);
+            expect(afterGap.stereoFieldValid);
+            expect(afterGap.stereoCapturedFrameEnd == afterGapTelemetry.stereoCapturedFrameEnd);
         }
 
         beginTest("A split host block resets Peak/RMS at the chunk that overflows");

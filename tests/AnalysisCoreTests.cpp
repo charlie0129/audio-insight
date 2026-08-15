@@ -168,6 +168,10 @@ public:
                 reading.rmsLinear[1], static_cast<float>(0.25 * rmsIntegration), 1.0e-6F);
             expectWithinAbsoluteError(reading.peakDecibels[0], -6.0206F, 1.0e-3F);
             expectWithinAbsoluteError(reading.heldPeakDecibels[0], -6.0206F, 1.0e-3F);
+            expect(reading.correlationValid);
+            expectWithinAbsoluteError(reading.correlation, 1.0F, 1.0e-6F);
+            expect(reading.rmsMeanSquare[0] > reading.rmsMeanSquare[1]);
+            expect(reading.crossMeanProduct > 0.0);
             expect(reading.representedFrames == left.size());
             expect(reading.representedBlocks == 1);
             expect(reading.valid);
@@ -201,6 +205,13 @@ public:
             expectWithinAbsoluteError(
                 coalescedEndpoint.heldPeakLinear[0], sequentialEndpoint.heldPeakLinear[0], 1.0e-7F);
             expect(coalescedEndpoint.over == sequentialEndpoint.over);
+            expectWithinAbsoluteError(
+                coalescedEndpoint.rmsMeanSquare[0], sequentialEndpoint.rmsMeanSquare[0], 1.0e-14);
+            expectWithinAbsoluteError(
+                coalescedEndpoint.crossMeanProduct, sequentialEndpoint.crossMeanProduct, 1.0e-14);
+            expect(coalescedEndpoint.correlationValid == sequentialEndpoint.correlationValid);
+            expectWithinAbsoluteError(
+                coalescedEndpoint.correlation, sequentialEndpoint.correlation, 1.0e-7F);
             expect(coalescedEndpoint.representedBlocks == 10);
             expect(coalescedEndpoint.representedFrames == 1'000);
             expect(!coalescedEndpoint.followsDiscontinuity);
@@ -315,6 +326,7 @@ public:
             expectWithinAbsoluteError(reading.peakLinear[1], 0.0F, 1.0e-6F);
             expectWithinAbsoluteError(reading.rmsLinear[1], 0.0F, 1.0e-6F);
             expect(!reading.over[1]);
+            expect(!reading.correlationValid);
         }
 
         beginTest("A newer invalid endpoint supersedes queued valid state");
@@ -332,6 +344,70 @@ public:
             expect(reading.channelCount == 0);
             expect(reading.lastSequence == 2);
             expect(reading.followsDiscontinuity);
+        }
+
+        beginTest("Meter-only sequence loss stays distinct from a raw-capture discontinuity");
+        {
+            StereoMeterAccumulator meters;
+            constexpr std::array<float, 4> samples { 0.25F, -0.25F, 0.5F, -0.5F };
+            expect(
+                meters.publishBlock(samples.data(), samples.data(), samples.size(), 48'000.0, 1, 2)
+                    .published);
+
+            StereoMeterReading reading;
+            expect(meters.consumeLatest(reading));
+            expect(!reading.followsDiscontinuity);
+            expect(!reading.rawCaptureDiscontinuity);
+
+            meters.skipNextEndpointSequenceForTesting();
+            expect(
+                meters.publishBlock(samples.data(), samples.data(), samples.size(), 48'000.0, 1, 2)
+                    .published);
+            expect(meters.consumeLatest(reading));
+            expect(reading.followsDiscontinuity);
+            expect(!reading.rawCaptureDiscontinuity);
+
+            expect(meters
+                    .publishBlock(
+                        samples.data(), samples.data(), samples.size(), 48'000.0, 1, 2, true)
+                    .published);
+            expect(meters.consumeLatest(reading));
+            expect(reading.followsDiscontinuity);
+            expect(reading.rawCaptureDiscontinuity);
+        }
+
+        beginTest("Correlation telemetry separates all-sample input from endpoint handoff");
+        {
+            StereoMeterAccumulator meters;
+            constexpr std::array<float, 4> left { 0.25F, 0.5F, -0.25F, -0.5F };
+            constexpr std::array<float, 4> right { 0.125F, 0.25F, -0.125F, -0.25F };
+            expect(meters.publishBlock(left.data(), right.data(), left.size(), 48'000.0, 1, 2)
+                    .published);
+
+            auto telemetry = meters.correlationTelemetry();
+            expect(telemetry.processedSamples == left.size());
+            expect(telemetry.publishedEndpoints == 1);
+            expect(telemetry.consumedEndpoints == 0);
+            expect(telemetry.stateResets == 0);
+
+            StereoMeterReading reading;
+            expect(meters.consumeLatest(reading));
+            telemetry = meters.correlationTelemetry();
+            expect(telemetry.consumedEndpoints == 1);
+
+            expect(meters.publishBlock(left.data(), right.data(), left.size(), 48'000.0, 1, 2, true)
+                    .published);
+            expect(meters.correlationTelemetry().stateResets == 1);
+
+            expect(meters.requestUserReset() == 1);
+            expect(meters.publishBlock(left.data(), right.data(), left.size(), 48'000.0, 1, 2)
+                    .published);
+            expect(meters.correlationTelemetry().stateResets == 1);
+
+            expect(meters.requestLiveClear() == 1);
+            expect(meters.publishBlock(left.data(), right.data(), left.size(), 48'000.0, 1, 2)
+                    .published);
+            expect(meters.correlationTelemetry().stateResets == 2);
         }
     }
 };

@@ -5,6 +5,7 @@
 #include "SpectrogramColumnMapper.h"
 #include "SpectrogramColumnQueue.h"
 #include "SpectrumAnalyzer.h"
+#include "StereoFieldAnalyzer.h"
 #include <algorithm>
 #include <array>
 #include <atomic>
@@ -216,6 +217,11 @@ struct AnalysisCoordinator::State final : SharedAnalysisScheduler::JobClient,
         spectrum.reset(&workingFrame);
         observeSpectrumReset(captureGeneration);
         workingFrame.spectrumSequence = nextSpectrumSequence++;
+        stereoField.reset(&workingFrame);
+        workingFrame.stereoCorrelation = 0.0F;
+        workingFrame.stereoCorrelationValid = false;
+        workingFrame.stereoSequence = nextStereoSequence++;
+        mirrorStereoFrameState();
         spectrumCapturedFrameEnd.store(0, std::memory_order_relaxed);
         meterCapturedFrameEnd.store(0, std::memory_order_relaxed);
         hasPublishedAudioFrame.store(false, std::memory_order_relaxed);
@@ -313,6 +319,10 @@ struct AnalysisCoordinator::State final : SharedAnalysisScheduler::JobClient,
     {
         currentCaptureGeneration.store(0, std::memory_order_release);
         spectrum.reset(nullptr);
+        stereoField.reset(nullptr);
+        stereoFieldValid.store(false, std::memory_order_relaxed);
+        stereoCorrelationValid.store(false, std::memory_order_relaxed);
+        stereoMono.store(false, std::memory_order_relaxed);
         observeSpectrumReset(0, false);
         spectrogramCapturedFrameEnd.store(0, std::memory_order_relaxed);
         spectrogramRowCount.store(0, std::memory_order_relaxed);
@@ -466,10 +476,16 @@ struct AnalysisCoordinator::State final : SharedAnalysisScheduler::JobClient,
         workingFrame.over = reading.over;
         workingFrame.channelCount = reading.channelCount;
         workingFrame.meterValid = reading.valid;
+        workingFrame.stereoCorrelation = reading.correlation;
+        workingFrame.stereoCorrelationValid
+            = reading.valid && reading.channelCount == 2 && reading.correlationValid;
+        workingFrame.stereoMono = reading.valid && reading.channelCount == 1;
 
         if (reading.appliedLiveClearEpoch < requiredLiveClearEpoch) {
             workingFrame.peakDecibels.fill(minimumDisplayDecibels);
             workingFrame.rmsDecibels.fill(minimumDisplayDecibels);
+            workingFrame.stereoCorrelation = 0.0F;
+            workingFrame.stereoCorrelationValid = false;
         }
 
         if (reading.appliedUserResetEpoch < requiredUserResetEpoch) {
@@ -478,6 +494,15 @@ struct AnalysisCoordinator::State final : SharedAnalysisScheduler::JobClient,
         }
 
         workingFrame.meterSequence = nextMeterSequence++;
+    }
+
+    void mirrorStereoFrameState() noexcept
+    {
+        stereoSequence.store(workingFrame.stereoSequence, std::memory_order_relaxed);
+        stereoFieldValid.store(workingFrame.stereoFieldValid, std::memory_order_relaxed);
+        stereoCorrelationValid.store(
+            workingFrame.stereoCorrelationValid, std::memory_order_relaxed);
+        stereoMono.store(workingFrame.stereoMono, std::memory_order_relaxed);
     }
 
     void execute(const SharedAnalysisScheduler::JobContext& context) override
@@ -515,6 +540,7 @@ struct AnalysisCoordinator::State final : SharedAnalysisScheduler::JobClient,
         }
 
         bool frameChanged = false;
+        bool stereoStateChanged = false;
         bool consumedValidAudio = false;
         StereoSampleCapture::ReadHandle handle;
         std::size_t retainedFrames = 0;
@@ -544,6 +570,9 @@ struct AnalysisCoordinator::State final : SharedAnalysisScheduler::JobClient,
                 ignoredGenerationChunks.fetch_add(1, std::memory_order_relaxed);
                 continue;
             }
+
+            static_cast<void>(stereoField.process(chunk));
+            stereoStateChanged = true;
 
             ++retainedChunkCount;
             if (retainedChunkCount == 2) {
@@ -628,6 +657,13 @@ struct AnalysisCoordinator::State final : SharedAnalysisScheduler::JobClient,
         if (discardedFrames > 0)
             backlogDiscardedFrames.fetch_add(discardedFrames, std::memory_order_relaxed);
 
+        if (stereoStateChanged) {
+            static_cast<void>(stereoField.writeFrame(workingFrame));
+            newestCapturedFrameEnd
+                = std::max(newestCapturedFrameEnd, workingFrame.stereoCapturedFrameEnd);
+            frameChanged = true;
+        }
+
         if (context.stopRequested()) {
             finish(true);
             return;
@@ -663,12 +699,18 @@ struct AnalysisCoordinator::State final : SharedAnalysisScheduler::JobClient,
 
         StereoMeterReading meterReading;
         if (meters.consumeLatest(meterReading) && meterReading.generation == captureGeneration) {
+            const auto meterGapIsNewerThanField = meterReading.rawCaptureDiscontinuity
+                && meterReading.capturedFrameEnd > workingFrame.stereoCapturedFrameEnd;
+            if (meterGapIsNewerThanField)
+                stereoField.reset(&workingFrame);
+
             applyPeakRmsReading(meterReading);
             newestCapturedFrameEnd
                 = std::max(newestCapturedFrameEnd, meterReading.capturedFrameEnd);
             workingFrame.sampleRate = meterReading.sampleRate;
             meterCapturedFrameEnd.store(meterReading.capturedFrameEnd, std::memory_order_relaxed);
             frameChanged = true;
+            stereoStateChanged = true;
             consumedValidAudio = meterReading.valid;
         }
 
@@ -709,11 +751,15 @@ struct AnalysisCoordinator::State final : SharedAnalysisScheduler::JobClient,
         if (shouldClearStaleFrame) {
             spectrum.reset(&workingFrame);
             observeSpectrumReset();
+            stereoField.reset(&workingFrame);
             requiredLiveClearEpoch = std::max(requiredLiveClearEpoch, meters.requestLiveClear());
             workingFrame.peakDecibels.fill(minimumDisplayDecibels);
             workingFrame.rmsDecibels.fill(minimumDisplayDecibels);
+            workingFrame.stereoCorrelation = 0.0F;
+            workingFrame.stereoCorrelationValid = false;
             workingFrame.meterSequence = nextMeterSequence++;
             workingFrame.spectrumSequence = nextSpectrumSequence++;
+            stereoStateChanged = true;
             hasPublishedAudioFrame.store(false, std::memory_order_release);
             staleFramesPublished.fetch_add(1, std::memory_order_relaxed);
             frameChanged = true;
@@ -722,6 +768,10 @@ struct AnalysisCoordinator::State final : SharedAnalysisScheduler::JobClient,
         }
 
         if (frameChanged) {
+            if (stereoStateChanged) {
+                workingFrame.stereoSequence = nextStereoSequence++;
+                mirrorStereoFrameState();
+            }
             workingFrame.generation = captureGeneration;
             workingFrame.capturedFrameEnd = newestCapturedFrameEnd;
             workingFrame.droppedChunks = samples.telemetry().lostChunks();
@@ -755,6 +805,19 @@ struct AnalysisCoordinator::State final : SharedAnalysisScheduler::JobClient,
         result.backlogDiscardedFrames = backlogDiscardedFrames.load(std::memory_order_relaxed);
         result.spectrumCapturedFrameEnd = spectrumCapturedFrameEnd.load(std::memory_order_relaxed);
         result.meterCapturedFrameEnd = meterCapturedFrameEnd.load(std::memory_order_relaxed);
+        const auto stereoStatistics = stereoField.statistics();
+        const auto correlationStatistics = meters.correlationTelemetry();
+        result.stereoFieldProcessedChunks = stereoStatistics.processedChunks;
+        result.stereoFieldProcessedFrames = stereoStatistics.processedFrames;
+        result.stereoFieldSelectedPoints = stereoStatistics.selectedPoints;
+        result.stereoFieldHistoryResets = stereoStatistics.historyResets;
+        result.stereoFieldInvalidChunks = stereoStatistics.invalidChunks;
+        result.stereoCorrelationProcessedSamples = correlationStatistics.processedSamples;
+        result.stereoCorrelationPublishedEndpoints = correlationStatistics.publishedEndpoints;
+        result.stereoCorrelationConsumedEndpoints = correlationStatistics.consumedEndpoints;
+        result.stereoCorrelationStateResets = correlationStatistics.stateResets;
+        result.stereoCapturedFrameEnd = stereoStatistics.capturedFrameEnd;
+        result.stereoSequence = stereoSequence.load(std::memory_order_relaxed);
         result.latestCaptureRevision = captureRevision.load(std::memory_order_relaxed);
         result.lastAnalyzedCaptureRevision
             = lastAnalyzedCaptureRevision.load(std::memory_order_relaxed);
@@ -790,11 +853,17 @@ struct AnalysisCoordinator::State final : SharedAnalysisScheduler::JobClient,
         result.spectrogramRowCount = spectrogramRowCount.load(std::memory_order_relaxed);
         result.spectrogramQueueReadyHighWaterMark = spectrogramQueueTelemetry.readyHighWaterMark;
         result.spectrogramQueueReadyColumns = spectrogramQueueTelemetry.readyColumns;
+        result.stereoFieldPointCount = stereoStatistics.pointCount;
+        result.stereoPointStrideFrames = stereoStatistics.pointStrideFrames;
+        result.stereoFieldValid = stereoFieldValid.load(std::memory_order_relaxed);
+        result.stereoCorrelationValid = stereoCorrelationValid.load(std::memory_order_relaxed);
+        result.stereoMono = stereoMono.load(std::memory_order_relaxed);
         return result;
     }
 
     StereoSampleCapture samples;
     StereoMeterAccumulator meters;
+    StereoFieldAnalyzer stereoField;
     SpectrumAnalyzer spectrum;
     SpectrogramColumnMapper spectrogramMapper;
     mutable SpectrogramColumnQueue spectrogramColumns;
@@ -807,6 +876,7 @@ struct AnalysisCoordinator::State final : SharedAnalysisScheduler::JobClient,
     std::uint64_t nextCoalescedInputSequence = 1;
     std::uint64_t nextSpectrumSequence = 1;
     std::uint64_t nextMeterSequence = 1;
+    std::uint64_t nextStereoSequence = 1;
     std::uint64_t nextSpectrogramColumnSequence = 1;
     std::uint64_t observedSpectrumResetEpoch = 0;
     std::uint64_t requiredUserResetEpoch = 0;
@@ -834,6 +904,7 @@ struct AnalysisCoordinator::State final : SharedAnalysisScheduler::JobClient,
     std::atomic<std::uint64_t> backlogDiscardedFrames { 0 };
     std::atomic<std::uint64_t> spectrumCapturedFrameEnd { 0 };
     std::atomic<std::uint64_t> meterCapturedFrameEnd { 0 };
+    std::atomic<std::uint64_t> stereoSequence { 0 };
     std::atomic<std::uint64_t> emptyAnalysisRequestsAvoided { 0 };
     std::atomic<std::uint64_t> staleFramesPublished { 0 };
     std::atomic<std::uint64_t> peakRmsUserResets { 0 };
@@ -852,6 +923,9 @@ struct AnalysisCoordinator::State final : SharedAnalysisScheduler::JobClient,
         FftWindow::periodicHann) };
     std::atomic<std::uint32_t> requestedFftSliceRateHz { 60 };
     std::atomic<std::uint32_t> spectrogramRowCount { 0 };
+    std::atomic<bool> stereoFieldValid { false };
+    std::atomic<bool> stereoCorrelationValid { false };
+    std::atomic<bool> stereoMono { false };
 };
 
 AnalysisCoordinator::AnalysisCoordinator()
@@ -1215,6 +1289,11 @@ void AnalysisCoordinator::setLifecycleTestHook(
         lifecycleTestHook_ = hook;
     } catch (...) {
     }
+}
+
+void AnalysisCoordinator::skipNextMeterEndpointSequenceForTesting() noexcept
+{
+    state_->meters.skipNextEndpointSequenceForTesting();
 }
 #endif
 } // namespace audio_insight

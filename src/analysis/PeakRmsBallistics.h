@@ -14,16 +14,20 @@ struct PeakRmsBallisticsFrame final {
     std::array<float, 2> liveSamplePeakLinear { };
     std::array<float, 2> rmsLinear { };
     std::array<float, 2> heldSamplePeakLinear { };
+    std::array<double, 2> rmsMeanSquare { };
     std::array<float, 2> liveSamplePeakDecibels { minimumDisplayDecibels, minimumDisplayDecibels };
     std::array<float, 2> rmsDecibels { minimumDisplayDecibels, minimumDisplayDecibels };
     std::array<float, 2> heldSamplePeakDecibels { minimumDisplayDecibels, minimumDisplayDecibels };
     std::array<bool, 2> over { false, false };
     std::array<bool, 2> channelValid { false, false };
+    double crossMeanProduct = 0.0;
+    float correlation = 0.0F;
 
     std::uint64_t generation = 0;
     std::uint32_t channelCount = 0;
     double sampleRate = 0.0;
     bool valid = false;
+    bool correlationValid = false;
 };
 
 /**
@@ -36,6 +40,9 @@ struct PeakRmsBallisticsFrame final {
 class PeakRmsBallistics final {
 public:
     static constexpr double rmsTimeConstantSeconds = 0.300;
+    // 10 ^ (-90 / 10): correlation is unavailable below this exponentially
+    // averaged per-channel power and valid at the boundary.
+    static constexpr double correlationSilenceThresholdMeanSquare = 1.0e-9;
     static constexpr double peakHoldSeconds = 2.0;
     static constexpr double peakReleaseDecibelsPerSecond = 20.0;
     static constexpr double holdDecayDecibelsPerSecond = 20.0;
@@ -80,7 +87,7 @@ private:
     [[nodiscard]] static float linearToDecibels(double value) noexcept;
     void configureFormat(
         double sampleRate, std::uint64_t generation, std::uint32_t channelCount) noexcept;
-    void processSample(ChannelState& state, float sample) const noexcept;
+    void processSample(ChannelState& state, double sample) const noexcept;
     void resetState() noexcept;
     void publish() noexcept;
 
@@ -94,6 +101,7 @@ private:
     double peakReleasePerSample_ = 0.0;
     double holdDecayPerSample_ = 0.0;
     double holdSamples_ = 0.0;
+    double crossMeanProduct_ = 0.0;
     bool initialized_ = false;
 };
 } // namespace audio_insight

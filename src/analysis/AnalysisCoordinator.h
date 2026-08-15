@@ -36,6 +36,17 @@ struct AnalysisTelemetry {
     std::uint64_t backlogDiscardedFrames = 0;
     std::uint64_t spectrumCapturedFrameEnd = 0;
     std::uint64_t meterCapturedFrameEnd = 0;
+    std::uint64_t stereoFieldProcessedChunks = 0;
+    std::uint64_t stereoFieldProcessedFrames = 0;
+    std::uint64_t stereoFieldSelectedPoints = 0;
+    std::uint64_t stereoFieldHistoryResets = 0;
+    std::uint64_t stereoFieldInvalidChunks = 0;
+    std::uint64_t stereoCorrelationProcessedSamples = 0;
+    std::uint64_t stereoCorrelationPublishedEndpoints = 0;
+    std::uint64_t stereoCorrelationConsumedEndpoints = 0;
+    std::uint64_t stereoCorrelationStateResets = 0;
+    std::uint64_t stereoCapturedFrameEnd = 0;
+    std::uint64_t stereoSequence = 0;
     std::uint64_t latestCaptureRevision = 0;
     std::uint64_t lastAnalyzedCaptureRevision = 0;
     std::uint64_t emptyAnalysisRequestsAvoided = 0;
@@ -62,6 +73,11 @@ struct AnalysisTelemetry {
     std::uint32_t spectrogramRowCount = 0;
     std::uint32_t spectrogramQueueReadyHighWaterMark = 0;
     std::uint32_t spectrogramQueueReadyColumns = 0;
+    std::uint32_t stereoFieldPointCount = 0;
+    std::uint32_t stereoPointStrideFrames = 0;
+    bool stereoFieldValid = false;
+    bool stereoCorrelationValid = false;
+    bool stereoMono = false;
 };
 
 /**
@@ -125,6 +141,9 @@ public:
 
     /** Installs a synchronous test seam invoked while the non-real-time gate is held. */
     void setLifecycleTestHook(void* context, LifecycleTestHook hook) noexcept;
+
+    /** Simulates one lost meter endpoint without disturbing the raw-sample capture sequence. */
+    void skipNextMeterEndpointSequenceForTesting() noexcept;
 #endif
 
 private:

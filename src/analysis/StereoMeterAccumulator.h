@@ -15,10 +15,13 @@ struct StereoMeterReading {
     std::array<float, 2> peakLinear { };
     std::array<float, 2> rmsLinear { };
     std::array<float, 2> heldPeakLinear { };
+    std::array<double, 2> rmsMeanSquare { };
     std::array<float, 2> peakDecibels { minimumDisplayDecibels, minimumDisplayDecibels };
     std::array<float, 2> rmsDecibels { minimumDisplayDecibels, minimumDisplayDecibels };
     std::array<float, 2> heldPeakDecibels { minimumDisplayDecibels, minimumDisplayDecibels };
     std::array<bool, 2> over { false, false };
+    double crossMeanProduct = 0.0;
+    float correlation = 0.0F;
 
     std::uint64_t generation = 0;
     std::uint64_t firstSequence = 0;
@@ -30,8 +33,10 @@ struct StereoMeterReading {
     std::uint64_t appliedLiveClearEpoch = 0;
     std::uint32_t channelCount = 0;
     double sampleRate = 0.0;
+    bool rawCaptureDiscontinuity = false;
     bool followsDiscontinuity = false;
     bool valid = false;
+    bool correlationValid = false;
 };
 
 /**
@@ -61,6 +66,13 @@ public:
         std::uint64_t consumerDiscontinuities = 0;
         std::uint32_t readyHighWaterMark = 0;
         std::uint32_t readySlots = 0;
+    };
+
+    struct CorrelationTelemetry {
+        std::uint64_t processedSamples = 0;
+        std::uint64_t publishedEndpoints = 0;
+        std::uint64_t consumedEndpoints = 0;
+        std::uint64_t stateResets = 0;
     };
 
     StereoMeterAccumulator() noexcept;
@@ -96,9 +108,15 @@ public:
     [[nodiscard]] std::uint64_t requestedLiveClearEpoch() const noexcept;
 
     [[nodiscard]] Telemetry telemetry() const noexcept;
+    [[nodiscard]] CorrelationTelemetry correlationTelemetry() const noexcept;
 
     /** Requires a quiescent producer and consumer. Epochs and sequences remain monotonic. */
     void discardPending() noexcept;
+
+#if defined(JUCE_UNIT_TESTS) && JUCE_UNIT_TESTS
+    /** Simulates one lost meter endpoint while the independent raw capture remains continuous. */
+    void skipNextEndpointSequenceForTesting() noexcept;
+#endif
 
 private:
     enum class SlotState : std::uint32_t { free, writing, ready, reading };
@@ -149,6 +167,10 @@ private:
     std::atomic<std::uint64_t> coalescedBlocks_ { 0 };
     std::atomic<std::uint64_t> droppedBlocks_ { 0 };
     std::atomic<std::uint64_t> consumerDiscontinuities_ { 0 };
+    std::atomic<std::uint64_t> correlationProcessedSamples_ { 0 };
+    std::atomic<std::uint64_t> correlationPublishedEndpoints_ { 0 };
+    std::atomic<std::uint64_t> correlationConsumedEndpoints_ { 0 };
+    std::atomic<std::uint64_t> correlationStateResets_ { 0 };
     std::atomic<std::uint32_t> readyHighWaterMark_ { 0 };
 };
 } // namespace audio_insight

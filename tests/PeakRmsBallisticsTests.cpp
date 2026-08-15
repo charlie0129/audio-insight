@@ -55,6 +55,62 @@ public:
             expectWithinAbsoluteError(frame.rmsDecibels[1], -3.0103F, 0.02F);
         }
 
+        beginTest("Correlation covers identical, inverted, orthogonal, and unequal channels");
+        {
+            const auto left = filledBlock<1'000>(0.75F);
+            const auto unequal = filledBlock<1'000>(0.25F);
+            const auto inverted = filledBlock<1'000>(-0.25F);
+
+            PeakRmsBallistics positive;
+            const auto positiveFrame = positive.processBlock(
+                left.data(), unequal.data(), left.size(), testSampleRate, 1, 2);
+            expect(positiveFrame.correlationValid);
+            expectWithinAbsoluteError(positiveFrame.correlation, 1.0F, 1.0e-6F);
+
+            PeakRmsBallistics negative;
+            const auto negativeFrame = negative.processBlock(
+                left.data(), inverted.data(), left.size(), testSampleRate, 1, 2);
+            expect(negativeFrame.correlationValid);
+            expectWithinAbsoluteError(negativeFrame.correlation, -1.0F, 1.0e-6F);
+
+            std::array<float, 1'000> orthogonalLeft { };
+            std::array<float, 1'000> orthogonalRight { };
+            for (std::size_t sample = 0; sample < orthogonalLeft.size(); ++sample) {
+                constexpr std::array<float, 4> leftCycle { 1.0F, 0.0F, -1.0F, 0.0F };
+                constexpr std::array<float, 4> rightCycle { 0.0F, 1.0F, 0.0F, -1.0F };
+                orthogonalLeft[sample] = leftCycle[sample % leftCycle.size()];
+                orthogonalRight[sample] = rightCycle[sample % rightCycle.size()];
+            }
+            PeakRmsBallistics orthogonal;
+            const auto orthogonalFrame = orthogonal.processBlock(orthogonalLeft.data(),
+                orthogonalRight.data(), orthogonalLeft.size(), testSampleRate, 1, 2);
+            expect(orthogonalFrame.correlationValid);
+            expectWithinAbsoluteError(orthogonalFrame.correlation, 0.0F, 1.0e-7F);
+        }
+
+        beginTest("Correlation is valid at the -90 dBFS power boundary and unavailable below it");
+        {
+            expectWithinAbsoluteError(
+                PeakRmsBallistics::correlationSilenceThresholdMeanSquare, 1.0e-9, 0.0);
+            const auto boundary = static_cast<float>(
+                std::sqrt(PeakRmsBallistics::correlationSilenceThresholdMeanSquare));
+            const auto below = std::nextafter(boundary, 0.0F);
+            expect(static_cast<double>(boundary) * boundary
+                >= PeakRmsBallistics::correlationSilenceThresholdMeanSquare);
+            expect(static_cast<double>(below) * below
+                < PeakRmsBallistics::correlationSilenceThresholdMeanSquare);
+
+            PeakRmsBallistics atBoundary;
+            const auto boundaryFrame
+                = atBoundary.processBlock(&boundary, &boundary, 1, 1.0e-6, 1, 2);
+            expect(boundaryFrame.correlationValid);
+            expectWithinAbsoluteError(boundaryFrame.correlation, 1.0F, 1.0e-6F);
+
+            PeakRmsBallistics belowBoundary;
+            const auto belowFrame = belowBoundary.processBlock(&below, &below, 1, 1.0e-6, 1, 2);
+            expect(!belowFrame.correlationValid);
+        }
+
         beginTest("Source order changes the endpoint of a non-stationary signal");
         {
             const auto high = filledBlock<100>(1.0F);
@@ -106,6 +162,10 @@ public:
             expectWithinAbsoluteError(whole.rmsLinear[0], split.rmsLinear[0], 1.0e-7F);
             expectWithinAbsoluteError(
                 whole.heldSamplePeakLinear[0], split.heldSamplePeakLinear[0], 1.0e-7F);
+            expectWithinAbsoluteError(whole.rmsMeanSquare[0], split.rmsMeanSquare[0], 1.0e-14);
+            expectWithinAbsoluteError(whole.crossMeanProduct, split.crossMeanProduct, 1.0e-14);
+            expect(whole.correlationValid == split.correlationValid);
+            expectWithinAbsoluteError(whole.correlation, split.correlation, 1.0e-7F);
 
             const auto tail = filledBlock<1'250>(0.0F);
             const auto wholeTail = oneBlock.processBlock(
@@ -172,6 +232,8 @@ public:
                 over.data(), over.data(), over.size(), testSampleRate, 1, 2);
             const auto liveBeforeReset = frame.liveSamplePeakLinear;
             const auto rmsBeforeReset = frame.rmsLinear;
+            const auto crossBeforeReset = frame.crossMeanProduct;
+            const auto correlationBeforeReset = frame.correlation;
 
             ballistics.userReset();
             frame = ballistics.current();
@@ -180,6 +242,9 @@ public:
             expectEquals(frame.heldSamplePeakDecibels[1], minimumDisplayDecibels);
             expectEquals(frame.liveSamplePeakLinear[0], liveBeforeReset[0]);
             expectEquals(frame.rmsLinear[0], rmsBeforeReset[0]);
+            expectEquals(frame.crossMeanProduct, crossBeforeReset);
+            expectEquals(frame.correlation, correlationBeforeReset);
+            expect(frame.correlationValid);
 
             constexpr std::array<float, 1> overAgain { 1.0F };
             frame = ballistics.processBlock(
@@ -191,6 +256,8 @@ public:
             frame = ballistics.current();
             expectEquals(frame.liveSamplePeakDecibels[0], minimumDisplayDecibels);
             expectEquals(frame.rmsDecibels[0], minimumDisplayDecibels);
+            expectEquals(frame.crossMeanProduct, 0.0);
+            expect(!frame.correlationValid);
             expectEquals(frame.heldSamplePeakLinear[0], heldBeforeClear[0]);
             expect(frame.over[0] && frame.over[1]);
         }
@@ -211,6 +278,7 @@ public:
             expectEquals(frame.rmsDecibels[1], minimumDisplayDecibels);
             expectEquals(frame.heldSamplePeakDecibels[1], minimumDisplayDecibels);
             expect(!frame.over[1]);
+            expect(!frame.correlationValid);
         }
 
         beginTest("Lifecycle, format, and discontinuity boundaries reset before current input");
@@ -236,6 +304,12 @@ public:
                 expectWithinAbsoluteError(frame.heldSamplePeakDecibels[0], -20.0F, 0.001F);
                 expectWithinAbsoluteError(
                     frame.rmsLinear[0], static_cast<float>(expectedRms), 1.0e-6F);
+                if (channelCount == 2) {
+                    expect(frame.correlationValid);
+                    expectWithinAbsoluteError(frame.correlation, 1.0F, 1.0e-6F);
+                } else {
+                    expect(!frame.correlationValid);
+                }
             };
 
             verifyReset(testSampleRate, 1, 2, true);
