@@ -3,10 +3,12 @@
 #pragma once
 
 #include "../core/VisualizationDataSource.h"
+#include "PresentedFrameHistory.h"
 
 #include <juce_gui_extra/juce_gui_extra.h>
 
 #include <cstdint>
+#include <functional>
 #include <memory>
 
 namespace audio_insight {
@@ -20,15 +22,26 @@ struct MetalRenderTelemetry {
     std::uint64_t displayLinkCallbacks = 0;
     std::uint64_t submittedFrames = 0;
     std::uint64_t completedFrames = 0;
+    std::uint64_t gpuTimingSamples = 0;
+    std::uint64_t gpuTimingUnavailableSamples = 0;
     std::uint64_t commandBufferFailures = 0;
     std::uint64_t presentationCallbacks = 0;
     std::uint64_t presentedFrames = 0;
+    std::uint64_t presentationLatenessSamples = 0;
+    std::uint64_t presentationLatenessUnclassifiableSamples = 0;
+    std::uint64_t presentationHistoryDiscardedTimestamps = 0;
     std::uint64_t presentationsAfterTarget = 0;
     std::uint64_t skippedPresentations = 0;
     std::uint64_t gpuBackpressureDrops = 0;
     std::uint64_t drawableUnavailableDrops = 0;
+    std::uint64_t callbackHostDelaySamples = 0;
+    std::uint64_t callbackHostDelayUnclassifiableSamples = 0;
     std::uint64_t callbackAlreadyLateHostDelays = 0;
+    std::uint64_t cpuCommitLatenessSamples = 0;
+    std::uint64_t cpuCommitLatenessUnclassifiableSamples = 0;
     std::uint64_t cpuCommitDeadlineMisses = 0;
+    std::uint64_t gpuCompletionLatenessSamples = 0;
+    std::uint64_t gpuCompletionLatenessUnclassifiableSamples = 0;
     std::uint64_t gpuCompletionDeadlineMisses = 0;
     std::uint64_t analysisRequestCalls = 0;
     std::uint64_t snapshotReads = 0;
@@ -53,6 +66,14 @@ struct MetalRenderTelemetry {
     std::uint64_t lastTargetPresentationTimestampNanoseconds = 0;
     std::uint64_t lastProvidedDrawableAccessNanoseconds = 0;
     std::uint64_t maximumProvidedDrawableAccessNanoseconds = 0;
+
+    // Chronological, oldest-to-newest intervals derived under the renderer's
+    // presentation-history lock. sequence identifies the display-link callback
+    // that produced the interval's right-hand frame, so gaps expose skipped
+    // presentation opportunities.
+    std::array<PresentedFrameIntervalSample, presentedFrameIntervalHistoryCapacity>
+        presentedFrameIntervalHistory { };
+    std::size_t presentedFrameIntervalHistoryCount = 0;
 
     std::uint32_t drawableWidthPixels = 0;
     std::uint32_t drawableHeightPixels = 0;
@@ -83,6 +104,8 @@ struct SpectrumRenderSettings {
 */
 class MetalVisualization final : public juce::NSViewComponent {
 public:
+    using EffectiveActivityCallback = std::function<void(bool)>;
+
     explicit MetalVisualization(VisualizationDataSource& dataSource);
     ~MetalVisualization() override;
 
@@ -94,8 +117,12 @@ public:
     [[nodiscard]] bool isMetalAvailable() const noexcept;
     [[nodiscard]] juce::String getInitializationError() const;
 
-    /** Enables Apple's Metal Performance HUD for this visualization's layer only. */
-    void setMetalPerformanceHudEnabled(bool shouldBeEnabled);
+    /**
+        Installs a message-thread callback for actual rendering-state
+        transitions caused by editor or native-window lifecycle changes. Pass
+        an empty callback before destroying any state captured by the callback.
+    */
+    void setEffectiveActivityCallback(EffectiveActivityCallback callback);
 
     /**
         Updates the render range and temporal smoothing without requiring the
@@ -106,6 +133,12 @@ public:
     [[nodiscard]] SpectrumRenderSettings getSpectrumSettings() const noexcept;
 
     [[nodiscard]] MetalRenderTelemetry getRenderTelemetry() const noexcept;
+
+    /**
+        Resets renderer telemetry on the message thread. An active renderer
+        switches epochs at its next display callback boundary; an inactive or
+        unavailable renderer publishes the reset immediately.
+    */
     void resetRenderTelemetry();
 
     void visibilityChanged() override;

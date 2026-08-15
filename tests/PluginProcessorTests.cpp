@@ -88,19 +88,19 @@ public:
         testCase("Parameter state round-trips", [this] {
             PluginProcessor source;
             auto* floor = source.getParameters().getParameter("spectrumFloor");
-            auto* metalHud = source.getParameters().getParameter("metalPerformanceHud");
+            auto* metrics = source.getParameters().getParameter("performanceMetrics");
             expect(floor != nullptr);
-            expect(metalHud != nullptr);
+            expect(metrics != nullptr);
 
-            if (floor == nullptr || metalHud == nullptr)
+            if (floor == nullptr || metrics == nullptr)
                 return;
 
-            expectWithinAbsoluteError(metalHud->getValue(), 0.0F, 0.0001F);
-            expect(!metalHud->isMetaParameter());
-            expect(!metalHud->isAutomatable());
+            expectWithinAbsoluteError(metrics->getValue(), 0.0F, 0.0001F);
+            expect(!metrics->isMetaParameter());
+            expect(!metrics->isAutomatable());
 
             floor->setValueNotifyingHost(0.375F);
-            metalHud->setValueNotifyingHost(1.0F);
+            metrics->setValueNotifyingHost(1.0F);
 
             juce::MemoryBlock state;
             source.getStateInformation(state);
@@ -110,25 +110,167 @@ public:
             restored.setStateInformation(state.getData(), static_cast<int>(state.getSize()));
 
             const auto* restoredFloor = restored.getParameters().getParameter("spectrumFloor");
-            const auto* restoredMetalHud
-                = restored.getParameters().getParameter("metalPerformanceHud");
+            const auto* restoredMetrics
+                = restored.getParameters().getParameter("performanceMetrics");
             expect(restoredFloor != nullptr);
-            expect(restoredMetalHud != nullptr);
+            expect(restoredMetrics != nullptr);
 
             if (restoredFloor != nullptr)
                 expectWithinAbsoluteError(restoredFloor->getValue(), 0.375F, 0.0001F);
 
-            if (restoredMetalHud != nullptr)
-                expectWithinAbsoluteError(restoredMetalHud->getValue(), 1.0F, 0.0001F);
+            if (restoredMetrics != nullptr)
+                expectWithinAbsoluteError(restoredMetrics->getValue(), 1.0F, 0.0001F);
+        });
+
+        testCase("The legacy Metal HUD state migrates to the metrics panel", [this] {
+            PluginProcessor source;
+            auto legacyState = source.getParameters().copyState();
+            auto metricsState = legacyState.getChildWithProperty("id", "performanceMetrics");
+            expect(metricsState.isValid());
+
+            if (!metricsState.isValid())
+                return;
+
+            metricsState.setProperty("id", "metalPerformanceHud", nullptr);
+            metricsState.setProperty("value", 1.0F, nullptr);
+
+            juce::MemoryBlock state;
+            if (auto xml = legacyState.createXml())
+                juce::AudioProcessor::copyXmlToBinary(*xml, state);
+
+            expect(state.getSize() > 0);
+
+            PluginProcessor restored;
+            restored.setStateInformation(state.getData(), static_cast<int>(state.getSize()));
+
+            const auto* restoredMetrics
+                = restored.getParameters().getParameter("performanceMetrics");
+            expect(restoredMetrics != nullptr);
+
+            if (restoredMetrics != nullptr)
+                expectWithinAbsoluteError(restoredMetrics->getValue(), 1.0F, 0.0001F);
+        });
+
+        testCase("Current metrics state wins over and removes stale legacy state", [this] {
+            PluginProcessor source;
+            auto stateTree = source.getParameters().copyState();
+            auto currentState = stateTree.getChildWithProperty("id", "performanceMetrics");
+            expect(currentState.isValid());
+
+            if (!currentState.isValid())
+                return;
+
+            currentState.setProperty("value", 0.0F, nullptr);
+            auto legacyState = currentState.createCopy();
+            legacyState.setProperty("id", "metalPerformanceHud", nullptr);
+            legacyState.setProperty("value", 1.0F, nullptr);
+            stateTree.addChild(legacyState, -1, nullptr);
+
+            juce::MemoryBlock encoded;
+            if (auto xml = stateTree.createXml())
+                juce::AudioProcessor::copyXmlToBinary(*xml, encoded);
+
+            PluginProcessor restored;
+            restored.setStateInformation(encoded.getData(), static_cast<int>(encoded.getSize()));
+
+            const auto* restoredMetrics
+                = restored.getParameters().getParameter("performanceMetrics");
+            expect(restoredMetrics != nullptr);
+            if (restoredMetrics != nullptr)
+                expectWithinAbsoluteError(restoredMetrics->getValue(), 0.0F, 0.0001F);
+
+            juce::MemoryBlock roundTripped;
+            restored.getStateInformation(roundTripped);
+            auto roundTrippedXml = juce::AudioProcessor::getXmlFromBinary(
+                roundTripped.getData(), static_cast<int>(roundTripped.getSize()));
+            expect(roundTrippedXml != nullptr);
+            if (roundTrippedXml != nullptr)
+                expect(!roundTrippedXml->toString().contains("metalPerformanceHud"));
+        });
+
+        testCase("Only one of several legacy metrics states is migrated", [this] {
+            PluginProcessor source;
+            auto stateTree = source.getParameters().copyState();
+            auto firstLegacyState = stateTree.getChildWithProperty("id", "performanceMetrics");
+            expect(firstLegacyState.isValid());
+
+            if (!firstLegacyState.isValid())
+                return;
+
+            firstLegacyState.setProperty("id", "metalPerformanceHud", nullptr);
+            firstLegacyState.setProperty("value", 1.0F, nullptr);
+            auto duplicateLegacyState = firstLegacyState.createCopy();
+            duplicateLegacyState.setProperty("value", 0.0F, nullptr);
+            stateTree.addChild(duplicateLegacyState, -1, nullptr);
+
+            juce::MemoryBlock encoded;
+            if (auto xml = stateTree.createXml())
+                juce::AudioProcessor::copyXmlToBinary(*xml, encoded);
+
+            PluginProcessor restored;
+            restored.setStateInformation(encoded.getData(), static_cast<int>(encoded.getSize()));
+
+            const auto* restoredMetrics
+                = restored.getParameters().getParameter("performanceMetrics");
+            expect(restoredMetrics != nullptr);
+            if (restoredMetrics != nullptr)
+                expectWithinAbsoluteError(restoredMetrics->getValue(), 1.0F, 0.0001F);
+
+            juce::MemoryBlock roundTripped;
+            restored.getStateInformation(roundTripped);
+            auto roundTrippedXml = juce::AudioProcessor::getXmlFromBinary(
+                roundTripped.getData(), static_cast<int>(roundTripped.getSize()));
+            expect(roundTrippedXml != nullptr);
+            if (roundTrippedXml != nullptr) {
+                const auto roundTrippedTree = juce::ValueTree::fromXml(*roundTrippedXml);
+                auto currentMetricsStates = 0;
+                auto legacyMetricsStates = 0;
+                for (auto childIndex = 0; childIndex < roundTrippedTree.getNumChildren();
+                    ++childIndex) {
+                    const auto id = roundTrippedTree.getChild(childIndex)["id"].toString();
+                    currentMetricsStates += id == "performanceMetrics" ? 1 : 0;
+                    legacyMetricsStates += id == "metalPerformanceHud" ? 1 : 0;
+                }
+
+                expectEquals(currentMetricsStates, 1);
+                expectEquals(legacyMetricsStates, 0);
+            }
+        });
+
+        testCase("State without either diagnostics setting keeps the default", [this] {
+            PluginProcessor source;
+            auto stateTree = source.getParameters().copyState();
+            const auto metricsState = stateTree.getChildWithProperty("id", "performanceMetrics");
+            expect(metricsState.isValid());
+            if (metricsState.isValid())
+                stateTree.removeChild(metricsState, nullptr);
+
+            juce::MemoryBlock encoded;
+            if (auto xml = stateTree.createXml())
+                juce::AudioProcessor::copyXmlToBinary(*xml, encoded);
+
+            PluginProcessor restored;
+            auto* metricsBeforeRestore
+                = restored.getParameters().getParameter("performanceMetrics");
+            expect(metricsBeforeRestore != nullptr);
+            if (metricsBeforeRestore != nullptr)
+                metricsBeforeRestore->setValueNotifyingHost(1.0F);
+
+            restored.setStateInformation(encoded.getData(), static_cast<int>(encoded.getSize()));
+            const auto* restoredMetrics
+                = restored.getParameters().getParameter("performanceMetrics");
+            expect(restoredMetrics != nullptr);
+            if (restoredMetrics != nullptr)
+                expectWithinAbsoluteError(restoredMetrics->getValue(), 0.0F, 0.0001F);
         });
 
         testCase("The custom editor starts detached and inactive", [this] {
             PluginProcessor processor;
-            auto* metalHud = processor.getParameters().getParameter("metalPerformanceHud");
-            expect(metalHud != nullptr);
+            auto* metrics = processor.getParameters().getParameter("performanceMetrics");
+            expect(metrics != nullptr);
 
-            if (metalHud != nullptr)
-                metalHud->setValueNotifyingHost(1.0F);
+            if (metrics != nullptr)
+                metrics->setValueNotifyingHost(1.0F);
 
             std::unique_ptr<juce::AudioProcessorEditor> editor { processor.createEditor() };
 
@@ -146,18 +288,22 @@ public:
             else
                 expect(false, "Resizable editor has no bounds constrainer");
 
-            auto* metalHudControl = editor->findChildWithID("metalPerformanceHudToggle");
-            expect(metalHudControl != nullptr);
+            auto* metricsControl = editor->findChildWithID("performanceMetricsToggle");
+            auto* metricsPanel = editor->findChildWithID("performanceMetricsPanel");
+            expect(metricsControl != nullptr);
+            expect(metricsPanel != nullptr);
+            expect(metricsPanel != nullptr && metricsPanel->isVisible());
 
-            if (auto* metalHudButton = dynamic_cast<juce::Button*>(metalHudControl)) {
-                expect(metalHudButton->getToggleState());
+            if (auto* metricsButton = dynamic_cast<juce::Button*>(metricsControl)) {
+                expect(metricsButton->getToggleState());
 
-                if (metalHud != nullptr) {
-                    metalHud->setValueNotifyingHost(0.0F);
-                    expect(!metalHudButton->getToggleState());
+                if (metrics != nullptr) {
+                    metrics->setValueNotifyingHost(0.0F);
+                    expect(!metricsButton->getToggleState());
+                    expect(metricsPanel != nullptr && !metricsPanel->isVisible());
                 }
             } else {
-                expect(false, "Metal HUD control is not a button");
+                expect(false, "Performance metrics control is not a button");
             }
 
             const auto telemetry = processor.getAnalysisTelemetry();

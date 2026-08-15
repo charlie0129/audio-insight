@@ -4,6 +4,7 @@
 
 #include "../core/VisualizationDataSource.h"
 #include "../ui/MetalVisualization.h"
+#include "../ui/PerformanceMetricsPanel.h"
 #include "PluginProcessor.h"
 
 #include <juce_gui_basics/juce_gui_basics.h>
@@ -40,10 +41,13 @@ private:
         const juce::String& labelText, const juce::String& accessibilityDescription);
     void updateSpectrumSettings() noexcept;
     void updateRenderingState();
+    void updateMetricsPanelVisibility();
     void setMainControlsVisible(bool shouldBeVisible);
     void setAboutVisible(bool shouldBeVisible);
 
+    PluginProcessor& processor_;
     MetalVisualization visualization;
+    PerformanceMetricsPanel metricsPanel;
 
     juce::Label floorLabel;
     juce::Label ceilingLabel;
@@ -52,13 +56,13 @@ private:
     juce::Slider ceilingSlider;
     juce::Slider smoothingSlider;
 
-    juce::TextButton metalHudButton { "HUD" };
+    juce::TextButton metricsButton { "Metrics" };
     juce::TextButton aboutButton { "About" };
 
     juce::AudioProcessorValueTreeState::SliderAttachment floorAttachment;
     juce::AudioProcessorValueTreeState::SliderAttachment ceilingAttachment;
     juce::AudioProcessorValueTreeState::SliderAttachment smoothingAttachment;
-    juce::AudioProcessorValueTreeState::ButtonAttachment metalHudAttachment;
+    juce::AudioProcessorValueTreeState::ButtonAttachment metricsAttachment;
 
     std::unique_ptr<AboutOverlay> aboutOverlay;
 

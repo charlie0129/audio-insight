@@ -11,7 +11,8 @@ constexpr auto stateTreeName = "AudioInsightState";
 constexpr auto spectrumFloorParameter = "spectrumFloor";
 constexpr auto spectrumCeilingParameter = "spectrumCeiling";
 constexpr auto spectrumSmoothingParameter = "spectrumSmoothing";
-constexpr auto metalPerformanceHudParameter = "metalPerformanceHud";
+constexpr auto performanceMetricsParameter = "performanceMetrics";
+constexpr auto legacyMetalPerformanceHudParameter = "metalPerformanceHud";
 } // namespace
 
 PluginProcessor::PluginProcessor()
@@ -130,8 +131,35 @@ void PluginProcessor::getStateInformation(juce::MemoryBlock& destinationData)
 void PluginProcessor::setStateInformation(const void* data, int sizeInBytes)
 {
     if (auto xml = getXmlFromBinary(data, sizeInBytes); xml != nullptr) {
-        if (xml->hasTagName(parameters.state.getType()))
-            parameters.replaceState(juce::ValueTree::fromXml(*xml));
+        if (xml->hasTagName(parameters.state.getType())) {
+            auto restoredState = juce::ValueTree::fromXml(*xml);
+            const auto currentMetricsState
+                = restoredState.getChildWithProperty("id", performanceMetricsParameter);
+            auto legacyMetricsState
+                = restoredState.getChildWithProperty("id", legacyMetalPerformanceHudParameter);
+
+            if (!currentMetricsState.isValid() && legacyMetricsState.isValid()) {
+                legacyMetricsState.setProperty("id", performanceMetricsParameter, nullptr);
+                legacyMetricsState
+                    = restoredState.getChildWithProperty("id", legacyMetalPerformanceHudParameter);
+            } else if (!currentMetricsState.isValid()) {
+                auto defaultMetricsState = parameters.copyState().getChildWithProperty(
+                    "id", performanceMetricsParameter);
+                if (defaultMetricsState.isValid()) {
+                    defaultMetricsState = defaultMetricsState.createCopy();
+                    defaultMetricsState.setProperty("value", 0.0F, nullptr);
+                    restoredState.addChild(defaultMetricsState, -1, nullptr);
+                }
+            }
+
+            while (legacyMetricsState.isValid()) {
+                restoredState.removeChild(legacyMetricsState, nullptr);
+                legacyMetricsState
+                    = restoredState.getChildWithProperty("id", legacyMetalPerformanceHudParameter);
+            }
+
+            parameters.replaceState(restoredState);
+        }
     }
 }
 
@@ -179,7 +207,7 @@ juce::AudioProcessorValueTreeState::ParameterLayout PluginProcessor::createParam
         juce::NormalisableRange<float> { 0.0F, 1.0F, 0.01F }, 0.65F));
 
     layout.add(std::make_unique<juce::AudioParameterBool>(
-        juce::ParameterID { metalPerformanceHudParameter, 1 }, "Metal performance HUD", false,
+        juce::ParameterID { performanceMetricsParameter, 1 }, "Performance metrics", false,
         juce::AudioParameterBoolAttributes().withAutomatable(false)));
 
     return layout;

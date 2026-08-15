@@ -11,7 +11,7 @@ namespace {
 constexpr auto spectrumFloorParameter = "spectrumFloor";
 constexpr auto spectrumCeilingParameter = "spectrumCeiling";
 constexpr auto spectrumSmoothingParameter = "spectrumSmoothing";
-constexpr auto metalPerformanceHudParameter = "metalPerformanceHud";
+constexpr auto performanceMetricsParameter = "performanceMetrics";
 
 constexpr auto projectUrl = "https://github.com/charlie0129/audio-insight";
 constexpr auto sponsorUrl = "https://github.com/sponsors/charlie0129";
@@ -189,13 +189,19 @@ private:
 
 PluginEditor::PluginEditor(PluginProcessor& processorToUse, VisualizationDataSource& dataSource)
     : AudioProcessorEditor(processorToUse), ComponentMovementWatcher(this),
-      visualization(dataSource),
+      processor_(processorToUse), visualization(dataSource),
+      metricsPanel(
+          [this] {
+              return PerformanceMetricsSnapshot { visualization.getRenderTelemetry(),
+                  processor_.getAnalysisTelemetry() };
+          },
+          [this] { visualization.resetRenderTelemetry(); },
+          [this] { return visualization.isEffectivelyRendering(); }),
       floorAttachment(processorToUse.getParameters(), spectrumFloorParameter, floorSlider),
       ceilingAttachment(processorToUse.getParameters(), spectrumCeilingParameter, ceilingSlider),
       smoothingAttachment(
           processorToUse.getParameters(), spectrumSmoothingParameter, smoothingSlider),
-      metalHudAttachment(
-          processorToUse.getParameters(), metalPerformanceHudParameter, metalHudButton),
+      metricsAttachment(processorToUse.getParameters(), performanceMetricsParameter, metricsButton),
       aboutOverlay(std::make_unique<AboutOverlay>([this] { setAboutVisible(false); }))
 {
     setName("Audio Insight editor");
@@ -204,6 +210,9 @@ PluginEditor::PluginEditor(PluginProcessor& processorToUse, VisualizationDataSou
     setResizeLimits(720, 420, 2560, 1600);
 
     addAndMakeVisible(visualization);
+    addChildComponent(metricsPanel);
+    visualization.setEffectiveActivityCallback(
+        [this](const bool isActive) { metricsPanel.setCollectionActivity(isActive); });
 
     configureParameterControl(
         floorLabel, floorSlider, "Floor", "Lower decibel limit of the spectrum display");
@@ -212,16 +221,15 @@ PluginEditor::PluginEditor(PluginProcessor& processorToUse, VisualizationDataSou
     configureParameterControl(
         smoothingLabel, smoothingSlider, "Smooth", "Temporal smoothing of the spectrum display");
 
-    metalHudButton.setComponentID("metalPerformanceHudToggle");
-    metalHudButton.setClickingTogglesState(true);
-    metalHudButton.setTooltip("Show Apple's Metal Performance HUD over the visualization");
-    metalHudButton.setColour(juce::TextButton::buttonColourId, controlBackground.brighter(0.08F));
-    metalHudButton.setColour(juce::TextButton::buttonOnColourId, accent.darker(0.45F));
-    metalHudButton.setColour(juce::TextButton::textColourOffId, secondaryText);
-    metalHudButton.setColour(juce::TextButton::textColourOnId, primaryText);
-    metalHudButton.onStateChange
-        = [this] { visualization.setMetalPerformanceHudEnabled(metalHudButton.getToggleState()); };
-    addAndMakeVisible(metalHudButton);
+    metricsButton.setComponentID("performanceMetricsToggle");
+    metricsButton.setClickingTogglesState(true);
+    metricsButton.setTooltip("Show every renderer and analysis-pipeline metric for this instance");
+    metricsButton.setColour(juce::TextButton::buttonColourId, controlBackground.brighter(0.08F));
+    metricsButton.setColour(juce::TextButton::buttonOnColourId, accent.darker(0.45F));
+    metricsButton.setColour(juce::TextButton::textColourOffId, secondaryText);
+    metricsButton.setColour(juce::TextButton::textColourOnId, primaryText);
+    metricsButton.onStateChange = [this] { updateMetricsPanelVisibility(); };
+    addAndMakeVisible(metricsButton);
 
     aboutButton.setTooltip("Show license, source, third-party, and sponsorship information");
     aboutButton.onClick = [this] { setAboutVisible(true); };
@@ -234,7 +242,7 @@ PluginEditor::PluginEditor(PluginProcessor& processorToUse, VisualizationDataSou
     smoothingSlider.addListener(this);
 
     updateSpectrumSettings();
-    visualization.setMetalPerformanceHudEnabled(metalHudButton.getToggleState());
+    updateMetricsPanelVisibility();
     setSize(1200, 800);
     updateRenderingState();
 }
@@ -242,14 +250,15 @@ PluginEditor::PluginEditor(PluginProcessor& processorToUse, VisualizationDataSou
 PluginEditor::~PluginEditor()
 {
     shuttingDown = true;
+    visualization.setEffectiveActivityCallback({ });
+    metricsPanel.setPollingActive(false);
     visualization.setRenderingActive(false);
-    visualization.setMetalPerformanceHudEnabled(false);
 
     floorSlider.removeListener(this);
     ceilingSlider.removeListener(this);
     smoothingSlider.removeListener(this);
 
-    metalHudButton.onStateChange = nullptr;
+    metricsButton.onStateChange = nullptr;
     aboutButton.onClick = nullptr;
     aboutOverlay->clearCloseAction();
 }
@@ -279,8 +288,8 @@ void PluginEditor::resized()
     aboutButton.setBounds(aboutArea);
 
     controls.removeFromRight(8);
-    auto metalHudArea = controls.removeFromRight(56);
-    metalHudButton.setBounds(metalHudArea);
+    auto metricsArea = controls.removeFromRight(68);
+    metricsButton.setBounds(metricsArea);
 
     controls.removeFromLeft(116);
     controls.removeFromRight(12);
@@ -297,6 +306,22 @@ void PluginEditor::resized()
     layoutParameterControl(floorArea, floorLabel, floorSlider);
     layoutParameterControl(ceilingArea, ceilingLabel, ceilingSlider);
     layoutParameterControl(smoothingArea, smoothingLabel, smoothingSlider);
+
+    if (metricsPanel.isVisible()) {
+        constexpr int minimumVisualizationWidth = 320;
+        constexpr int preferredMinimumMetricsWidth = 360;
+        constexpr int maximumMetricsWidth = 720;
+
+        const auto availableMetricsWidth
+            = std::max(1, bounds.getWidth() - minimumVisualizationWidth);
+        const auto minimumMetricsWidth
+            = std::min(preferredMinimumMetricsWidth, availableMetricsWidth);
+        const auto metricsWidth = std::clamp(juce::roundToInt(bounds.getWidth() * 0.43F),
+            minimumMetricsWidth, std::min(maximumMetricsWidth, availableMetricsWidth));
+        auto panelBounds = bounds.removeFromRight(metricsWidth);
+        bounds.removeFromRight(1);
+        metricsPanel.setBounds(panelBounds);
+    }
 
     visualization.setBounds(bounds);
     aboutOverlay->setBounds(getLocalBounds());
@@ -359,8 +384,18 @@ void PluginEditor::updateRenderingState()
     editorIsAttached = getPeer() != nullptr;
 
     const auto aboutIsVisible = aboutOverlay != nullptr && aboutOverlay->isVisible();
-    visualization.setRenderingActive(
-        !shuttingDown && editorIsShowing && editorIsAttached && !aboutIsVisible);
+    const auto shouldRender
+        = !shuttingDown && editorIsShowing && editorIsAttached && !aboutIsVisible;
+    visualization.setRenderingActive(shouldRender);
+    metricsPanel.setPollingActive(shouldRender && metricsPanel.isVisible());
+}
+
+void PluginEditor::updateMetricsPanelVisibility()
+{
+    const auto aboutIsVisible = aboutOverlay != nullptr && aboutOverlay->isVisible();
+    metricsPanel.setVisible(metricsButton.getToggleState() && !aboutIsVisible);
+    resized();
+    updateRenderingState();
 }
 
 void PluginEditor::setMainControlsVisible(const bool shouldBeVisible)
@@ -371,7 +406,7 @@ void PluginEditor::setMainControlsVisible(const bool shouldBeVisible)
     floorSlider.setVisible(shouldBeVisible);
     ceilingSlider.setVisible(shouldBeVisible);
     smoothingSlider.setVisible(shouldBeVisible);
-    metalHudButton.setVisible(shouldBeVisible);
+    metricsButton.setVisible(shouldBeVisible);
     aboutButton.setVisible(shouldBeVisible);
 }
 
@@ -382,6 +417,7 @@ void PluginEditor::setAboutVisible(bool shouldBeVisible)
 
     if (shouldBeVisible) {
         visualization.setVisible(false);
+        metricsPanel.setVisible(false);
         setMainControlsVisible(false);
         aboutOverlay->setVisible(true);
         aboutOverlay->toFront(false);
@@ -390,11 +426,13 @@ void PluginEditor::setAboutVisible(bool shouldBeVisible)
         aboutOverlay->setVisible(false);
         visualization.setVisible(true);
         setMainControlsVisible(true);
+        metricsPanel.setVisible(metricsButton.getToggleState());
 
         if (aboutButton.isShowing())
             aboutButton.grabKeyboardFocus();
     }
 
+    resized();
     updateRenderingState();
 }
 } // namespace audio_insight

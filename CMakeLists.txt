@@ -206,6 +206,12 @@ target_sources(AudioInsight
         src/plugin/PluginProcessor.h
         src/ui/MetalVisualization.h
         src/ui/MetalVisualization.mm
+        src/ui/PerformanceMetricsModel.cpp
+        src/ui/PerformanceMetricsModel.h
+        src/ui/PerformanceMetricsPanel.cpp
+        src/ui/PerformanceMetricsPanel.h
+        src/ui/PresentedFrameHistory.cpp
+        src/ui/PresentedFrameHistory.h
 )
 
 target_include_directories(AudioInsight PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/src")
@@ -252,6 +258,12 @@ source_group(TREE "${CMAKE_CURRENT_SOURCE_DIR}" FILES
     src/plugin/PluginProcessor.h
     src/ui/MetalVisualization.h
     src/ui/MetalVisualization.mm
+    src/ui/PerformanceMetricsModel.cpp
+    src/ui/PerformanceMetricsModel.h
+    src/ui/PerformanceMetricsPanel.cpp
+    src/ui/PerformanceMetricsPanel.h
+    src/ui/PresentedFrameHistory.cpp
+    src/ui/PresentedFrameHistory.h
 )
 
 if(BUILD_TESTING)
@@ -281,9 +293,19 @@ if(BUILD_TESTING)
             src/plugin/PluginProcessor.h
             src/ui/MetalVisualization.h
             src/ui/MetalVisualization.mm
+            src/ui/PerformanceMetricsModel.cpp
+            src/ui/PerformanceMetricsModel.h
+            src/ui/PerformanceMetricsPanel.cpp
+            src/ui/PerformanceMetricsPanel.h
+            src/ui/PresentedFrameHistory.cpp
+            src/ui/PresentedFrameHistory.h
             tests/AnalysisCoordinatorTests.cpp
             tests/AnalysisCoreTests.cpp
+            tests/MetalVisualizationTests.cpp
+            tests/PerformanceMetricsModelTests.cpp
+            tests/PerformanceMetricsPanelTests.cpp
             tests/PluginProcessorTests.cpp
+            tests/PresentedFrameHistoryTests.cpp
             tests/SharedAnalysisSchedulerTests.cpp
             tests/TestMain.cpp
     )
@@ -344,9 +366,19 @@ if(BUILD_TESTING)
         src/plugin/PluginProcessor.h
         src/ui/MetalVisualization.h
         src/ui/MetalVisualization.mm
+        src/ui/PerformanceMetricsModel.cpp
+        src/ui/PerformanceMetricsModel.h
+        src/ui/PerformanceMetricsPanel.cpp
+        src/ui/PerformanceMetricsPanel.h
+        src/ui/PresentedFrameHistory.cpp
+        src/ui/PresentedFrameHistory.h
         tests/AnalysisCoordinatorTests.cpp
         tests/AnalysisCoreTests.cpp
+        tests/MetalVisualizationTests.cpp
+        tests/PerformanceMetricsModelTests.cpp
+        tests/PerformanceMetricsPanelTests.cpp
         tests/PluginProcessorTests.cpp
+        tests/PresentedFrameHistoryTests.cpp
         tests/SharedAnalysisSchedulerTests.cpp
         tests/TestMain.cpp
     )

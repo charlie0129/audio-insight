@@ -9,6 +9,8 @@
 #import <QuartzCore/CAMetalLayer.h>
 #import <QuartzCore/QuartzCore.h>
 
+#include <os/lock.h>
+
 #include <algorithm>
 #include <array>
 #include <atomic>
@@ -19,6 +21,7 @@
 #include <limits>
 #include <memory>
 #include <string>
+#include <utility>
 
 namespace audio_insight::detail {
 class MetalRenderBackend;
@@ -62,20 +65,33 @@ struct MetalVertex {
     simd_float4 colour;
 };
 
+static_assert(std::atomic<std::uint64_t>::is_always_lock_free);
+
 struct AtomicRenderTelemetry {
     std::uint64_t epoch = 1;
     std::atomic<std::uint64_t> displayLinkCallbacks { 0 };
     std::atomic<std::uint64_t> submittedFrames { 0 };
     std::atomic<std::uint64_t> completedFrames { 0 };
+    std::atomic<std::uint64_t> gpuTimingSamples { 0 };
+    std::atomic<std::uint64_t> gpuTimingUnavailableSamples { 0 };
     std::atomic<std::uint64_t> commandBufferFailures { 0 };
     std::atomic<std::uint64_t> presentationCallbacks { 0 };
     std::atomic<std::uint64_t> presentedFrames { 0 };
+    std::atomic<std::uint64_t> presentationLatenessSamples { 0 };
+    std::atomic<std::uint64_t> presentationLatenessUnclassifiableSamples { 0 };
+    std::atomic<std::uint64_t> presentationHistoryDiscardedTimestamps { 0 };
     std::atomic<std::uint64_t> presentationsAfterTarget { 0 };
     std::atomic<std::uint64_t> skippedPresentations { 0 };
     std::atomic<std::uint64_t> gpuBackpressureDrops { 0 };
     std::atomic<std::uint64_t> drawableUnavailableDrops { 0 };
+    std::atomic<std::uint64_t> callbackHostDelaySamples { 0 };
+    std::atomic<std::uint64_t> callbackHostDelayUnclassifiableSamples { 0 };
     std::atomic<std::uint64_t> callbackAlreadyLateHostDelays { 0 };
+    std::atomic<std::uint64_t> cpuCommitLatenessSamples { 0 };
+    std::atomic<std::uint64_t> cpuCommitLatenessUnclassifiableSamples { 0 };
     std::atomic<std::uint64_t> cpuCommitDeadlineMisses { 0 };
+    std::atomic<std::uint64_t> gpuCompletionLatenessSamples { 0 };
+    std::atomic<std::uint64_t> gpuCompletionLatenessUnclassifiableSamples { 0 };
     std::atomic<std::uint64_t> gpuCompletionDeadlineMisses { 0 };
     std::atomic<std::uint64_t> analysisRequestCalls { 0 };
     std::atomic<std::uint64_t> snapshotReads { 0 };
@@ -89,10 +105,6 @@ struct AtomicRenderTelemetry {
     std::atomic<std::uint64_t> lastDisplayCallbackIntervalNanoseconds { 0 };
     std::atomic<std::uint64_t> lastTargetIntervalNanoseconds { 0 };
     std::atomic<std::uint64_t> lastTargetPresentationIntervalNanoseconds { 0 };
-    std::atomic<std::uint64_t> lastPresentedFrameIntervalNanoseconds { 0 };
-    std::atomic<std::uint64_t> lastPresentedHostTimestampNanoseconds { 0 };
-    std::atomic<std::uint64_t> lastPresentationLatenessNanoseconds { 0 };
-    std::atomic<std::uint64_t> maximumPresentationLatenessNanoseconds { 0 };
     std::atomic<std::uint64_t> lastCallbackHostDelayNanoseconds { 0 };
     std::atomic<std::uint64_t> lastCpuCommitLatenessNanoseconds { 0 };
     std::atomic<std::uint64_t> lastGpuCompletionLatenessNanoseconds { 0 };
@@ -100,6 +112,19 @@ struct AtomicRenderTelemetry {
     std::atomic<std::uint64_t> lastTargetPresentationTimestampNanoseconds { 0 };
     std::atomic<std::uint64_t> lastProvidedDrawableAccessNanoseconds { 0 };
     std::atomic<std::uint64_t> maximumProvidedDrawableAccessNanoseconds { 0 };
+
+    // Command-buffer completion handlers may overlap. This lock makes their
+    // related timing values and validity counters one coherent UI snapshot.
+    mutable os_unfair_lock gpuTelemetryLock = OS_UNFAIR_LOCK_INIT;
+
+    // Drawable presentation handlers are not audio callbacks and may run
+    // concurrently or arrive out of timestamp order. A tiny unfair lock keeps
+    // the fixed history exact without imposing any work on the audio thread.
+    mutable os_unfair_lock presentedFrameHistoryLock = OS_UNFAIR_LOCK_INIT;
+    PresentedFrameHistory presentedFrameHistory;
+    std::uint64_t lastPresentationLatenessNanoseconds = 0;
+    std::uint64_t lastPresentationLatenessTimestampNanoseconds = 0;
+    std::uint64_t maximumPresentationLatenessNanoseconds = 0;
 
     std::atomic<std::uint32_t> drawableWidthPixels { 0 };
     std::atomic<std::uint32_t> drawableHeightPixels { 0 };
@@ -279,9 +304,58 @@ void recordSkippedPresentation(const std::shared_ptr<SharedRenderState>& state,
         telemetry->skippedPresentations.fetch_add(1, std::memory_order_relaxed);
 }
 
+void copyGpuTelemetry(
+    const AtomicRenderTelemetry& source, MetalRenderTelemetry& destination) noexcept
+{
+    os_unfair_lock_lock(&source.gpuTelemetryLock);
+    destination.completedFrames = source.completedFrames.load(std::memory_order_relaxed);
+    destination.gpuTimingSamples = source.gpuTimingSamples.load(std::memory_order_relaxed);
+    destination.gpuTimingUnavailableSamples
+        = source.gpuTimingUnavailableSamples.load(std::memory_order_relaxed);
+    destination.gpuCompletionLatenessSamples
+        = source.gpuCompletionLatenessSamples.load(std::memory_order_relaxed);
+    destination.gpuCompletionLatenessUnclassifiableSamples
+        = source.gpuCompletionLatenessUnclassifiableSamples.load(std::memory_order_relaxed);
+    destination.gpuCompletionDeadlineMisses
+        = source.gpuCompletionDeadlineMisses.load(std::memory_order_relaxed);
+    destination.lastGpuExecutionNanoseconds
+        = source.lastGpuExecutionNanoseconds.load(std::memory_order_relaxed);
+    destination.maximumGpuExecutionNanoseconds
+        = source.maximumGpuExecutionNanoseconds.load(std::memory_order_relaxed);
+    destination.lastGpuCompletionLatenessNanoseconds
+        = source.lastGpuCompletionLatenessNanoseconds.load(std::memory_order_relaxed);
+    os_unfair_lock_unlock(&source.gpuTelemetryLock);
+}
+
+void copyPresentedFrameTelemetry(
+    const AtomicRenderTelemetry& source, MetalRenderTelemetry& destination) noexcept
+{
+    os_unfair_lock_lock(&source.presentedFrameHistoryLock);
+    destination.presentedFrameIntervalHistoryCount
+        = source.presentedFrameHistory.snapshotIntervals(destination.presentedFrameIntervalHistory);
+    destination.lastPresentedHostTimestampNanoseconds
+        = source.presentedFrameHistory.latestTimestampNanoseconds();
+    destination.lastPresentedFrameIntervalNanoseconds
+        = source.presentedFrameHistory.latestIntervalNanoseconds();
+    destination.lastPresentationLatenessNanoseconds = source.lastPresentationLatenessNanoseconds;
+    destination.maximumPresentationLatenessNanoseconds
+        = source.maximumPresentationLatenessNanoseconds;
+    destination.presentedFrames = source.presentedFrames.load(std::memory_order_relaxed);
+    destination.presentationLatenessSamples
+        = source.presentationLatenessSamples.load(std::memory_order_relaxed);
+    destination.presentationLatenessUnclassifiableSamples
+        = source.presentationLatenessUnclassifiableSamples.load(std::memory_order_relaxed);
+    destination.presentationHistoryDiscardedTimestamps
+        = source.presentationHistoryDiscardedTimestamps.load(std::memory_order_relaxed);
+    destination.presentationsAfterTarget
+        = source.presentationsAfterTarget.load(std::memory_order_relaxed);
+    os_unfair_lock_unlock(&source.presentedFrameHistoryLock);
+}
+
 void recordPresentedDrawable(const std::shared_ptr<SharedRenderState>& state,
     RenderBufferAdmission admission, const std::shared_ptr<AtomicRenderTelemetry>& telemetry,
-    id<MTLDrawable> drawable, CFTimeInterval targetPresentationTimestamp) noexcept
+    id<MTLDrawable> drawable, CFTimeInterval targetPresentationTimestamp,
+    const std::uint64_t presentationSequence) noexcept
 {
     telemetry->presentationCallbacks.fetch_add(1, std::memory_order_relaxed);
 
@@ -296,30 +370,37 @@ void recordPresentedDrawable(const std::shared_ptr<SharedRenderState>& state,
         return;
 
     const auto presentedNanoseconds = hostTimeNanoseconds(presentedTime);
-    auto previous
-        = telemetry->lastPresentedHostTimestampNanoseconds.load(std::memory_order_relaxed);
+    const auto hasTargetPresentationTimestamp
+        = std::isfinite(targetPresentationTimestamp) && targetPresentationTimestamp > 0.0;
+    const auto presentationLateness = hasTargetPresentationTimestamp
+        ? positiveHostTimeDifference(presentedTime, targetPresentationTimestamp)
+        : 0;
+    os_unfair_lock_lock(&telemetry->presentedFrameHistoryLock);
+    const auto historyAccepted = telemetry->presentedFrameHistory.recordPresentation(
+        presentationSequence, presentedNanoseconds);
 
-    while (presentedNanoseconds > previous
-        && !telemetry->lastPresentedHostTimestampNanoseconds.compare_exchange_weak(previous,
-            presentedNanoseconds, std::memory_order_relaxed, std::memory_order_relaxed)) { }
+    if (hasTargetPresentationTimestamp) {
+        telemetry->maximumPresentationLatenessNanoseconds
+            = std::max(telemetry->maximumPresentationLatenessNanoseconds, presentationLateness);
+        telemetry->presentationLatenessSamples.fetch_add(1, std::memory_order_relaxed);
 
-    if (presentedNanoseconds > previous && previous != 0) {
-        telemetry->lastPresentedFrameIntervalNanoseconds.store(
-            presentedNanoseconds - previous, std::memory_order_relaxed);
+        if (presentedNanoseconds > telemetry->lastPresentationLatenessTimestampNanoseconds) {
+            telemetry->lastPresentationLatenessTimestampNanoseconds = presentedNanoseconds;
+            telemetry->lastPresentationLatenessNanoseconds = presentationLateness;
+        }
+    } else {
+        telemetry->presentationLatenessUnclassifiableSamples.fetch_add(
+            1, std::memory_order_relaxed);
     }
 
-    if (std::isfinite(targetPresentationTimestamp) && targetPresentationTimestamp > 0.0) {
-        const auto presentationLateness
-            = positiveHostTimeDifference(presentedTime, targetPresentationTimestamp);
-        telemetry->lastPresentationLatenessNanoseconds.store(
-            presentationLateness, std::memory_order_relaxed);
-        updateMaximum(telemetry->maximumPresentationLatenessNanoseconds, presentationLateness);
+    if (!historyAccepted)
+        telemetry->presentationHistoryDiscardedTimestamps.fetch_add(1, std::memory_order_relaxed);
 
-        if (presentationLateness != 0)
-            telemetry->presentationsAfterTarget.fetch_add(1, std::memory_order_relaxed);
-    }
+    if (hasTargetPresentationTimestamp && presentationLateness != 0)
+        telemetry->presentationsAfterTarget.fetch_add(1, std::memory_order_relaxed);
 
     telemetry->presentedFrames.fetch_add(1, std::memory_order_relaxed);
+    os_unfair_lock_unlock(&telemetry->presentedFrameHistoryLock);
 }
 
 const char* metalShaderSource = R"metal(
@@ -397,8 +478,6 @@ public:
             layer.presentsWithTransaction = NO;
         }
 
-        setMetalPerformanceHudEnabled(metalPerformanceHudEnabled);
-
         [view attachRenderBackend:this];
 
         if (![view hasDisplayLink]) {
@@ -422,7 +501,6 @@ public:
         setEffectiveActive(false);
 
         if (view != nil) {
-            setMetalPerformanceHudEnabled(false);
             view.paused = YES;
             view.delegate = nil;
             [view detachRenderBackend];
@@ -471,27 +549,10 @@ public:
         return initializationError;
     }
 
-    void setMetalPerformanceHudEnabled(bool shouldBeEnabled)
+    void setEffectiveActivityCallback(MetalVisualization::EffectiveActivityCallback callback)
     {
         assertMessageThread();
-        metalPerformanceHudEnabled = shouldBeEnabled;
-
-        if (view == nil || ![view.layer isKindOfClass:[CAMetalLayer class]])
-            return;
-
-        auto* layer = static_cast<CAMetalLayer*>(view.layer);
-
-        if (shouldBeEnabled) {
-            layer.developerHUDProperties = @ {
-                @"mode" : @"main",
-                @"logging" : @"disabled",
-                @"MTL_HUD_DISABLE_MENU_BAR" : @"1",
-                @"MTL_HUD_ELEMENTS" : @"fps,frameinterval,frameintervalgraph,gputime,metalcpu,"
-                                      @"presentdelay,layersize,layerscale"
-            };
-        } else {
-            layer.developerHUDProperties = @ { @"mode" : @"disabled" };
-        }
+        effectiveActivityCallback = std::move(callback);
     }
 
     void setSpectrumSettings(SpectrumRenderSettings settings) noexcept
@@ -513,26 +574,28 @@ public:
         result.displayLinkCallbacks
             = telemetry->displayLinkCallbacks.load(std::memory_order_relaxed);
         result.submittedFrames = telemetry->submittedFrames.load(std::memory_order_relaxed);
-        result.completedFrames = telemetry->completedFrames.load(std::memory_order_relaxed);
         result.commandBufferFailures
             = telemetry->commandBufferFailures.load(std::memory_order_relaxed);
         result.presentationCallbacks
             = telemetry->presentationCallbacks.load(std::memory_order_relaxed);
-        result.presentedFrames = telemetry->presentedFrames.load(std::memory_order_relaxed);
-        result.presentationsAfterTarget
-            = telemetry->presentationsAfterTarget.load(std::memory_order_relaxed);
         result.skippedPresentations
             = telemetry->skippedPresentations.load(std::memory_order_relaxed);
         result.gpuBackpressureDrops
             = telemetry->gpuBackpressureDrops.load(std::memory_order_relaxed);
         result.drawableUnavailableDrops
             = telemetry->drawableUnavailableDrops.load(std::memory_order_relaxed);
+        result.callbackHostDelaySamples
+            = telemetry->callbackHostDelaySamples.load(std::memory_order_relaxed);
+        result.callbackHostDelayUnclassifiableSamples
+            = telemetry->callbackHostDelayUnclassifiableSamples.load(std::memory_order_relaxed);
         result.callbackAlreadyLateHostDelays
             = telemetry->callbackAlreadyLateHostDelays.load(std::memory_order_relaxed);
+        result.cpuCommitLatenessSamples
+            = telemetry->cpuCommitLatenessSamples.load(std::memory_order_relaxed);
+        result.cpuCommitLatenessUnclassifiableSamples
+            = telemetry->cpuCommitLatenessUnclassifiableSamples.load(std::memory_order_relaxed);
         result.cpuCommitDeadlineMisses
             = telemetry->cpuCommitDeadlineMisses.load(std::memory_order_relaxed);
-        result.gpuCompletionDeadlineMisses
-            = telemetry->gpuCompletionDeadlineMisses.load(std::memory_order_relaxed);
         result.analysisRequestCalls
             = telemetry->analysisRequestCalls.load(std::memory_order_relaxed);
         result.snapshotReads = telemetry->snapshotReads.load(std::memory_order_relaxed);
@@ -544,30 +607,16 @@ public:
             = telemetry->lastCpuEncodeNanoseconds.load(std::memory_order_relaxed);
         result.maximumCpuEncodeNanoseconds
             = telemetry->maximumCpuEncodeNanoseconds.load(std::memory_order_relaxed);
-        result.lastGpuExecutionNanoseconds
-            = telemetry->lastGpuExecutionNanoseconds.load(std::memory_order_relaxed);
-        result.maximumGpuExecutionNanoseconds
-            = telemetry->maximumGpuExecutionNanoseconds.load(std::memory_order_relaxed);
         result.lastDisplayCallbackIntervalNanoseconds
             = telemetry->lastDisplayCallbackIntervalNanoseconds.load(std::memory_order_relaxed);
         result.lastTargetIntervalNanoseconds
             = telemetry->lastTargetIntervalNanoseconds.load(std::memory_order_relaxed);
         result.lastTargetPresentationIntervalNanoseconds
             = telemetry->lastTargetPresentationIntervalNanoseconds.load(std::memory_order_relaxed);
-        result.lastPresentedFrameIntervalNanoseconds
-            = telemetry->lastPresentedFrameIntervalNanoseconds.load(std::memory_order_relaxed);
-        result.lastPresentedHostTimestampNanoseconds
-            = telemetry->lastPresentedHostTimestampNanoseconds.load(std::memory_order_relaxed);
-        result.lastPresentationLatenessNanoseconds
-            = telemetry->lastPresentationLatenessNanoseconds.load(std::memory_order_relaxed);
-        result.maximumPresentationLatenessNanoseconds
-            = telemetry->maximumPresentationLatenessNanoseconds.load(std::memory_order_relaxed);
         result.lastCallbackHostDelayNanoseconds
             = telemetry->lastCallbackHostDelayNanoseconds.load(std::memory_order_relaxed);
         result.lastCpuCommitLatenessNanoseconds
             = telemetry->lastCpuCommitLatenessNanoseconds.load(std::memory_order_relaxed);
-        result.lastGpuCompletionLatenessNanoseconds
-            = telemetry->lastGpuCompletionLatenessNanoseconds.load(std::memory_order_relaxed);
         result.lastTargetTimestampNanoseconds
             = telemetry->lastTargetTimestampNanoseconds.load(std::memory_order_relaxed);
         result.lastTargetPresentationTimestampNanoseconds
@@ -576,6 +625,8 @@ public:
             = telemetry->lastProvidedDrawableAccessNanoseconds.load(std::memory_order_relaxed);
         result.maximumProvidedDrawableAccessNanoseconds
             = telemetry->maximumProvidedDrawableAccessNanoseconds.load(std::memory_order_relaxed);
+        copyGpuTelemetry(*telemetry, result);
+        copyPresentedFrameTelemetry(*telemetry, result);
         result.drawableWidthPixels = telemetry->drawableWidthPixels.load(std::memory_order_relaxed);
         result.drawableHeightPixels
             = telemetry->drawableHeightPixels.load(std::memory_order_relaxed);
@@ -593,7 +644,15 @@ public:
 
     void resetTelemetry()
     {
+        assertMessageThread();
         queueTelemetryReset();
+
+        // An active display link installs the replacement at the next callback
+        // boundary. Without callbacks there is no reason to leave the reset
+        // pending: the message thread is already a safe boundary and in-flight
+        // completion/presentation handlers retain the old telemetry object.
+        if (!effectiveActive.load(std::memory_order_acquire) || !metalReady || view == nil)
+            applyPendingTelemetryAtSafeBoundary();
     }
 
     void nativeViewStateChanged()
@@ -618,11 +677,11 @@ public:
 
         const auto callbackTime = Clock::now();
         const auto callbackHostTime = CACurrentMediaTime();
-        applyPendingStateAtDisplayCallbackBoundary();
+        applyPendingTelemetryAtSafeBoundary();
         const auto telemetry = callbackTelemetry;
         const auto targetTimestamp = update.targetTimestamp;
         const auto targetPresentationTimestamp = update.targetPresentationTimestamp;
-        recordDisplayLinkCallback(
+        const auto presentationSequence = recordDisplayLinkCallback(
             *telemetry, callbackHostTime, targetTimestamp, targetPresentationTimestamp);
 
         const auto admission = acquireRenderBuffer();
@@ -727,7 +786,7 @@ public:
         auto presentationTelemetry = telemetry;
         [drawable addPresentedHandler:^(id<MTLDrawable> presentedDrawable) {
             recordPresentedDrawable(presentationState, admission, presentationTelemetry,
-                presentedDrawable, targetPresentationTimestamp);
+                presentedDrawable, targetPresentationTimestamp, presentationSequence);
             releaseRenderBuffer(presentationState, admission);
         }];
 
@@ -743,24 +802,43 @@ public:
 
             const auto gpuStart = completedBuffer.GPUStartTime;
             const auto gpuEnd = completedBuffer.GPUEndTime;
+            const auto hasGpuTiming = std::isfinite(gpuStart) && std::isfinite(gpuEnd)
+                && gpuEnd >= gpuStart && gpuStart > 0.0;
+            const auto hasTargetPresentationTimestamp
+                = std::isfinite(targetPresentationTimestamp) && targetPresentationTimestamp > 0.0;
 
-            if (gpuEnd >= gpuStart && gpuStart > 0.0) {
+            os_unfair_lock_lock(&completionTelemetry->gpuTelemetryLock);
+            if (hasGpuTiming) {
                 const auto gpuNanoseconds = positiveHostTimeDifference(gpuEnd, gpuStart);
                 completionTelemetry->lastGpuExecutionNanoseconds.store(
                     gpuNanoseconds, std::memory_order_relaxed);
                 updateMaximum(completionTelemetry->maximumGpuExecutionNanoseconds, gpuNanoseconds);
+                completionTelemetry->gpuTimingSamples.fetch_add(1, std::memory_order_relaxed);
 
-                const auto completionLateness
-                    = positiveHostTimeDifference(gpuEnd, targetPresentationTimestamp);
-                completionTelemetry->lastGpuCompletionLatenessNanoseconds.store(
-                    completionLateness, std::memory_order_relaxed);
-
-                if (completionLateness != 0)
-                    completionTelemetry->gpuCompletionDeadlineMisses.fetch_add(
+                if (hasTargetPresentationTimestamp) {
+                    const auto completionLateness
+                        = positiveHostTimeDifference(gpuEnd, targetPresentationTimestamp);
+                    completionTelemetry->lastGpuCompletionLatenessNanoseconds.store(
+                        completionLateness, std::memory_order_relaxed);
+                    completionTelemetry->gpuCompletionLatenessSamples.fetch_add(
                         1, std::memory_order_relaxed);
+
+                    if (completionLateness != 0)
+                        completionTelemetry->gpuCompletionDeadlineMisses.fetch_add(
+                            1, std::memory_order_relaxed);
+                } else {
+                    completionTelemetry->gpuCompletionLatenessUnclassifiableSamples.fetch_add(
+                        1, std::memory_order_relaxed);
+                }
+            } else {
+                completionTelemetry->gpuTimingUnavailableSamples.fetch_add(
+                    1, std::memory_order_relaxed);
+                completionTelemetry->gpuCompletionLatenessUnclassifiableSamples.fetch_add(
+                    1, std::memory_order_relaxed);
             }
 
             completionTelemetry->completedFrames.fetch_add(1, std::memory_order_relaxed);
+            os_unfair_lock_unlock(&completionTelemetry->gpuTelemetryLock);
         }];
 
         [commandBuffer commit];
@@ -770,13 +848,22 @@ public:
         [drawable present];
 
         const auto commitHostTime = CACurrentMediaTime();
-        const auto commitLateness
-            = positiveHostTimeDifference(commitHostTime, targetPresentationTimestamp);
-        telemetry->lastCpuCommitLatenessNanoseconds.store(
-            commitLateness, std::memory_order_relaxed);
+        const auto hasCpuCommitLateness = std::isfinite(commitHostTime) && commitHostTime > 0.0
+            && std::isfinite(targetPresentationTimestamp) && targetPresentationTimestamp > 0.0;
 
-        if (commitLateness != 0)
-            telemetry->cpuCommitDeadlineMisses.fetch_add(1, std::memory_order_relaxed);
+        if (hasCpuCommitLateness) {
+            const auto commitLateness
+                = positiveHostTimeDifference(commitHostTime, targetPresentationTimestamp);
+            telemetry->lastCpuCommitLatenessNanoseconds.store(
+                commitLateness, std::memory_order_relaxed);
+            telemetry->cpuCommitLatenessSamples.fetch_add(1, std::memory_order_relaxed);
+
+            if (commitLateness != 0)
+                telemetry->cpuCommitDeadlineMisses.fetch_add(1, std::memory_order_relaxed);
+        } else {
+            telemetry->cpuCommitLatenessUnclassifiableSamples.fetch_add(
+                1, std::memory_order_relaxed);
+        }
 
         const auto cpuNanoseconds = nanosecondsBetween(callbackTime, Clock::now());
         telemetry->lastCpuEncodeNanoseconds.store(cpuNanoseconds, std::memory_order_relaxed);
@@ -796,7 +883,6 @@ private:
     id<MTLRenderPipelineState> pipelineState = nil;
     juce::String initializationError;
     bool metalReady = false;
-    bool metalPerformanceHudEnabled = false;
     std::atomic<std::uint64_t> packedSpectrumSettings { 0 };
     std::atomic<std::uint64_t> requestedTelemetryEpoch { 1 };
 
@@ -804,6 +890,7 @@ private:
     std::atomic<bool> juceShowing { false };
     std::atomic<bool> effectiveActive { false };
     std::atomic<bool> hasShutDown { false };
+    MetalVisualization::EffectiveActivityCallback effectiveActivityCallback;
 
     VisualizationFrame targetFrame;
     std::array<float, spectrumBinCount> displayedSpectrum { };
@@ -982,7 +1069,7 @@ private:
         resetTelemetryTimingAtCallbackBoundary();
     }
 
-    void applyPendingStateAtDisplayCallbackBoundary()
+    void applyPendingTelemetryAtSafeBoundary()
     {
         if (auto replacement = std::atomic_exchange_explicit(&pendingTelemetry,
                 std::shared_ptr<AtomicRenderTelemetry> { }, std::memory_order_acq_rel);
@@ -1008,12 +1095,14 @@ private:
             source.setVisualizationActive(true);
             resetRendererStateWhileDisplayLinkIsPaused();
             queueTelemetryReset();
+            applyPendingTelemetryAtSafeBoundary();
             effectiveActive.store(true, std::memory_order_release);
             loadPublishedTelemetry()->effectivelyRendering.store(true, std::memory_order_relaxed);
 
             if (view != nil)
                 [view setDisplayLinkPaused:NO];
 
+            notifyEffectiveActivityChanged(true);
             return;
         }
 
@@ -1022,7 +1111,9 @@ private:
 
         effectiveActive.store(false, std::memory_order_release);
         loadPublishedTelemetry()->effectivelyRendering.store(false, std::memory_order_relaxed);
+        applyPendingTelemetryAtSafeBoundary();
         source.setVisualizationActive(false);
+        notifyEffectiveActivityChanged(false);
     }
 
     void refreshEffectiveActivity()
@@ -1041,6 +1132,18 @@ private:
             && nativeViewIsVisible;
 
         setEffectiveActive(shouldRender);
+    }
+
+    void notifyEffectiveActivityChanged(const bool isActive) noexcept
+    {
+        if (!effectiveActivityCallback)
+            return;
+
+        try {
+            effectiveActivityCallback(isActive);
+        } catch (...) {
+            // A diagnostics/lifecycle observer must never destabilize its host.
+        }
     }
 
     void updateScreenProperties()
@@ -1090,11 +1193,12 @@ private:
         return { };
     }
 
-    void recordDisplayLinkCallback(AtomicRenderTelemetry& telemetry,
+    std::uint64_t recordDisplayLinkCallback(AtomicRenderTelemetry& telemetry,
         CFTimeInterval callbackHostTime, CFTimeInterval targetTimestamp,
         CFTimeInterval targetPresentationTimestamp) noexcept
     {
-        telemetry.displayLinkCallbacks.fetch_add(1, std::memory_order_relaxed);
+        const auto presentationSequence
+            = telemetry.displayLinkCallbacks.fetch_add(1, std::memory_order_relaxed) + 1;
         telemetry.lastTargetTimestampNanoseconds.store(
             hostTimeNanoseconds(targetTimestamp), std::memory_order_relaxed);
         telemetry.lastTargetPresentationTimestampNanoseconds.store(
@@ -1116,17 +1220,27 @@ private:
                     targetPresentationTimestamp, previousTargetPresentationTimestamp),
                 std::memory_order_relaxed);
 
-        const auto callbackHostDelay
-            = positiveHostTimeDifference(callbackHostTime, targetTimestamp);
-        telemetry.lastCallbackHostDelayNanoseconds.store(
-            callbackHostDelay, std::memory_order_relaxed);
+        const auto hasCallbackHostDelay = std::isfinite(callbackHostTime) && callbackHostTime > 0.0
+            && std::isfinite(targetTimestamp) && targetTimestamp > 0.0;
 
-        if (callbackHostDelay != 0)
-            telemetry.callbackAlreadyLateHostDelays.fetch_add(1, std::memory_order_relaxed);
+        if (hasCallbackHostDelay) {
+            const auto callbackHostDelay
+                = positiveHostTimeDifference(callbackHostTime, targetTimestamp);
+            telemetry.lastCallbackHostDelayNanoseconds.store(
+                callbackHostDelay, std::memory_order_relaxed);
+            telemetry.callbackHostDelaySamples.fetch_add(1, std::memory_order_relaxed);
+
+            if (callbackHostDelay != 0)
+                telemetry.callbackAlreadyLateHostDelays.fetch_add(1, std::memory_order_relaxed);
+        } else {
+            telemetry.callbackHostDelayUnclassifiableSamples.fetch_add(
+                1, std::memory_order_relaxed);
+        }
 
         previousDisplayCallbackHostTime = callbackHostTime;
         previousTargetTimestamp = targetTimestamp;
         previousTargetPresentationTimestamp = targetPresentationTimestamp;
+        return presentationSequence;
     }
 
     void acceptSnapshot(const VisualizationFrame& incoming, AtomicRenderTelemetry& telemetry)
@@ -1564,10 +1678,9 @@ juce::String MetalVisualization::getInitializationError() const
     return impl->backend->getInitializationError();
 }
 
-void MetalVisualization::setMetalPerformanceHudEnabled(bool shouldBeEnabled)
+void MetalVisualization::setEffectiveActivityCallback(EffectiveActivityCallback callback)
 {
-    jassert(juce::MessageManager::getInstance()->isThisTheMessageThread());
-    impl->backend->setMetalPerformanceHudEnabled(shouldBeEnabled);
+    impl->backend->setEffectiveActivityCallback(std::move(callback));
 }
 
 void MetalVisualization::setSpectrumSettings(SpectrumRenderSettings settings) noexcept
