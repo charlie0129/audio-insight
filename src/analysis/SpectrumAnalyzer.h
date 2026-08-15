@@ -4,6 +4,7 @@
 
 #include "StereoSampleCapture.h"
 #include "core/SpectrumAnalysisConfiguration.h"
+#include "core/SpectrumTemporalConfiguration.h"
 #include "core/VisualizationFrame.h"
 
 #include <juce_dsp/juce_dsp.h>
@@ -32,6 +33,8 @@ public:
         std::uint64_t temporalResets = 0;
         std::uint64_t sequenceGapResets = 0;
         std::uint64_t configurationChanges = 0;
+        std::uint64_t temporalConfigurationChanges = 0;
+        std::uint64_t userClears = 0;
     };
 
     SpectrumAnalyzer();
@@ -47,12 +50,19 @@ public:
         std::uint64_t fftGeneration,
         VisualizationFrame* destinationToInvalidate = nullptr) noexcept;
 
+    /** Applies averaging/hold settings without resetting FFT overlap or its generation. */
+    [[nodiscard]] bool reconfigureTemporal(const SpectrumTemporalConfiguration& configuration,
+        VisualizationFrame* destinationToInvalidate = nullptr) noexcept;
+
     /** Consumes one captured chunk and publishes every completed transform. */
     [[nodiscard]] bool process(
         const CapturedStereoChunkView& chunk, VisualizationFrame& destination) noexcept;
 
     /** Explicit capture/lifecycle reset. */
     void reset(VisualizationFrame* destinationToInvalidate = nullptr) noexcept;
+
+    /** User Clear: resets only Spectrum averaging and holds, preserving FFT overlap. */
+    void clearTemporalState(VisualizationFrame* destinationToInvalidate = nullptr) noexcept;
 
     [[nodiscard]] Statistics statistics() const noexcept
     {
@@ -82,9 +92,15 @@ public:
     {
         return sampleRate_;
     }
+    [[nodiscard]] SpectrumTemporalConfiguration temporalConfiguration() const noexcept
+    {
+        return temporalConfiguration_;
+    }
 
     [[nodiscard]] static bool isSupportedConfiguration(
         const SpectrumAnalysisConfiguration& configuration) noexcept;
+    [[nodiscard]] static bool isSupportedTemporalConfiguration(
+        const SpectrumTemporalConfiguration& configuration) noexcept;
 
 private:
     static constexpr std::size_t maximumTransformWorkspaceSize = maximumFftSize * 2;
@@ -99,6 +115,8 @@ private:
     };
 
     void resetTemporalState(ResetReason reason, VisualizationFrame* destination) noexcept;
+    void resetSpectrumTemporalState(VisualizationFrame* destination) noexcept;
+    void invalidateSpectrum(VisualizationFrame& destination) const noexcept;
     void configureSampleRate(double sampleRate) noexcept;
     void buildWindow() noexcept;
     void runTransform(std::uint64_t generation, std::uint64_t capturedFrameEnd,
@@ -106,7 +124,7 @@ private:
     void prepareChannelTransform(const std::array<float, maximumFftSize>& ring,
         std::array<float, maximumTransformWorkspaceSize>& workspace) noexcept;
     [[nodiscard]] juce::dsp::FFT& selectedFft() noexcept;
-    [[nodiscard]] static float magnitudeToDecibels(float magnitude) noexcept;
+    [[nodiscard]] static float powerToDecibels(float power) noexcept;
 
     juce::dsp::FFT fft1024_ { 10 };
     juce::dsp::FFT fft2048_ { 11 };
@@ -120,6 +138,7 @@ private:
     std::array<float, maximumTransformWorkspaceSize> rightWorkspace_ { };
 
     SpectrumAnalysisConfiguration configuration_;
+    SpectrumTemporalConfiguration temporalConfiguration_;
     std::uint64_t fftGeneration_ = 1;
     double sampleRate_ = 0.0;
     float interiorBinScale_ = 0.0F;
@@ -129,6 +148,12 @@ private:
     std::size_t writeIndex_ = 0;
     std::size_t validSampleCount_ = 0;
     std::size_t samplesSinceTransform_ = 0;
+    std::array<float, maximumSpectrumBinCount> averagedPower_ { };
+    std::array<float, maximumSpectrumBinCount> latestPower_ { };
+    std::array<float, maximumSpectrumBinCount> heldPower_ { };
+    std::array<double, maximumSpectrumBinCount> finiteHoldRemainingSeconds_ { };
+    std::uint64_t previousTransformCapturedFrameEnd_ = 0;
+    bool hasSpectrumTemporalState_ = false;
     bool hasProducedSinceReset_ = false;
     bool hasPreviousChunk_ = false;
     std::uint64_t previousGeneration_ = 0;

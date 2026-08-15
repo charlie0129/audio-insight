@@ -67,6 +67,14 @@ SpectrumAnalysisConfiguration spectrumAnalysisConfiguration(
     return { static_cast<std::size_t>(configuration.sharedAnalysis.fftSize),
         configuration.sharedAnalysis.window, configuration.sharedAnalysis.requestedFftSliceRateHz };
 }
+
+SpectrumTemporalConfiguration spectrumTemporalConfiguration(
+    const AnalyzerConfiguration& configuration) noexcept
+{
+    return { configuration.spectrum.temporalAveraging.enabled,
+        configuration.spectrum.temporalAveraging.milliseconds, configuration.spectrum.peakHoldMode,
+        configuration.spectrum.finitePeakHoldSeconds };
+}
 } // namespace
 
 PluginProcessor::PluginProcessor()
@@ -269,6 +277,8 @@ void PluginProcessor::replaceAnalyzerConfiguration(
 
     analysisCoordinator.setSpectrumAnalysisConfiguration(
         spectrumAnalysisConfiguration(configuration));
+    analysisCoordinator.setSpectrumTemporalConfiguration(
+        spectrumTemporalConfiguration(configuration));
 
     analyzerConfigurationListeners.call(
         [](AnalyzerConfigurationListener& listener) { listener.analyzerConfigurationChanged(); });
@@ -307,6 +317,11 @@ void PluginProcessor::setVisualizationActive(const bool shouldBeActive) noexcept
 void PluginProcessor::resetPeakRms() noexcept
 {
     analysisCoordinator.resetPeakRms();
+}
+
+void PluginProcessor::resetSpectrum() noexcept
+{
+    analysisCoordinator.resetSpectrum();
 }
 
 bool PluginProcessor::copyLatestVisualizationFrame(VisualizationFrame& destination) const noexcept

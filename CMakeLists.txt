@@ -202,6 +202,7 @@ target_sources(AudioInsight
         src/analysis/StereoSampleCapture.h
         src/core/VisualizationDataSource.h
         src/core/SpectrumAnalysisConfiguration.h
+        src/core/SpectrumTemporalConfiguration.h
         src/core/VisualizationFrame.h
         src/plugin/PluginEditor.cpp
         src/plugin/PluginEditor.h
@@ -272,6 +273,7 @@ source_group(TREE "${CMAKE_CURRENT_SOURCE_DIR}" FILES
     src/analysis/StereoSampleCapture.h
     src/core/VisualizationDataSource.h
     src/core/SpectrumAnalysisConfiguration.h
+    src/core/SpectrumTemporalConfiguration.h
     src/core/VisualizationFrame.h
     src/plugin/PluginEditor.cpp
     src/plugin/PluginEditor.h
@@ -325,6 +327,7 @@ if(BUILD_TESTING)
             src/analysis/StereoSampleCapture.h
             src/core/VisualizationDataSource.h
             src/core/SpectrumAnalysisConfiguration.h
+            src/core/SpectrumTemporalConfiguration.h
             src/core/VisualizationFrame.h
             src/plugin/PluginEditor.cpp
             src/plugin/PluginEditor.h
@@ -424,6 +427,7 @@ if(BUILD_TESTING)
         src/analysis/StereoSampleCapture.h
         src/core/VisualizationDataSource.h
         src/core/SpectrumAnalysisConfiguration.h
+        src/core/SpectrumTemporalConfiguration.h
         src/core/VisualizationFrame.h
         src/plugin/PluginEditor.cpp
         src/plugin/PluginEditor.h

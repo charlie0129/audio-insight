@@ -67,6 +67,21 @@ bool SpectrumAnalyzer::reconfigure(const SpectrumAnalysisConfiguration& configur
     return true;
 }
 
+bool SpectrumAnalyzer::reconfigureTemporal(const SpectrumTemporalConfiguration& configuration,
+    VisualizationFrame* const destinationToInvalidate) noexcept
+{
+    if (!isSupportedTemporalConfiguration(configuration))
+        return false;
+
+    if (configuration == temporalConfiguration_)
+        return true;
+
+    temporalConfiguration_ = configuration;
+    resetSpectrumTemporalState(destinationToInvalidate);
+    ++statistics_.temporalConfigurationChanges;
+    return true;
+}
+
 bool SpectrumAnalyzer::process(
     const CapturedStereoChunkView& chunk, VisualizationFrame& destination) noexcept
 {
@@ -158,6 +173,13 @@ void SpectrumAnalyzer::reset(VisualizationFrame* const destinationToInvalidate) 
     previousChannelCount_ = 0;
 }
 
+void SpectrumAnalyzer::clearTemporalState(
+    VisualizationFrame* const destinationToInvalidate) noexcept
+{
+    resetSpectrumTemporalState(destinationToInvalidate);
+    ++statistics_.userClears;
+}
+
 bool SpectrumAnalyzer::isSupportedConfiguration(
     const SpectrumAnalysisConfiguration& configuration) noexcept
 {
@@ -187,6 +209,33 @@ bool SpectrumAnalyzer::isSupportedConfiguration(
     return false;
 }
 
+bool SpectrumAnalyzer::isSupportedTemporalConfiguration(
+    const SpectrumTemporalConfiguration& configuration) noexcept
+{
+    constexpr auto minimumAveragingMilliseconds = 25.0;
+    constexpr auto maximumAveragingMilliseconds = 2'000.0;
+    constexpr auto minimumPeakHoldSeconds = 0.25;
+    constexpr auto maximumPeakHoldSeconds = 10.0;
+
+    if (!std::isfinite(configuration.averagingMilliseconds)
+        || configuration.averagingMilliseconds < minimumAveragingMilliseconds
+        || configuration.averagingMilliseconds > maximumAveragingMilliseconds
+        || !std::isfinite(configuration.finitePeakHoldSeconds)
+        || configuration.finitePeakHoldSeconds < minimumPeakHoldSeconds
+        || configuration.finitePeakHoldSeconds > maximumPeakHoldSeconds) {
+        return false;
+    }
+
+    switch (configuration.peakHoldMode) {
+    case SpectrumPeakHoldMode::off:
+    case SpectrumPeakHoldMode::finite:
+    case SpectrumPeakHoldMode::infinite:
+        return true;
+    }
+
+    return false;
+}
+
 void SpectrumAnalyzer::resetTemporalState(
     const ResetReason reason, VisualizationFrame* const destination) noexcept
 {
@@ -196,18 +245,36 @@ void SpectrumAnalyzer::resetTemporalState(
     validSampleCount_ = 0;
     samplesSinceTransform_ = 0;
     hasProducedSinceReset_ = false;
+    latestPower_.fill(0.0F);
+    resetSpectrumTemporalState(destination);
     ++statistics_.temporalResets;
 
     if (reason == ResetReason::sequenceGap || reason == ResetReason::capturedFrameGap)
         ++statistics_.sequenceGapResets;
+}
 
-    if (destination != nullptr) {
-        destination->spectrumDecibels.fill(minimumSpectrumDecibels);
-        destination->fftGeneration = fftGeneration_;
-        destination->spectrumFftSize = static_cast<std::uint32_t>(configuration_.fftSize);
-        destination->spectrumBinCount = static_cast<std::uint32_t>(configuredBinCount_);
-        destination->spectrumValid = false;
-    }
+void SpectrumAnalyzer::resetSpectrumTemporalState(VisualizationFrame* const destination) noexcept
+{
+    averagedPower_.fill(0.0F);
+    heldPower_.fill(0.0F);
+    finiteHoldRemainingSeconds_.fill(0.0);
+    previousTransformCapturedFrameEnd_ = 0;
+    hasSpectrumTemporalState_ = false;
+
+    if (destination != nullptr)
+        invalidateSpectrum(*destination);
+}
+
+void SpectrumAnalyzer::invalidateSpectrum(VisualizationFrame& destination) const noexcept
+{
+    destination.spectrumDecibels.fill(minimumSpectrumDecibels);
+    destination.spectrumPeakHoldDecibels.fill(minimumSpectrumDecibels);
+    destination.fftGeneration = fftGeneration_;
+    destination.spectrumFftSize = static_cast<std::uint32_t>(configuration_.fftSize);
+    destination.spectrumBinCount = static_cast<std::uint32_t>(configuredBinCount_);
+    destination.spectrumCapturedFrameEnd = 0;
+    destination.spectrumValid = false;
+    destination.spectrumPeakHoldValid = false;
 }
 
 void SpectrumAnalyzer::configureSampleRate(const double sampleRate) noexcept
@@ -246,6 +313,16 @@ void SpectrumAnalyzer::runTransform(const std::uint64_t generation,
         selectedFft().performFrequencyOnlyForwardTransform(rightWorkspace_.data(), true);
     }
 
+    const auto elapsedSeconds = hasSpectrumTemporalState_
+            && capturedFrameEnd > previousTransformCapturedFrameEnd_ && sampleRate_ > 0.0
+        ? static_cast<double>(capturedFrameEnd - previousTransformCapturedFrameEnd_) / sampleRate_
+        : 0.0;
+    const auto averagingCoefficient = temporalConfiguration_.averagingEnabled
+            && hasSpectrumTemporalState_ && elapsedSeconds > 0.0
+        ? std::exp(-elapsedSeconds / (temporalConfiguration_.averagingMilliseconds * 0.001))
+        : 0.0;
+    constexpr auto holdDecayDecibelsPerSecond = 12.0;
+
     for (std::size_t bin = 0; bin < configuredBinCount_; ++bin) {
         const auto scale
             = (bin == 0 || bin == configuration_.fftSize / 2) ? edgeBinScale_ : interiorBinScale_;
@@ -253,20 +330,75 @@ void SpectrumAnalyzer::runTransform(const std::uint64_t generation,
             = (channelCount == 2 ? std::max(leftWorkspace_[bin], rightWorkspace_[bin])
                                  : leftWorkspace_[bin])
             * scale;
-        destination.spectrumDecibels[bin] = magnitudeToDecibels(magnitude);
+        const auto powerAsDouble = static_cast<double>(magnitude) * magnitude;
+        const auto currentPower = std::isnan(powerAsDouble) || powerAsDouble <= 0.0
+            ? 0.0F
+            : static_cast<float>(
+                  std::min(powerAsDouble, static_cast<double>(std::numeric_limits<float>::max())));
+        latestPower_[bin] = currentPower;
+
+        if (!temporalConfiguration_.averagingEnabled || !hasSpectrumTemporalState_) {
+            averagedPower_[bin] = currentPower;
+        } else {
+            const auto averaged = (averagingCoefficient * averagedPower_[bin])
+                + ((1.0 - averagingCoefficient) * currentPower);
+            averagedPower_[bin] = static_cast<float>(
+                std::clamp(averaged, 0.0, static_cast<double>(std::numeric_limits<float>::max())));
+        }
+
+        destination.spectrumDecibels[bin] = powerToDecibels(averagedPower_[bin]);
+
+        switch (temporalConfiguration_.peakHoldMode) {
+        case SpectrumPeakHoldMode::off:
+            heldPower_[bin] = 0.0F;
+            finiteHoldRemainingSeconds_[bin] = 0.0;
+            destination.spectrumPeakHoldDecibels[bin] = minimumSpectrumDecibels;
+            break;
+        case SpectrumPeakHoldMode::infinite:
+            heldPower_[bin] = hasSpectrumTemporalState_ ? std::max(heldPower_[bin], currentPower)
+                                                        : currentPower;
+            finiteHoldRemainingSeconds_[bin] = 0.0;
+            destination.spectrumPeakHoldDecibels[bin] = powerToDecibels(heldPower_[bin]);
+            break;
+        case SpectrumPeakHoldMode::finite: {
+            if (!hasSpectrumTemporalState_ || currentPower >= heldPower_[bin]) {
+                heldPower_[bin] = currentPower;
+                finiteHoldRemainingSeconds_[bin] = temporalConfiguration_.finitePeakHoldSeconds;
+            } else {
+                const auto heldBefore = finiteHoldRemainingSeconds_[bin];
+                finiteHoldRemainingSeconds_[bin] = std::max(0.0, heldBefore - elapsedSeconds);
+                const auto decaySeconds = std::max(0.0, elapsedSeconds - heldBefore);
+                if (decaySeconds > 0.0) {
+                    const auto powerDecay
+                        = std::pow(10.0, -(holdDecayDecibelsPerSecond * decaySeconds) / 10.0);
+                    heldPower_[bin] = static_cast<float>(heldPower_[bin] * powerDecay);
+                    if (heldPower_[bin] < currentPower)
+                        heldPower_[bin] = currentPower;
+                }
+            }
+
+            destination.spectrumPeakHoldDecibels[bin] = powerToDecibels(heldPower_[bin]);
+            break;
+        }
+        }
     }
 
     destination.generation = generation;
     destination.fftGeneration = fftGeneration_;
     destination.capturedFrameEnd = capturedFrameEnd;
+    destination.spectrumCapturedFrameEnd = capturedFrameEnd;
     destination.spectrumFftSize = static_cast<std::uint32_t>(configuration_.fftSize);
     destination.spectrumBinCount = static_cast<std::uint32_t>(configuredBinCount_);
     destination.channelCount = channelCount;
     destination.sampleRate = sampleRate_;
     destination.spectrumValid = true;
+    destination.spectrumPeakHoldValid
+        = temporalConfiguration_.peakHoldMode != SpectrumPeakHoldMode::off;
 
     samplesSinceTransform_ = 0;
     hasProducedSinceReset_ = true;
+    hasSpectrumTemporalState_ = true;
+    previousTransformCapturedFrameEnd_ = capturedFrameEnd;
     ++statistics_.transforms;
 }
 
@@ -298,12 +430,12 @@ juce::dsp::FFT& SpectrumAnalyzer::selectedFft() noexcept
     }
 }
 
-float SpectrumAnalyzer::magnitudeToDecibels(const float magnitude) noexcept
+float SpectrumAnalyzer::powerToDecibels(const float power) noexcept
 {
-    constexpr auto floorLinear = 1.0e-9F;
-    if (!std::isfinite(magnitude) || magnitude <= floorLinear)
+    constexpr auto floorPower = 1.0e-18F;
+    if (!std::isfinite(power) || power <= floorPower)
         return minimumSpectrumDecibels;
 
-    return std::max(minimumSpectrumDecibels, 20.0F * std::log10(magnitude));
+    return std::max(minimumSpectrumDecibels, 10.0F * std::log10(power));
 }
 } // namespace audio_insight

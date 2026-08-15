@@ -383,6 +383,9 @@ void appendRawSections(
     PerformanceMetricGroup fftConfiguration { "FFT analysis configuration", { } };
     fftConfiguration.rows.emplace_back(rawUnsigned("analysis.fftConfigurationChanges",
         "FFT configuration changes", analysis.fftConfigurationChanges, "changes"));
+    fftConfiguration.rows.emplace_back(rawUnsigned("analysis.spectrumTemporalConfigurationChanges",
+        "Spectrum temporal configuration changes", analysis.spectrumTemporalConfigurationChanges,
+        "changes"));
     fftConfiguration.rows.emplace_back(
         rawUnsigned("analysis.fftGeneration", "FFT generation", analysis.fftGeneration));
     fftConfiguration.rows.emplace_back(rawUnsigned("analysis.configuredFftSize",
@@ -436,6 +439,8 @@ void appendRawSections(
         "Stale-clear frames published", analysis.staleFramesPublished));
     freshness.rows.emplace_back(rawUnsigned(
         "analysis.peakRmsUserResets", "Peak/RMS user resets", analysis.peakRmsUserResets));
+    freshness.rows.emplace_back(rawUnsigned(
+        "analysis.spectrumUserClears", "Spectrum user clears", analysis.spectrumUserClears));
     sections.emplace_back(std::move(freshness));
 }
 
@@ -659,9 +664,16 @@ void buildRates(const PerformanceMetricsSnapshot& current,
     appendRate(rates, "analysis.peakRmsUserResets", "Peak/RMS user resets", "resets/s",
         current.analysis.peakRmsUserResets, previous.analysis.peakRmsUserResets, elapsedSeconds,
         baselineIsValid);
+    appendRate(rates, "analysis.spectrumUserClears", "Spectrum user clears", "clears/s",
+        current.analysis.spectrumUserClears, previous.analysis.spectrumUserClears, elapsedSeconds,
+        baselineIsValid);
     appendRate(rates, "analysis.fftConfigurationChanges", "FFT configuration changes", "changes/s",
         current.analysis.fftConfigurationChanges, previous.analysis.fftConfigurationChanges,
         elapsedSeconds, baselineIsValid);
+    appendRate(rates, "analysis.spectrumTemporalConfigurationChanges",
+        "Spectrum temporal configuration changes", "changes/s",
+        current.analysis.spectrumTemporalConfigurationChanges,
+        previous.analysis.spectrumTemporalConfigurationChanges, elapsedSeconds, baselineIsValid);
 }
 
 void appendIntervalSample(

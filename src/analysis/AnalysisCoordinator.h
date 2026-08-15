@@ -6,6 +6,7 @@
 #include "StereoMeterAccumulator.h"
 #include "StereoSampleCapture.h"
 #include "core/SpectrumAnalysisConfiguration.h"
+#include "core/SpectrumTemporalConfiguration.h"
 #include "core/VisualizationDataSource.h"
 
 #include <atomic>
@@ -40,7 +41,9 @@ struct AnalysisTelemetry {
     std::uint64_t emptyAnalysisRequestsAvoided = 0;
     std::uint64_t staleFramesPublished = 0;
     std::uint64_t peakRmsUserResets = 0;
+    std::uint64_t spectrumUserClears = 0;
     std::uint64_t fftConfigurationChanges = 0;
+    std::uint64_t spectrumTemporalConfigurationChanges = 0;
     std::uint64_t fftGeneration = 0;
     std::uint32_t configuredFftSize = 0;
     std::uint32_t configuredFftWindow = 0;
@@ -83,8 +86,12 @@ public:
     */
     void setSpectrumAnalysisConfiguration(SpectrumAnalysisConfiguration configuration) noexcept;
 
+    /** Applies worker-side averaging/hold settings without advancing the FFT generation. */
+    void setSpectrumTemporalConfiguration(SpectrumTemporalConfiguration configuration) noexcept;
+
     void requestAnalysis() noexcept override;
     void setVisualizationActive(bool shouldBeActive) noexcept override;
+    void resetSpectrum() noexcept override;
     void resetPeakRms() noexcept override;
     [[nodiscard]] bool copyLatestVisualizationFrame(
         VisualizationFrame& destination) const noexcept override;
@@ -128,6 +135,7 @@ private:
     bool hasConfiguredFormat_ = false;
     bool staleClearRequested_ = false;
     SpectrumAnalysisConfiguration spectrumConfiguration_;
+    SpectrumTemporalConfiguration spectrumTemporalConfiguration_;
     std::int64_t analysisRequestPeriodNanoseconds_ = 16'666'667;
     std::uint64_t captureGenerationCounter_ = 0;
     std::uint64_t fftGenerationCounter_ = 1;

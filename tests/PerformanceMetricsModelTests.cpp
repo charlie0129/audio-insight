@@ -48,9 +48,9 @@ static_assert(aggregateFieldCount<MetalRenderTelemetry>() == 65);
 static_assert(aggregateFieldCount<StereoSampleCapture::Telemetry>() == 9);
 static_assert(aggregateFieldCount<StereoMeterAccumulator::Telemetry>() == 7);
 static_assert(aggregateFieldCount<SharedAnalysisScheduler::Counters>() == 3);
-static_assert(aggregateFieldCount<AnalysisTelemetry>() == 27);
+static_assert(aggregateFieldCount<AnalysisTelemetry>() == 29);
 
-constexpr std::array<std::string_view, 108> expectedRawFieldNames {
+constexpr std::array<std::string_view, 110> expectedRawFieldNames {
     "metal.epoch",
     "metal.displayLinkCallbacks",
     "metal.submittedFrames",
@@ -136,6 +136,7 @@ constexpr std::array<std::string_view, 108> expectedRawFieldNames {
     "analysis.scheduler.executed",
     "analysis.scheduler.cancelled",
     "analysis.fftConfigurationChanges",
+    "analysis.spectrumTemporalConfigurationChanges",
     "analysis.fftGeneration",
     "analysis.configuredFftSize",
     "analysis.configuredFftWindow",
@@ -159,6 +160,7 @@ constexpr std::array<std::string_view, 108> expectedRawFieldNames {
     "analysis.emptyAnalysisRequestsAvoided",
     "analysis.staleFramesPublished",
     "analysis.peakRmsUserResets",
+    "analysis.spectrumUserClears",
 };
 
 const PerformanceMetricRate* findRate(

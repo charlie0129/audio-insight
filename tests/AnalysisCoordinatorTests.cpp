@@ -278,6 +278,69 @@ public:
             expect(warmedUp.over[0] && warmedUp.over[1]);
         }
 
+        beginTest("Spectrum temporal configuration and Clear preserve unrelated state");
+        {
+            AnalysisCoordinator coordinator;
+            coordinator.setVisualizationActive(true);
+
+            std::array<float, fftSize> signal { };
+            signal.fill(1.1F);
+            coordinator.captureAudioBlock(signal.data(), signal.data(), signal.size(), 48'000.0);
+
+            VisualizationFrame beforeChange;
+            expect(waitForFrame(coordinator, beforeChange, [](const auto& candidate) {
+                return candidate.spectrumValid && candidate.meterValid && candidate.over[0];
+            }));
+            const auto telemetryBefore = coordinator.telemetry();
+
+            coordinator.setSpectrumTemporalConfiguration(
+                { true, 250.0, SpectrumPeakHoldMode::infinite, 2.0 });
+
+            VisualizationFrame invalidated;
+            expect(coordinator.copyLatestVisualizationFrame(invalidated));
+            expect(!invalidated.spectrumValid);
+            expect(!invalidated.spectrumPeakHoldValid);
+            expect(invalidated.generation == beforeChange.generation);
+            expect(invalidated.fftGeneration == beforeChange.fftGeneration);
+            expect(invalidated.meterValid);
+            expect(invalidated.meterSequence == beforeChange.meterSequence);
+            expect(invalidated.over == beforeChange.over);
+            expectWithinAbsoluteError(
+                invalidated.heldPeakDecibels[0], beforeChange.heldPeakDecibels[0], 0.0001F);
+
+            const auto telemetryAfterConfiguration = coordinator.telemetry();
+            expect(telemetryAfterConfiguration.fftGeneration == telemetryBefore.fftGeneration);
+            expect(telemetryAfterConfiguration.fftConfigurationChanges
+                == telemetryBefore.fftConfigurationChanges);
+            expect(telemetryAfterConfiguration.spectrumTemporalConfigurationChanges
+                == telemetryBefore.spectrumTemporalConfigurationChanges + 1);
+
+            std::array<float, 800> nextHop { };
+            nextHop.fill(0.25F);
+            coordinator.captureAudioBlock(nextHop.data(), nextHop.data(), nextHop.size(), 48'000.0);
+
+            VisualizationFrame warmed;
+            expect(waitForFrame(coordinator, warmed,
+                [sequence = invalidated.spectrumSequence](const auto& candidate) {
+                    return candidate.spectrumSequence > sequence && candidate.spectrumValid
+                        && candidate.spectrumPeakHoldValid;
+                }));
+
+            coordinator.resetSpectrum();
+            coordinator.resetSpectrum();
+            VisualizationFrame cleared;
+            expect(waitForFrameWithoutRequest(
+                coordinator, cleared, [sequence = warmed.spectrumSequence](const auto& candidate) {
+                    return candidate.spectrumSequence > sequence && !candidate.spectrumValid
+                        && !candidate.spectrumPeakHoldValid;
+                }));
+            expect(cleared.fftGeneration == warmed.fftGeneration);
+            expect(cleared.meterValid);
+            expect(cleared.meterSequence == warmed.meterSequence);
+            expect(cleared.over == warmed.over);
+            expect(coordinator.telemetry().spectrumUserClears == 2);
+        }
+
         beginTest("One normal capture slot is not backlog for a 1024-point FFT");
         {
             AnalysisCoordinator coordinator;

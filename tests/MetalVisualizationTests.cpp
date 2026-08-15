@@ -29,6 +29,10 @@ public:
     {
     }
 
+    void resetSpectrum() noexcept override
+    {
+    }
+
     void resetPeakRms() noexcept override
     {
     }

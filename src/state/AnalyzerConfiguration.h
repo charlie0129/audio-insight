@@ -3,6 +3,7 @@
 #pragma once
 
 #include "core/SpectrumAnalysisConfiguration.h"
+#include "core/SpectrumTemporalConfiguration.h"
 
 #include <juce_data_structures/juce_data_structures.h>
 
@@ -37,12 +38,6 @@ enum class SpectrumSlope {
     db3PerOctave,
     db4Point5PerOctave,
     db6PerOctave,
-};
-
-enum class SpectrumPeakHoldMode {
-    off,
-    finite,
-    infinite,
 };
 
 enum class SpectrogramPalette {

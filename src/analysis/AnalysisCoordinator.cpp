@@ -202,6 +202,7 @@ struct AnalysisCoordinator::State final : SharedAnalysisScheduler::JobClient {
         meterCapturedFrameEnd.store(0, std::memory_order_relaxed);
         hasPublishedAudioFrame.store(false, std::memory_order_relaxed);
         staleClearPending.store(false, std::memory_order_relaxed);
+        spectrumClearPending.store(false, std::memory_order_relaxed);
         peakRmsResetPendingEpoch.store(0, std::memory_order_relaxed);
         requiredUserResetEpoch = 0;
         requiredLiveClearEpoch = 0;
@@ -237,6 +238,22 @@ struct AnalysisCoordinator::State final : SharedAnalysisScheduler::JobClient {
         fftConfigurationChanges.fetch_add(1, std::memory_order_relaxed);
         static_cast<void>(snapshots.publish(workingFrame));
 
+        currentJobGeneration.store(jobGeneration, std::memory_order_release);
+        return true;
+    }
+
+    [[nodiscard]] bool reconfigureSpectrumTemporal(
+        const SpectrumTemporalConfiguration& configuration,
+        const std::uint64_t jobGeneration) noexcept
+    {
+        if (!spectrum.reconfigureTemporal(configuration, &workingFrame))
+            return false;
+
+        workingFrame.generation = currentCaptureGeneration.load(std::memory_order_acquire);
+        workingFrame.spectrumSequence = nextSpectrumSequence++;
+        spectrumCapturedFrameEnd.store(0, std::memory_order_relaxed);
+        spectrumTemporalConfigurationChanges.fetch_add(1, std::memory_order_relaxed);
+        static_cast<void>(snapshots.publish(workingFrame));
         currentJobGeneration.store(jobGeneration, std::memory_order_release);
         return true;
     }
@@ -283,6 +300,12 @@ struct AnalysisCoordinator::State final : SharedAnalysisScheduler::JobClient {
         const auto epoch = meters.requestUserReset();
         peakRmsResetPendingEpoch.store(epoch, std::memory_order_release);
         peakRmsUserResets.fetch_add(1, std::memory_order_relaxed);
+    }
+
+    void requestSpectrumClear() noexcept
+    {
+        spectrumClearPending.store(true, std::memory_order_release);
+        spectrumUserClears.fetch_add(1, std::memory_order_relaxed);
     }
 
     void applyPeakRmsReading(const StereoMeterReading& reading) noexcept
@@ -486,7 +509,7 @@ struct AnalysisCoordinator::State final : SharedAnalysisScheduler::JobClient {
                 newestCapturedFrameEnd
                     = std::max(newestCapturedFrameEnd, workingFrame.capturedFrameEnd);
                 spectrumCapturedFrameEnd.store(
-                    workingFrame.capturedFrameEnd, std::memory_order_relaxed);
+                    workingFrame.spectrumCapturedFrameEnd, std::memory_order_relaxed);
             } else if (spectrumWasValid && !workingFrame.spectrumValid) {
                 workingFrame.spectrumSequence = nextSpectrumSequence++;
             }
@@ -518,6 +541,13 @@ struct AnalysisCoordinator::State final : SharedAnalysisScheduler::JobClient {
                 workingFrame.meterSequence = nextMeterSequence++;
                 frameChanged = true;
             }
+        }
+
+        if (spectrumClearPending.exchange(false, std::memory_order_acq_rel)) {
+            spectrum.clearTemporalState(&workingFrame);
+            workingFrame.spectrumSequence = nextSpectrumSequence++;
+            spectrumCapturedFrameEnd.store(0, std::memory_order_relaxed);
+            frameChanged = true;
         }
 
         if (context.stopRequested()
@@ -587,7 +617,10 @@ struct AnalysisCoordinator::State final : SharedAnalysisScheduler::JobClient {
             = emptyAnalysisRequestsAvoided.load(std::memory_order_relaxed);
         result.staleFramesPublished = staleFramesPublished.load(std::memory_order_relaxed);
         result.peakRmsUserResets = peakRmsUserResets.load(std::memory_order_relaxed);
+        result.spectrumUserClears = spectrumUserClears.load(std::memory_order_relaxed);
         result.fftConfigurationChanges = fftConfigurationChanges.load(std::memory_order_relaxed);
+        result.spectrumTemporalConfigurationChanges
+            = spectrumTemporalConfigurationChanges.load(std::memory_order_relaxed);
         result.fftGeneration = currentFftGeneration.load(std::memory_order_relaxed);
         result.configuredFftSize = configuredFftSize.load(std::memory_order_relaxed);
         result.configuredFftWindow = configuredFftWindow.load(std::memory_order_relaxed);
@@ -615,6 +648,7 @@ struct AnalysisCoordinator::State final : SharedAnalysisScheduler::JobClient {
     std::atomic<bool> hasPublishedAudioFrame { false };
     std::atomic<bool> staleClearPending { false };
     std::atomic<std::uint64_t> peakRmsResetPendingEpoch { 0 };
+    std::atomic<bool> spectrumClearPending { false };
     std::atomic<std::uint64_t> staleClearRevision { 0 };
     std::atomic<std::uint64_t> jobsStarted { 0 };
     std::atomic<std::uint64_t> jobsCompleted { 0 };
@@ -631,7 +665,9 @@ struct AnalysisCoordinator::State final : SharedAnalysisScheduler::JobClient {
     std::atomic<std::uint64_t> emptyAnalysisRequestsAvoided { 0 };
     std::atomic<std::uint64_t> staleFramesPublished { 0 };
     std::atomic<std::uint64_t> peakRmsUserResets { 0 };
+    std::atomic<std::uint64_t> spectrumUserClears { 0 };
     std::atomic<std::uint64_t> fftConfigurationChanges { 0 };
+    std::atomic<std::uint64_t> spectrumTemporalConfigurationChanges { 0 };
     std::atomic<std::uint64_t> currentFftGeneration { 1 };
     std::atomic<std::uint32_t> configuredFftSize { static_cast<std::uint32_t>(fftSize) };
     std::atomic<std::uint32_t> configuredFftWindow { static_cast<std::uint32_t>(
@@ -734,6 +770,37 @@ void AnalysisCoordinator::setSpectrumAnalysisConfiguration(
             static_cast<void>(client_->request());
     } catch (...) {
         // A presentation-analysis setting must never affect transparent audio.
+    }
+}
+
+void AnalysisCoordinator::setSpectrumTemporalConfiguration(
+    SpectrumTemporalConfiguration configuration) noexcept
+{
+    try {
+        const std::lock_guard lifecycleLock(lifecycleMutex_);
+        if (client_ == nullptr || !SpectrumAnalyzer::isSupportedTemporalConfiguration(configuration)
+            || configuration == spectrumTemporalConfiguration_) {
+            return;
+        }
+
+        auto jobGeneration = client_->generation();
+        const auto isActive = captureGeneration_.load(std::memory_order_acquire) != 0;
+        if (isActive) {
+            jobGeneration = client_->cancelAndAdvanceGeneration();
+            if (!client_->waitUntilIdle())
+                return;
+        }
+
+        if (!state_->reconfigureSpectrumTemporal(configuration, jobGeneration))
+            return;
+
+        spectrumTemporalConfiguration_ = configuration;
+        nextAnalysisRequestNanoseconds_.store(0, std::memory_order_relaxed);
+
+        if (isActive)
+            static_cast<void>(client_->request());
+    } catch (...) {
+        // Analyzer presentation state must never affect transparent audio.
     }
 }
 
@@ -887,6 +954,20 @@ void AnalysisCoordinator::resetPeakRms() noexcept
         static_cast<void>(client_->request());
     } catch (...) {
         // A reset is diagnostic/presentation state and must never affect audio.
+    }
+}
+
+void AnalysisCoordinator::resetSpectrum() noexcept
+{
+    try {
+        const std::lock_guard lifecycleLock(lifecycleMutex_);
+        if (captureGeneration_.load(std::memory_order_acquire) == 0 || client_ == nullptr)
+            return;
+
+        state_->requestSpectrumClear();
+        static_cast<void>(client_->request());
+    } catch (...) {
+        // A reset is transient presentation state and must never affect audio.
     }
 }
 

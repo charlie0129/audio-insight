@@ -62,6 +62,7 @@ public:
 
     void requestAnalysis() noexcept override;
     void setVisualizationActive(bool shouldBeActive) noexcept override;
+    void resetSpectrum() noexcept override;
     void resetPeakRms() noexcept override;
     [[nodiscard]] bool copyLatestVisualizationFrame(
         VisualizationFrame& destination) const noexcept override;

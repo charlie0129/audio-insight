@@ -16,6 +16,10 @@ public:
     // Called from editor lifecycle code, never from the audio callback.
     virtual void setVisualizationActive(bool shouldBeActive) noexcept = 0;
 
+    // Called only from non-real-time UI code. Clears Spectrum averaging and
+    // peak holds while preserving FFT overlap and persistent settings.
+    virtual void resetSpectrum() noexcept = 0;
+
     // Called only from non-real-time UI code. Clears Peak/RMS holds and OVER
     // latches while preserving the current live measurements.
     virtual void resetPeakRms() noexcept = 0;

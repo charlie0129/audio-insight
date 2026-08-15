@@ -514,6 +514,122 @@ public:
             expectWithinAbsoluteError(frame.spectrumDecibels[rightBin], -6.0206F, 0.02F);
         }
 
+        beginTest("Temporal averaging seeds immediately and averages calibrated power");
+        {
+            constexpr auto configuredSize = std::size_t { 1024 };
+            constexpr auto sampleRate = 15'360.0;
+            constexpr auto generation = std::uint64_t { 9 };
+            std::array<float, configuredSize> fullScale { };
+            std::array<float, configuredSize> silence { };
+            fullScale.fill(1.0F);
+
+            SpectrumAnalyzer averaged;
+            VisualizationFrame averagedFrame;
+            expect(averaged.reconfigure(
+                { configuredSize, FftWindow::rectangular, 15 }, 2, &averagedFrame));
+            expect(averaged.reconfigureTemporal(
+                { true, 1'000.0, SpectrumPeakHoldMode::off, 2.0 }, &averagedFrame));
+            expect(averaged.process({ fullScale.data(), nullptr, fullScale.size(), generation, 1,
+                                        configuredSize, sampleRate, false, 1 },
+                averagedFrame));
+            expectWithinAbsoluteError(averagedFrame.spectrumDecibels[0], 0.0F, 0.001F);
+
+            expect(averaged.process({ silence.data(), nullptr, silence.size(), generation, 2,
+                                        configuredSize * 2, sampleRate, false, 1 },
+                averagedFrame));
+            const auto expectedPower = std::exp(-(1.0 / 15.0));
+            const auto expectedDecibels = static_cast<float>(10.0 * std::log10(expectedPower));
+            expectWithinAbsoluteError(averagedFrame.spectrumDecibels[0], expectedDecibels, 0.001F);
+
+            SpectrumAnalyzer immediate;
+            VisualizationFrame immediateFrame;
+            expect(immediate.reconfigure(
+                { configuredSize, FftWindow::rectangular, 15 }, 2, &immediateFrame));
+            expect(immediate.reconfigureTemporal(
+                { false, 1'000.0, SpectrumPeakHoldMode::off, 2.0 }, &immediateFrame));
+            expect(immediate.process({ fullScale.data(), nullptr, fullScale.size(), generation, 1,
+                                         configuredSize, sampleRate, false, 1 },
+                immediateFrame));
+            expect(immediate.process({ silence.data(), nullptr, silence.size(), generation, 2,
+                                         configuredSize * 2, sampleRate, false, 1 },
+                immediateFrame));
+            expectEquals(immediateFrame.spectrumDecibels[0], minimumSpectrumDecibels);
+        }
+
+        beginTest("Peak hold uses unsmoothed power and finite hold decays at twelve dB per second");
+        {
+            constexpr auto configuredSize = std::size_t { 1024 };
+            constexpr auto sampleRate = 15'360.0;
+            std::array<float, configuredSize> silence { };
+            std::array<float, configuredSize> fullScale { };
+            fullScale.fill(1.0F);
+
+            SpectrumAnalyzer analyzer;
+            VisualizationFrame frame;
+            expect(analyzer.reconfigure({ configuredSize, FftWindow::rectangular, 15 }, 2, &frame));
+            expect(analyzer.reconfigureTemporal(
+                { true, 2'000.0, SpectrumPeakHoldMode::finite, 0.25 }, &frame));
+            expect(analyzer.process({ silence.data(), nullptr, silence.size(), 1, 1, configuredSize,
+                                        sampleRate, false, 1 },
+                frame));
+            expect(analyzer.process({ fullScale.data(), nullptr, fullScale.size(), 1, 2,
+                                        configuredSize * 2, sampleRate, false, 1 },
+                frame));
+            expect(frame.spectrumPeakHoldValid);
+            expectWithinAbsoluteError(frame.spectrumPeakHoldDecibels[0], 0.0F, 0.001F);
+            expect(frame.spectrumDecibels[0] < -14.0F);
+
+            for (std::uint64_t sequence = 3; sequence <= 6; ++sequence) {
+                expect(analyzer.process({ silence.data(), nullptr, silence.size(), 1, sequence,
+                                            configuredSize * sequence, sampleRate, false, 1 },
+                    frame));
+            }
+
+            // Four 1/15-second silent intervals exceed the 0.25-second hold by 1/60 second.
+            expectWithinAbsoluteError(frame.spectrumPeakHoldDecibels[0], -0.2F, 0.002F);
+        }
+
+        beginTest("Infinite peak hold and user Clear preserve FFT overlap");
+        {
+            constexpr auto configuredSize = std::size_t { 1024 };
+            constexpr auto sampleRate = 48'000.0;
+            constexpr auto hopSize = std::size_t { 800 };
+            std::array<float, configuredSize> fullScale { };
+            std::array<float, hopSize> silence { };
+            fullScale.fill(1.0F);
+
+            SpectrumAnalyzer analyzer;
+            VisualizationFrame frame;
+            expect(analyzer.reconfigure({ configuredSize, FftWindow::rectangular, 60 }, 2, &frame));
+            expect(analyzer.reconfigureTemporal(
+                { true, 75.0, SpectrumPeakHoldMode::infinite, 2.0 }, &frame));
+            expect(analyzer.process({ fullScale.data(), nullptr, fullScale.size(), 1, 1,
+                                        configuredSize, sampleRate, false, 1 },
+                frame));
+            expectWithinAbsoluteError(frame.spectrumPeakHoldDecibels[0], 0.0F, 0.001F);
+
+            analyzer.clearTemporalState(&frame);
+            expect(!frame.spectrumValid);
+            expect(!frame.spectrumPeakHoldValid);
+            expect(analyzer.statistics().userClears == 1);
+
+            expect(analyzer.process({ silence.data(), nullptr, silence.size(), 1, 2,
+                                        configuredSize + hopSize, sampleRate, false, 1 },
+                frame));
+            expect(frame.spectrumValid);
+            expect(frame.spectrumPeakHoldValid);
+
+            const auto transformsBefore = analyzer.statistics().transforms;
+            expect(analyzer.reconfigureTemporal(
+                { false, 75.0, SpectrumPeakHoldMode::off, 2.0 }, &frame));
+            expect(!frame.spectrumValid);
+            expect(analyzer.process({ silence.data(), nullptr, silence.size(), 1, 3,
+                                        configuredSize + (hopSize * 2), sampleRate, false, 1 },
+                frame));
+            expect(analyzer.statistics().transforms == transformsBefore + 1);
+            expect(!frame.spectrumPeakHoldValid);
+        }
+
         beginTest("A chunk sequence gap clears overlap before another transform");
         {
             std::array<float, fftSize> initial { };
