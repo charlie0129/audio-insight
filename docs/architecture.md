@@ -33,6 +33,7 @@ an incidental result of analysis.
 | Dependencies | Pin JUCE as a Git submodule rather than vendoring its source in this repository or downloading it implicitly during CMake configure. |
 | Graphics | Use a native Metal renderer, hosted in a MetalKit view inside the JUCE editor. On the initial macOS baseline, drive its Metal layer with `CAMetalDisplayLink` rather than JUCE repaint timers or MetalKit's internal timer. Do not use deprecated macOS OpenGL. |
 | Signal analysis | Initially use CPU analysis and Apple's Accelerate/vDSP where useful. GPU compute is deferred until profiling demonstrates a benefit. |
+| Frequency presentation | Expose one continuous Linear-to-Logarithmic frequency-spacing control, including intermediate mappings. Spectrum and Spectrogram share the same setting and coordinate transform; they do not have independent frequency scales. |
 | Real-time handoff | The audio callback writes only to bounded, non-blocking data structures. Analysis and rendering never make the audio thread wait. |
 | Overflow policy | Prefer current visual data: coalesce or discard the oldest unclaimed analysis input, detect discontinuities by sequence number, and reset temporal analysis state across a gap. Never overwrite a slot being read or delay audio. |
 | Analysis scheduling | Do not create one thread per visualization. Each instance has a logical coordinator, not a dedicated thread, and submits fairly to a process-wide pool initially bounded to two workers. |
@@ -307,11 +308,27 @@ assume that the only possible scale values are exactly 1 and 2. Geometry,
 strokes, text, and hit testing must remain visually consistent and crisp on both
 regular-density and Retina displays.
 
+## Analyzer presentation
+
+Spectrum and Spectrogram use the same continuous frequency-coordinate mapping.
+The control ranges from linear through intermediate spacing to logarithmic and
+applies to the Spectrum frequency axis and the Spectrogram frequency axis.
+
+The Spectrogram renders time-frequency energy over a near-black background. Its
+intensity palette should read as energy traces: by default, dark blue for lower
+energy rising through orange and near-white for stronger energy. It must not
+look like broad decorative color stripes.
+
+Spectrogram chrome shows only numeric frequency tick labels, using Hz or kHz as
+appropriate. Omit axis-title text, time/history labels, and dB/color-legend
+labels.
+
 ## First usable release
 
 The first usable release deliberately has one layout and two visualizations:
 
-- a large logarithmic real-time FFT spectrum occupying most of the surface; and
+- a large real-time FFT spectrum occupying most of the surface, using the
+  shared adjustable frequency-spacing transform; and
 - a compact vertical stereo meter strip showing honest sample peak and RMS.
 
 A small controls row may expose essential spectrum and meter settings. The
@@ -542,3 +559,7 @@ order of visualizations.
   exact per-frame callback-to-presentation latency composition beside the
   separate pacing history. Lightweight graphs follow display vblank while the
   full raw metrics table remains throttled.
+- Chose one continuous Linear-to-Logarithmic frequency mapping shared by
+  Spectrum and Spectrogram, including intermediate spacing.
+- Set the Spectrogram presentation target to intensity-colored energy traces
+  over near-black, with only numeric frequency ticks shown.
