@@ -471,8 +471,9 @@ public:
         };
         addAndMakeVisible(historyMode_);
 
-        configureLabel(stereoStatus_, "Not yet implemented", false);
-        stereoStatus_.setComponentID("settingsStereoUnavailable");
+        configureLabel(stereoStatus_, "Live fixed design; no adjustable settings.");
+        stereoStatus_.setComponentID("settingsStereoStatus");
+        stereoStatus_.setMinimumHorizontalScale(0.8F);
         addAndMakeVisible(stereoStatus_);
 
         configureLabel(loudnessStatus_, "Not yet implemented", false);
@@ -537,7 +538,11 @@ public:
         historyDuration_.setExplicitFocusOrder(21);
         historyMode_.setExplicitFocusOrder(22);
         resetButtons_[peakRmsSection].setEnabled(false);
-        resetButtons_[stereoSection].setEnabled(false);
+        resetButtons_[stereoSection].setComponentID("settingsStereoReset");
+        configureUnavailableControl(resetButtons_[stereoSection],
+            "Stereo uses a fixed vectorscope and correlation design with no settings to reset");
+        resetButtons_[stereoSection].setDescription(
+            "Stereo is live with a fixed design and has no adjustable settings to reset");
         resetButtons_[loudnessSection].setEnabled(false);
 
         setConfiguration(initialConfiguration);

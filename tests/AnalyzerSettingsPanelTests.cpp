@@ -227,8 +227,7 @@ public:
             expectWithinAbsoluteError(lastPublished.sharedAnalysis.frequencySpacing, 1.0, 1.0e-12);
         }
 
-        beginTest(
-            "Spectrum and Spectrogram controls are live while unfinished sections stay disabled");
+        beginTest("Spectrum, Spectrogram, and Stereo are live while Loudness stays disabled");
         {
             AnalyzerSettingsPanel panel(
                 AnalyzerConfigurationCodec::defaults(), [](const AnalyzerConfiguration&) { },
@@ -260,6 +259,7 @@ public:
             expectAvailable("settingsSpectrogramHistory");
             expectAvailable("settingsSpectrogramHistoryMode");
             expectAvailable("settingsSpectrogramReset");
+            expectAvailable("settingsStereoStatus");
 
             const auto* peakHoldDuration
                 = findDescendantWithId(panel, "settingsSpectrumPeakHoldDuration");
@@ -267,9 +267,20 @@ public:
             expect(peakHoldDuration != nullptr && !peakHoldDuration->isEnabled());
             expect(peakHoldDuration != nullptr && !peakHoldDuration->getWantsKeyboardFocus());
 
-            expectUnavailable("settingsStereoUnavailable");
+            expectUnavailable("settingsStereoReset");
             expectUnavailable("settingsLoudnessUnavailable");
             expectUnavailable("settingsLoudnessReference");
+
+            const auto* stereoStatus = dynamic_cast<const juce::Label*>(
+                findDescendantWithId(panel, "settingsStereoStatus"));
+            expect(stereoStatus != nullptr);
+            expect(stereoStatus != nullptr
+                && stereoStatus->getText().containsIgnoreCase("no adjustable settings"));
+
+            auto* stereoReset
+                = dynamic_cast<juce::Button*>(findDescendantWithId(panel, "settingsStereoReset"));
+            expect(stereoReset != nullptr
+                && stereoReset->getTooltip().containsIgnoreCase("no settings to reset"));
 
             auto* history = dynamic_cast<juce::ComboBox*>(
                 findDescendantWithId(panel, "settingsSpectrogramHistory"));
