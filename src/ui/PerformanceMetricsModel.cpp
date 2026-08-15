@@ -878,6 +878,8 @@ void appendRawSections(
         "Last analyzed capture revision", analysis.lastAnalyzedCaptureRevision));
     freshness.rows.emplace_back(rawUnsigned("analysis.emptyAnalysisRequestsAvoided",
         "Empty analysis requests avoided", analysis.emptyAnalysisRequestsAvoided));
+    freshness.rows.emplace_back(rawUnsigned("analysis.captureBoundaryRequestsDeferred",
+        "Capture-boundary requests deferred", analysis.captureBoundaryRequestsDeferred));
     freshness.rows.emplace_back(rawUnsigned("analysis.staleFramesPublished",
         "Stale-clear frames published", analysis.staleFramesPublished));
     freshness.rows.emplace_back(rawUnsigned(
@@ -1263,6 +1265,10 @@ void buildRates(const PerformanceMetricsSnapshot& current,
     appendRate(rates, "analysis.emptyAnalysisRequestsAvoided", "Empty requests avoided",
         "requests/s", current.analysis.emptyAnalysisRequestsAvoided,
         previous.analysis.emptyAnalysisRequestsAvoided, elapsedSeconds, baselineIsValid);
+    appendRate(rates, "analysis.captureBoundaryRequestsDeferred",
+        "Capture-boundary requests deferred", "requests/s",
+        current.analysis.captureBoundaryRequestsDeferred,
+        previous.analysis.captureBoundaryRequestsDeferred, elapsedSeconds, baselineIsValid);
     appendRate(rates, "analysis.staleFramesPublished", "Stale-clear frames published", "frames/s",
         current.analysis.staleFramesPublished, previous.analysis.staleFramesPublished,
         elapsedSeconds, baselineIsValid);

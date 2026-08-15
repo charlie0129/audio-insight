@@ -52,7 +52,7 @@ static_assert(aggregateFieldCount<AudioCallbackTelemetry>() == 15);
 static_assert(aggregateFieldCount<SharedAnalysisScheduler::Counters>() == 12);
 static_assert(aggregateFieldCount<LoudnessAnalyzer::Statistics>() == 33);
 static_assert(aggregateFieldCount<LoudnessMeasurement>() == 19);
-static_assert(aggregateFieldCount<AnalysisTelemetry>() == 70);
+static_assert(aggregateFieldCount<AnalysisTelemetry>() == 71);
 
 constexpr auto expectedRawFieldNames = std::to_array<std::string_view>({
     "metal.epoch",
@@ -331,11 +331,12 @@ constexpr auto expectedRawFieldNames = std::to_array<std::string_view>({
     "analysis.latestCaptureRevision",
     "analysis.lastAnalyzedCaptureRevision",
     "analysis.emptyAnalysisRequestsAvoided",
+    "analysis.captureBoundaryRequestsDeferred",
     "analysis.staleFramesPublished",
     "analysis.peakRmsUserResets",
     "analysis.spectrumUserClears",
 });
-static_assert(expectedRawFieldNames.size() == 279);
+static_assert(expectedRawFieldNames.size() == 280);
 
 const PerformanceMetricRate* findRate(
     const PerformanceMetricsViewModel& view, const std::string_view sourceFieldName)
@@ -936,6 +937,39 @@ public:
 
             expect(
                 view.report.find("rate.analysis.spectrumTransforms = 60 Hz") != std::string::npos);
+        });
+
+        testCase("Capture-boundary request deferrals have explicit raw and rate metrics", [this] {
+            PerformanceMetricsModel model;
+            PerformanceMetricsSnapshot snapshot;
+            snapshot.analysis.captureBoundaryRequestsDeferred = 4;
+            static_cast<void>(model.update(snapshot, 10.0));
+
+            snapshot.analysis.captureBoundaryRequestsDeferred = 10;
+            const auto view = model.update(snapshot, 12.0);
+            const auto* raw = findRawRow(view, "analysis.captureBoundaryRequestsDeferred");
+            expect(raw != nullptr);
+            if (raw != nullptr) {
+                expectEquals(raw->label, std::string("Capture-boundary requests deferred"));
+                expectEquals(raw->value, std::string("10"));
+                expectEquals(raw->rawValue, std::string("10"));
+            }
+
+            const auto* rate = findRate(view, "analysis.captureBoundaryRequestsDeferred");
+            expect(rate != nullptr && rate->available);
+            if (rate != nullptr) {
+                expectEquals(rate->label, std::string("Capture-boundary requests deferred"));
+                expectEquals(rate->unit, std::string("requests/s"));
+                expectWithinAbsoluteError(rate->value, 3.0, 1.0e-12);
+                expectEquals(rate->counterDelta, std::uint64_t { 6 });
+                expectWithinAbsoluteError(rate->sampleIntervalSeconds, 2.0, 1.0e-12);
+            }
+
+            expect(view.report.find("analysis.captureBoundaryRequestsDeferred = 10")
+                != std::string::npos);
+            expect(view.report.find("rate.analysis.captureBoundaryRequestsDeferred = 3 requests/s "
+                                    "(counter_delta = 6; sample_interval_seconds = 2)")
+                != std::string::npos);
         });
 
         testCase("Counter rates rebase across epochs and reject rollbacks", [this] {

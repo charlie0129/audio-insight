@@ -91,6 +91,7 @@ struct AnalysisTelemetry {
     bool stereoFieldValid = false;
     bool stereoCorrelationValid = false;
     bool stereoMono = false;
+    std::uint64_t captureBoundaryRequestsDeferred = 0;
 };
 
 /**
