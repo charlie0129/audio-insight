@@ -88,13 +88,16 @@ public:
         testCase("Parameter state round-trips", [this] {
             PluginProcessor source;
             auto* floor = source.getParameters().getParameter("spectrumFloor");
+            auto* smoothing = source.getParameters().getParameter("spectrumSmoothing");
             auto* metrics = source.getParameters().getParameter("performanceMetrics");
             expect(floor != nullptr);
+            expect(smoothing != nullptr);
             expect(metrics != nullptr);
 
-            if (floor == nullptr || metrics == nullptr)
+            if (floor == nullptr || smoothing == nullptr || metrics == nullptr)
                 return;
 
+            expectWithinAbsoluteError(smoothing->getValue(), 0.40F, 0.0001F);
             expectWithinAbsoluteError(metrics->getValue(), 0.0F, 0.0001F);
             expect(!metrics->isMetaParameter());
             expect(!metrics->isAutomatable());

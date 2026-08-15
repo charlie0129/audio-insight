@@ -204,7 +204,7 @@ juce::AudioProcessorValueTreeState::ParameterLayout PluginProcessor::createParam
 
     layout.add(std::make_unique<juce::AudioParameterFloat>(
         juce::ParameterID { spectrumSmoothingParameter, 1 }, "Spectrum smoothing",
-        juce::NormalisableRange<float> { 0.0F, 1.0F, 0.01F }, 0.65F));
+        juce::NormalisableRange<float> { 0.0F, 1.0F, 0.01F }, 0.40F));
 
     layout.add(std::make_unique<juce::AudioParameterBool>(
         juce::ParameterID { performanceMetricsParameter, 1 }, "Performance metrics", false,

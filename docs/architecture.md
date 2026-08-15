@@ -339,14 +339,15 @@ The first usable release deliberately has one layout and two visualizations:
 - a compact vertical meter strip showing honest sample peak and RMS, with one
   meter for mono input or distinct L/R meters for stereo.
 
-A small controls row may expose essential spectrum and meter settings. The
-window is resizable. The next UI milestone replaces that fixed arrangement with
-the complete five-tile shell while keeping only Spectrum and Peak/RMS live. The
-other three tiles are titled, inert placeholders: they do not show fake data or
-submit analysis. Four grid-snapped splitters resize adjacent fixed tiles;
-movement, reordering, hiding, detaching, overlap, and free-form windowing remain
-out of scope. Do not label sample peak as true peak; that name is reserved for a
-correctly oversampled true-peak implementation.
+The current vertical slice exposes essential spectrum settings in a small
+controls row. The next UI milestone moves those controls into Settings and
+replaces the fixed arrangement with the complete five-tile shell while keeping
+only Spectrum and Peak/RMS live. The other three tiles are titled, inert
+placeholders: they do not show fake data or submit analysis. Four grid-snapped
+splitters resize adjacent fixed tiles; movement, reordering, hiding, detaching,
+overlap, and free-form windowing remain out of scope. Do not label sample peak
+as true peak; that name is reserved for a correctly oversampled true-peak
+implementation.
 
 Before distributing a binary, the controls must include an About/Legal path that
 shows the confirmed project copyright, AGPL/no-warranty notice, how to view the
@@ -610,3 +611,6 @@ authorize fake values, background work, or speculative resource allocation.
   correlation result.
 - Resolved the remaining panel algorithms, scales, labels, controls, defaults,
   persistence, accessibility, and reset behavior in `docs/analyzer-ui.md`.
+- Chose a more responsive `0.40` default for the current normalized Smooth
+  control and a 75 ms default for its future time-based replacement. Floor,
+  Ceiling, and Smooth move from the toolbar into the Spectrum settings section.

@@ -157,6 +157,11 @@ there is no separate Apply step. Give each section a reset-to-default action.
 Keep settings for placeholder panels visibly disabled and labeled as not yet
 implemented rather than accepting changes that do nothing without explanation.
 
+Move the current Floor, Ceiling, and Smooth controls from the toolbar into the
+Spectrum section when the inspector lands; do not duplicate them. Until that
+migration, the normalized Smooth control defaults to `0.40`. The later
+time-based Temporal averaging control replaces it for fresh configurations.
+
 ### Settings and Metrics exclusivity
 
 Settings and Metrics do not coexist:
@@ -329,7 +334,7 @@ Spectrum remains the dominant real-time FFT visualization.
 | Floor | -180 to -36 dB, 1 dB steps | -90 dB |
 | Ceiling | -24 to +12 dB, 1 dB steps | 0 dB |
 | Minimum visible span | 24 dB | 90 dB from defaults |
-| Temporal averaging | Off or 25–2000 ms, logarithmic control | 150 ms |
+| Temporal averaging | Off or 25–2000 ms, logarithmic control | 75 ms |
 | Slope compensation | 0, +3, +4.5, +6 dB/octave, referenced at 1 kHz | 0 dB/octave |
 | Peak-hold duration | Off, 0.25–10 seconds, or Infinite | Off; 2 seconds when first enabled |
 | Hold decay | Fixed at 12 dB/s after a finite hold | 12 dB/s |
