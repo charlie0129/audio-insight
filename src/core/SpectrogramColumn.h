@@ -23,8 +23,10 @@ inline constexpr std::size_t maximumSpectrogramRowCount = 1024;
     A resetMarker has no payload (`rowCount` and `rawTransformSequence` are
     zero). Its sequence and generation fields tell the renderer to clear
     incompatible history when a reset or remap has no FFT column to carry that
-    boundary. A real column can carry the boundary itself, so markers are not
-    required before every changed generation.
+    boundary. A real column can carry an ordinary FFT/mapping boundary, so
+    markers are not required before every changed generation. Capture
+    discontinuities are different: their dedicated marker has captureBoundary
+    set and must be delivered independently of the tagged VisualizationFrame.
 */
 struct SpectrogramColumn final {
     std::array<float, maximumSpectrogramRowCount> decibels { };
@@ -44,6 +46,8 @@ struct SpectrogramColumn final {
     std::uint32_t requestedSliceRateHz = 0;
     bool resetMarker = false;
     bool mappingSeed = false;
+    // True only for the dedicated capture-discontinuity reset marker.
+    bool captureBoundary = false;
 
     SpectrogramColumn() noexcept
     {

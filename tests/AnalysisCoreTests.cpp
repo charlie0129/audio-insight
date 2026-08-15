@@ -104,8 +104,8 @@ public:
             const auto dropped
                 = capture.publishBlock(sample.data(), sample.data(), sample.size(), 48000.0, 1);
             expect(dropped.droppedIncomingChunks == 1);
-            expect(dropped.captureDiscontinuityRevision > firstGapRevision);
-            expect(dropped.beganCaptureDiscontinuity);
+            expect(dropped.captureDiscontinuityRevision == firstGapRevision);
+            expect(!dropped.beganCaptureDiscontinuity);
             expect(capture.telemetry().droppedIncomingChunks == 1);
             expectWithinAbsoluteError(held[0].view().left[0], 1.0F, 1.0e-7F);
 
@@ -120,6 +120,37 @@ public:
             expect(capture.tryAcquireOldest(afterDropHandle));
             expect(afterDropHandle.view().captureDiscontinuityRevision
                 == dropped.captureDiscontinuityRevision);
+        }
+
+        beginTest("Overflow does not reclassify an older surviving slot as post-gap input");
+        {
+            StereoSampleCapture capture;
+            std::array<float, 1> sample { };
+
+            for (std::size_t index = 0; index < StereoSampleCapture::slotCount; ++index) {
+                sample[0] = static_cast<float>(index + 1);
+                expect(capture
+                           .publishBlock(
+                               sample.data(), sample.data(), sample.size(), 48'000.0, 1, 2, 9)
+                           .publishedChunks
+                    == 1);
+            }
+
+            sample[0] = 100.0F;
+            const auto overflow = capture.publishBlock(
+                sample.data(), sample.data(), sample.size(), 48'000.0, 1, 2, 9);
+            expect(overflow.reclaimedReadyChunks == 1);
+            expect(overflow.beganCaptureDiscontinuity);
+            expect(overflow.captureDiscontinuityRevision != 0);
+            expect(
+                capture.captureDiscontinuityRevision(9) == overflow.captureDiscontinuityRevision);
+
+            StereoSampleCapture::ReadHandle survivingPreGap;
+            expect(capture.tryAcquireOldest(survivingPreGap));
+            expect(survivingPreGap.view().sequence == 2);
+            expect(survivingPreGap.view().captureDiscontinuityRevision == 0,
+                "Acquisition inherited the later producer-side gap revision");
+            expectWithinAbsoluteError(survivingPreGap.view().left[0], 2.0F, 1.0e-7F);
         }
 
         beginTest("Mono layout metadata is preserved without duplicating its samples");

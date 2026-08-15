@@ -125,7 +125,11 @@ public:
     [[nodiscard]] std::uint64_t captureDiscontinuityRevision(
         std::uint64_t captureLifecycleGeneration) const noexcept;
 
-    /** Marks a revision as handled; safe from the single non-audio consumer. */
+    /**
+        Marks a revision as handled after the consumer has published post-gap
+        state. Safe from the single non-audio consumer; acquisition alone does
+        not acknowledge a revision.
+    */
     void acknowledgeCaptureDiscontinuityRevision(std::uint64_t revision) noexcept;
 
     /**

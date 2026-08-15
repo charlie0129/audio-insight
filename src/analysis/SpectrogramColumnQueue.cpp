@@ -41,7 +41,6 @@ bool SpectrogramColumnQueue::copyNext(SpectrogramColumn& destination) const noex
         for (std::size_t index = 0; index < slots_.size(); ++index) {
             if (slots_[index].state.load(std::memory_order_acquire) != SlotState::ready)
                 continue;
-
             const auto sequence = slots_[index].sequence.load(std::memory_order_relaxed);
             if (sequence < oldestSequence) {
                 oldestSequence = sequence;
@@ -87,6 +86,27 @@ void SpectrogramColumnQueue::discardPending() noexcept
     }
 }
 
+void SpectrogramColumnQueue::discardPendingExceptCaptureBoundary(
+    const std::uint64_t captureGeneration) noexcept
+{
+    for (auto& slot : slots_) {
+        auto expected = SlotState::ready;
+        if (!slot.state.compare_exchange_strong(expected, SlotState::reading,
+                std::memory_order_acquire, std::memory_order_relaxed)) {
+            continue;
+        }
+
+        const auto preserve = captureGeneration != 0 && slot.column.captureBoundary
+            && slot.column.resetMarker && slot.column.captureGeneration == captureGeneration;
+        if (preserve) {
+            slot.state.store(SlotState::ready, std::memory_order_release);
+        } else {
+            slot.state.store(SlotState::free, std::memory_order_release);
+            discardedReadyColumns_.fetch_add(1, std::memory_order_relaxed);
+        }
+    }
+}
+
 SpectrogramColumnQueue::Telemetry SpectrogramColumnQueue::telemetry() const noexcept
 {
     Telemetry result;
@@ -122,6 +142,8 @@ SpectrogramColumnQueue::Slot* SpectrogramColumnQueue::claimSlot(bool& reclaimedR
 
         for (std::size_t index = 0; index < slots_.size(); ++index) {
             if (slots_[index].state.load(std::memory_order_acquire) != SlotState::ready)
+                continue;
+            if (slots_[index].column.captureBoundary)
                 continue;
 
             const auto sequence = slots_[index].sequence.load(std::memory_order_relaxed);

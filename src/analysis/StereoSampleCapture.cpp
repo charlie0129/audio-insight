@@ -240,19 +240,14 @@ bool StereoSampleCapture::tryAcquireOldest(ReadHandle& destination) noexcept
         consumerPreviousGeneration_ = slot.generation;
         consumerPreviousSequence_ = slot.sequence;
         consumerPreviousChannelCount_ = slot.channelCount;
-        auto captureDiscontinuityRevision = slot.captureDiscontinuityRevision;
-        if (publishedCaptureDiscontinuityLifecycleGeneration_.load(std::memory_order_acquire)
-            == slot.captureLifecycleGeneration) {
-            captureDiscontinuityRevision = std::max(captureDiscontinuityRevision,
-                publishedCaptureDiscontinuityRevision_.load(std::memory_order_acquire));
-        }
-        acknowledgedCaptureDiscontinuityRevision_.store(
-            captureDiscontinuityRevision, std::memory_order_release);
-
+        // Preserve the revision stamped when this payload was written. The
+        // coordinator observes the producer-wide revision separately after
+        // acquisition so a surviving pre-gap slot cannot be reclassified as
+        // post-gap input by a concurrent overflow.
         destination = ReadHandle(*this, oldestIndex,
             { slot.left.data(), slot.right.data(), slot.frameCount, slot.generation, slot.sequence,
                 slot.capturedFrameEnd, slot.sampleRate, followsDiscontinuity, slot.channelCount,
-                captureDiscontinuityRevision, slot.captureLifecycleGeneration });
+                slot.captureDiscontinuityRevision, slot.captureLifecycleGeneration });
         return true;
     }
 

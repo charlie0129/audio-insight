@@ -40,6 +40,9 @@ public:
     /** Retires every currently ready column without touching a writing/reading slot. */
     void discardPending() noexcept;
 
+    /** Retires ready columns except one active tagged capture-boundary marker. */
+    void discardPendingExceptCaptureBoundary(std::uint64_t captureGeneration) noexcept;
+
     [[nodiscard]] Telemetry telemetry() const noexcept;
 
 private:

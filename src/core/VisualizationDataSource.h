@@ -30,13 +30,17 @@ public:
     // Short-term windows.
     virtual void resetLoudness() noexcept = 0;
 
-    // Copies the most recent complete immutable frame without waiting.
+    // Copies the most recent complete immutable frame without waiting. Copying
+    // a tagged capture-boundary frame also acknowledges its renderer delivery;
+    // callers must therefore have one logical consumer.
     [[nodiscard]] virtual bool copyLatestVisualizationFrame(
         VisualizationFrame& destination) const noexcept = 0;
 
-    // Copies the oldest retained immutable Spectrogram column. The default
-    // keeps non-Spectrogram test/host adapters source-compatible while the
-    // processor and renderer adopt this analysis-side stream.
+    // Copies the oldest retained immutable Spectrogram column. Copying a tagged
+    // capture-boundary marker acknowledges its renderer delivery independently
+    // of the visualization-frame stream. The default keeps non-Spectrogram
+    // test/host adapters source-compatible while the processor and renderer
+    // adopt this analysis-side stream.
     [[nodiscard]] virtual bool copyNextSpectrogramColumn(
         SpectrogramColumn& destination) const noexcept
     {
@@ -45,7 +49,8 @@ public:
     }
 
     // Called only from non-real-time UI code so a renderer-owned history reset
-    // cannot be repopulated by columns queued before the reset boundary.
+    // cannot be repopulated by ordinary columns queued before the reset
+    // boundary. Implementations preserve an undelivered capture-boundary marker.
     virtual void discardPendingSpectrogramColumns() noexcept
     {
     }

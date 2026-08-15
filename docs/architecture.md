@@ -135,6 +135,22 @@ The implementation must use explicit slot ownership or an equivalently safe
 protocol; a producer overwriting an SPSC payload while it may be read is a C++
 data race. Audio pass-through is never affected by analysis overflow.
 
+One producer-side overflow episode advances the public capture generation once.
+Before any post-gap analyzer state can reach the renderer, the renderer must
+independently consume both a tagged, fully invalid visualization frame and a
+tagged Spectrogram reset marker for that generation. Renderer acknowledgements
+use generation-qualified compare/exchange tokens, so a delayed copy from an old
+lifecycle cannot clear a newer boundary. A destructively acquired raw chunk
+keeps its slot's original discontinuity revision: pre-gap input is discarded,
+while a post-gap raw handle or meter endpoint that discovers the gap is retained
+across worker jobs. The producer's raw-gap revision is acknowledged only after a
+post-gap immutable frame is successfully published; publication failure retries
+the already-applied state without reprocessing input. Its cached frame covers
+only the capture revision of the work that produced it, so audio arriving before
+the retry remains schedulable afterward. This keeps one episode open during
+sustained overload and prevents either blank-generation churn or loss of the
+first recoverable data.
+
 Peak/RMS measurements use a separate bounded coalescing accumulator so an
 overloaded raw-sample queue does not silently erase the largest recent peak.
 Its 300 ms RMS, live sample-peak release, held-peak decay, and OVER latch are
@@ -639,6 +655,10 @@ authorize fake values, background work, or speculative resource allocation.
 
 ### 2026-08-16
 
+- Made capture-discontinuity rollover a two-artifact renderer fence with
+  generation-qualified acknowledgements, cancellation-safe episode commit,
+  post-gap destructive-acquisition retention, and delayed producer
+  acknowledgement after a successful recovery-frame publication.
 - Added fixed-storage audio-callback self-timing for exact 64–1024-frame blocks,
   conservative lifetime p99 bounds, explicit overflow, and honest detector
   coverage. External profiling remains required for true callback entry-to-exit

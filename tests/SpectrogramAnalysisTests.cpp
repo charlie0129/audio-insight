@@ -254,6 +254,20 @@ public:
             }
         }
 
+        beginTest("Mapping clears a capture-boundary tag on a reused destination");
+        {
+            constexpr auto fftSizeToUse = std::uint32_t { 1024 };
+            std::array<float, maximumSpectrumBinCount> power { };
+            power.fill(1.0e-18F);
+
+            SpectrogramColumnMapper mapper;
+            SpectrogramColumn column;
+            column.captureBoundary = true;
+            expect(mapper.map(
+                makeTransformView(power.data(), fftSizeToUse, 48'000.0), 1, false, column));
+            expect(!column.captureBoundary);
+        }
+
         beginTest("Linear, intermediate, and logarithmic spacing use uniform shared-u rows");
         {
             constexpr auto fftSizeToUse = std::uint32_t { 4096 };
@@ -460,6 +474,95 @@ public:
             const auto telemetry = queue.telemetry();
             expect(telemetry.consumedColumns == 1);
             expect(telemetry.discardedReadyColumns == 2);
+            expect(telemetry.readyColumns == 0);
+        }
+
+        beginTest("Selective discard preserves only the matching tagged reset marker");
+        {
+            constexpr auto boundaryGeneration = std::uint64_t { 42 };
+            SpectrogramColumnQueue queue;
+            SpectrogramColumn column;
+
+            column.sequence = 1;
+            column.captureGeneration = boundaryGeneration;
+            column.resetMarker = true;
+            column.captureBoundary = true;
+            expect(queue.publish(column).published);
+
+            column.sequence = 2;
+            column.resetMarker = false;
+            expect(queue.publish(column).published);
+
+            column.sequence = 3;
+            column.captureGeneration = boundaryGeneration + 1;
+            column.resetMarker = true;
+            expect(queue.publish(column).published);
+
+            column.sequence = 4;
+            column.captureGeneration = boundaryGeneration;
+            column.captureBoundary = false;
+            expect(queue.publish(column).published);
+
+            queue.discardPendingExceptCaptureBoundary(boundaryGeneration);
+
+            SpectrogramColumn preserved;
+            expect(queue.copyNext(preserved));
+            expect(preserved.sequence == 1);
+            expect(preserved.captureGeneration == boundaryGeneration);
+            expect(preserved.resetMarker);
+            expect(preserved.captureBoundary);
+            expect(!queue.copyNext(preserved));
+
+            const auto telemetry = queue.telemetry();
+            expect(telemetry.consumedColumns == 1);
+            expect(telemetry.discardedReadyColumns == 3);
+            expect(telemetry.readyColumns == 0);
+        }
+
+        beginTest("Overflow reclaims an ordinary column before a capture-boundary marker");
+        {
+            constexpr auto boundaryGeneration = std::uint64_t { 17 };
+            SpectrogramColumnQueue queue;
+
+            SpectrogramColumn marker;
+            marker.sequence = 1;
+            marker.captureGeneration = boundaryGeneration;
+            marker.resetMarker = true;
+            marker.captureBoundary = true;
+            expect(queue.publish(marker).published);
+
+            SpectrogramColumn ordinary;
+            for (std::uint64_t sequence = 2; sequence <= SpectrogramColumnQueue::capacity;
+                ++sequence) {
+                ordinary.sequence = sequence;
+                expect(queue.publish(ordinary).published);
+            }
+
+            ordinary.sequence = SpectrogramColumnQueue::capacity + 1;
+            const auto overflowPublication = queue.publish(ordinary);
+            expect(overflowPublication.published);
+            expect(overflowPublication.reclaimedOldestReady);
+            expect(!overflowPublication.droppedIncoming);
+
+            SpectrogramColumn destination;
+            expect(queue.copyNext(destination));
+            expect(destination.sequence == marker.sequence);
+            expect(destination.captureGeneration == boundaryGeneration);
+            expect(destination.resetMarker);
+            expect(destination.captureBoundary);
+
+            for (std::uint64_t expectedSequence = 3;
+                expectedSequence <= SpectrogramColumnQueue::capacity + 1; ++expectedSequence) {
+                expect(queue.copyNext(destination));
+                expect(destination.sequence == expectedSequence);
+                expect(!destination.captureBoundary);
+            }
+            expect(!queue.copyNext(destination));
+
+            const auto telemetry = queue.telemetry();
+            expect(telemetry.reclaimedReadyColumns == 1);
+            expect(telemetry.droppedIncomingColumns == 0);
+            expect(telemetry.consumedColumns == SpectrogramColumnQueue::capacity);
             expect(telemetry.readyColumns == 0);
         }
     }
@@ -707,22 +810,32 @@ private:
             coordinator.captureAudioBlock(block.data(), block.data(), block.size(), 48'000.0, 2);
 
         auto observedBoundary = false;
+        auto observedBoundaryMarker = false;
         auto analyzedPostGapAudio = false;
         VisualizationFrame boundaryFrame;
+        SpectrogramColumn boundaryMarker;
         const auto deadline = std::chrono::steady_clock::now() + 2s;
         while (std::chrono::steady_clock::now() < deadline) {
             coordinator.requestAnalysis();
             if (coordinator.copyLatestVisualizationFrame(boundaryFrame)
                 && boundaryFrame.generation > firstOldColumn.captureGeneration
-                && !boundaryFrame.spectrumValid && !boundaryFrame.meterValid
-                && !boundaryFrame.stereoFieldValid && !boundaryFrame.loudnessMomentaryValid
-                && !boundaryFrame.loudnessShortTermValid
+                && boundaryFrame.captureBoundary && !boundaryFrame.spectrumValid
+                && !boundaryFrame.meterValid && !boundaryFrame.stereoFieldValid
+                && !boundaryFrame.loudnessMomentaryValid && !boundaryFrame.loudnessShortTermValid
                 && !boundaryFrame.loudnessIntegratedValid) {
                 observedBoundary = true;
             }
 
+            while (observedBoundary && !observedBoundaryMarker
+                && coordinator.copyNextSpectrogramColumn(boundaryMarker)) {
+                observedBoundaryMarker = boundaryMarker.captureBoundary
+                    && boundaryMarker.resetMarker
+                    && boundaryMarker.captureGeneration == boundaryFrame.generation;
+            }
+
             const auto telemetry = coordinator.telemetry();
-            if (observedBoundary && telemetry.jobsCompleted > beforeGap.jobsCompleted
+            if (observedBoundary && observedBoundaryMarker
+                && telemetry.jobsCompleted > beforeGap.jobsCompleted
                 && telemetry.spectrogramColumnsMapped > beforeGap.spectrogramColumnsMapped) {
                 analyzedPostGapAudio = true;
                 break;
@@ -730,18 +843,17 @@ private:
             std::this_thread::sleep_for(1ms);
         }
         expect(observedBoundary);
+        expect(observedBoundaryMarker);
         expect(analyzedPostGapAudio);
 
         const auto afterGapColumns = drainSpectrogramColumns(coordinator);
-        expect(afterGapColumns.size() == 2);
-        if (afterGapColumns.size() == 2) {
-            expect(afterGapColumns.front().resetMarker);
-            expect(!afterGapColumns.back().resetMarker);
-            expect(afterGapColumns.front().resetEpoch > oldResetEpoch);
-            expect(afterGapColumns.back().resetEpoch == afterGapColumns.front().resetEpoch);
-            expect(afterGapColumns.front().captureGeneration > firstOldColumn.captureGeneration);
-            expect(afterGapColumns.back().captureGeneration
-                == afterGapColumns.front().captureGeneration);
+        expect(afterGapColumns.size() == 1);
+        if (afterGapColumns.size() == 1) {
+            expect(boundaryMarker.resetEpoch > oldResetEpoch);
+            expect(boundaryMarker.captureGeneration > firstOldColumn.captureGeneration);
+            expect(!afterGapColumns.front().resetMarker);
+            expect(afterGapColumns.front().resetEpoch == boundaryMarker.resetEpoch);
+            expect(afterGapColumns.front().captureGeneration == boundaryMarker.captureGeneration);
         }
 
         const auto afterGap = coordinator.telemetry();

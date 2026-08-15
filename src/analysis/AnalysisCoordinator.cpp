@@ -225,6 +225,8 @@ private:
 
 struct AnalysisCoordinator::State final : SharedAnalysisScheduler::JobClient,
                                           SpectrumTransformSink {
+    enum class CaptureBoundaryPhase { steady, publishing, awaitingDelivery, recovering };
+
     void captureAudioBlock(const float* const left, const float* const right,
         const std::size_t frameCount, const double sampleRate,
         const std::uint32_t channelCount) noexcept
@@ -290,15 +292,10 @@ struct AnalysisCoordinator::State final : SharedAnalysisScheduler::JobClient,
         peakRmsResetPendingEpoch.store(0, std::memory_order_relaxed);
         requiredUserResetEpoch = 0;
         requiredLiveClearEpoch = 0;
+        clearCaptureBoundaryState();
         appliedCaptureDiscontinuityRevision
             = samples.captureDiscontinuityRevision(captureLifecycleGeneration);
         samples.acknowledgeCaptureDiscontinuityRevision(appliedCaptureDiscontinuityRevision);
-        pendingCaptureDiscontinuityRevision = 0;
-        pendingCaptureBoundaryGeneration = 0;
-        captureBoundaryPublicationPending.store(false, std::memory_order_release);
-        captureBoundaryDeliveryGeneration.store(0, std::memory_order_relaxed);
-        captureBoundaryDeliveryPending.store(false, std::memory_order_release);
-        captureBoundaryResumePending.store(false, std::memory_order_release);
         lastAnalyzedCaptureRevision.store(
             captureRevision.load(std::memory_order_acquire), std::memory_order_release);
 
@@ -360,7 +357,8 @@ struct AnalysisCoordinator::State final : SharedAnalysisScheduler::JobClient,
         currentFftGeneration.store(fftGeneration, std::memory_order_relaxed);
         fftConfigurationChanges.fetch_add(1, std::memory_order_relaxed);
         static_cast<void>(refreshLoudnessFrameState());
-        static_cast<void>(publishWorkingFrame());
+        if (!hasPendingCaptureBoundary())
+            static_cast<void>(publishWorkingFrame());
 
         currentJobGeneration.store(jobGeneration, std::memory_order_release);
         return true;
@@ -378,7 +376,8 @@ struct AnalysisCoordinator::State final : SharedAnalysisScheduler::JobClient,
         spectrumCapturedFrameEnd.store(0, std::memory_order_relaxed);
         spectrumTemporalConfigurationChanges.fetch_add(1, std::memory_order_relaxed);
         static_cast<void>(refreshLoudnessFrameState());
-        static_cast<void>(publishWorkingFrame());
+        if (!hasPendingCaptureBoundary())
+            static_cast<void>(publishWorkingFrame());
         currentJobGeneration.store(jobGeneration, std::memory_order_release);
         return true;
     }
@@ -389,7 +388,7 @@ struct AnalysisCoordinator::State final : SharedAnalysisScheduler::JobClient,
         if (!spectrogramMapper.setFrequencySpacing(frequencySpacing, mappingGeneration))
             return false;
 
-        spectrogramColumns.discardPending();
+        discardSpectrogramColumnsPreservingCaptureBoundary();
         spectrogramCapturedFrameEnd.store(0, std::memory_order_relaxed);
         spectrogramRowCount.store(0, std::memory_order_relaxed);
         spectrogramMappingGeneration.store(mappingGeneration, std::memory_order_relaxed);
@@ -410,6 +409,7 @@ struct AnalysisCoordinator::State final : SharedAnalysisScheduler::JobClient,
 
     void discardPendingCapture() noexcept
     {
+        clearCaptureBoundaryState();
         samples.discardPending();
         meters.discardPending();
     }
@@ -419,12 +419,7 @@ struct AnalysisCoordinator::State final : SharedAnalysisScheduler::JobClient,
         closeCapture();
         currentCaptureGeneration.store(0, std::memory_order_release);
         currentCaptureLifecycleGeneration.store(0, std::memory_order_release);
-        pendingCaptureDiscontinuityRevision = 0;
-        pendingCaptureBoundaryGeneration = 0;
-        captureBoundaryPublicationPending.store(false, std::memory_order_release);
-        captureBoundaryDeliveryGeneration.store(0, std::memory_order_relaxed);
-        captureBoundaryDeliveryPending.store(false, std::memory_order_release);
-        captureBoundaryResumePending.store(false, std::memory_order_release);
+        clearCaptureBoundaryState();
         attemptedCaptureSampleRateBits.store(0, std::memory_order_relaxed);
         spectrum.reset(nullptr);
         stereoField.reset(nullptr);
@@ -436,7 +431,7 @@ struct AnalysisCoordinator::State final : SharedAnalysisScheduler::JobClient,
         spectrogramRowCount.store(0, std::memory_order_relaxed);
     }
 
-    [[nodiscard]] bool copyNextSpectrogramColumn(SpectrogramColumn& destination) const noexcept
+    [[nodiscard]] bool copyNextSpectrogramColumn(SpectrogramColumn& destination) noexcept
     {
         for (std::size_t attempt = 0; attempt < SpectrogramColumnQueue::capacity; ++attempt) {
             if (activeCaptureLifecycleGeneration.load(std::memory_order_acquire) == 0
@@ -456,6 +451,7 @@ struct AnalysisCoordinator::State final : SharedAnalysisScheduler::JobClient,
             if (lifecycleAfter != 0 && generationAfter != 0
                 && candidate.captureGeneration == generationAfter) {
                 destination = candidate;
+                acknowledgeSpectrogramCaptureBoundaryDelivery(candidate);
                 return true;
             }
         }
@@ -485,13 +481,25 @@ struct AnalysisCoordinator::State final : SharedAnalysisScheduler::JobClient,
         }
 
         destination = candidate;
-        acknowledgeCaptureBoundaryDelivery(candidate.generation);
+        acknowledgeFrameCaptureBoundaryDelivery(candidate);
         return true;
     }
 
     void discardPendingSpectrogramColumns() noexcept
     {
-        spectrogramColumns.discardPending();
+        discardSpectrogramColumnsPreservingCaptureBoundary();
+    }
+
+    void discardSpectrogramColumnsPreservingCaptureBoundary() noexcept
+    {
+        const auto awaitingCaptureBoundaryGeneration
+            = spectrogramBoundaryAwaitingGeneration.load(std::memory_order_acquire);
+        if (awaitingCaptureBoundaryGeneration != 0) {
+            spectrogramColumns.discardPendingExceptCaptureBoundary(
+                awaitingCaptureBoundaryGeneration);
+        } else {
+            spectrogramColumns.discardPending();
+        }
     }
 
     void consumeSpectrumTransform(const SpectrumTransformView& transform) noexcept override
@@ -500,7 +508,7 @@ struct AnalysisCoordinator::State final : SharedAnalysisScheduler::JobClient,
 
         auto observedResetFromTransform = false;
         if (transform.resetEpoch != observedSpectrumResetEpoch) {
-            spectrogramColumns.discardPending();
+            discardSpectrogramColumnsPreservingCaptureBoundary();
             observedSpectrumResetEpoch = transform.resetEpoch;
             spectrogramCapturedFrameEnd.store(0, std::memory_order_relaxed);
             spectrogramRowCount.store(0, std::memory_order_relaxed);
@@ -532,7 +540,8 @@ struct AnalysisCoordinator::State final : SharedAnalysisScheduler::JobClient,
         }
     }
 
-    [[nodiscard]] bool publishSpectrogramResetMarker(const std::uint64_t captureGeneration) noexcept
+    [[nodiscard]] bool publishSpectrogramResetMarker(
+        const std::uint64_t captureGeneration, const bool captureBoundary = false) noexcept
     {
         if (captureGeneration == 0)
             return false;
@@ -554,6 +563,7 @@ struct AnalysisCoordinator::State final : SharedAnalysisScheduler::JobClient,
         marker.requestedSliceRateHz
             = static_cast<std::uint32_t>(spectrum.configuration().requestedSliceRateHz);
         marker.resetMarker = true;
+        marker.captureBoundary = captureBoundary;
         return spectrogramColumns.publish(marker).published;
     }
 
@@ -564,7 +574,7 @@ struct AnalysisCoordinator::State final : SharedAnalysisScheduler::JobClient,
         if (epoch == observedSpectrumResetEpoch)
             return;
 
-        spectrogramColumns.discardPending();
+        discardSpectrogramColumnsPreservingCaptureBoundary();
         observedSpectrumResetEpoch = epoch;
         spectrogramCapturedFrameEnd.store(0, std::memory_order_relaxed);
         spectrogramRowCount.store(0, std::memory_order_relaxed);
@@ -594,27 +604,51 @@ struct AnalysisCoordinator::State final : SharedAnalysisScheduler::JobClient,
 
     [[nodiscard]] bool hasPendingCaptureBoundary() const noexcept
     {
-        return captureBoundaryPublicationPending.load(std::memory_order_acquire)
-            || captureBoundaryResumePending.load(std::memory_order_acquire);
+        return captureBoundaryEpisodeGeneration.load(std::memory_order_acquire) != 0;
     }
 
     [[nodiscard]] bool waitingForCaptureBoundaryDelivery() const noexcept
     {
-        return captureBoundaryDeliveryPending.load(std::memory_order_acquire);
+        return frameBoundaryAwaitingGeneration.load(std::memory_order_acquire) != 0
+            || spectrogramBoundaryAwaitingGeneration.load(std::memory_order_acquire) != 0;
     }
 
-    void acknowledgeCaptureBoundaryDelivery(const std::uint64_t generation) noexcept
+    void acknowledgeFrameCaptureBoundaryDelivery(const VisualizationFrame& frame) noexcept
     {
-        if (captureBoundaryDeliveryPending.load(std::memory_order_acquire)
-            && captureBoundaryDeliveryGeneration.load(std::memory_order_relaxed) == generation) {
-            captureBoundaryDeliveryPending.store(false, std::memory_order_release);
-            captureBoundaryResumePending.store(true, std::memory_order_release);
-        }
+        if (!frame.captureBoundary || frame.generation == 0)
+            return;
+
+#if defined(JUCE_UNIT_TESTS) && JUCE_UNIT_TESTS
+        invokeWorkerTestHook(
+            AnalysisCoordinator::WorkerTestOperation::beforeFrameBoundaryAcknowledgement);
+#endif
+        auto expected = frame.generation;
+        static_cast<void>(frameBoundaryAwaitingGeneration.compare_exchange_strong(
+            expected, 0, std::memory_order_acq_rel, std::memory_order_acquire));
+    }
+
+    void acknowledgeSpectrogramCaptureBoundaryDelivery(const SpectrogramColumn& column) noexcept
+    {
+        if (!column.captureBoundary || !column.resetMarker || column.captureGeneration == 0)
+            return;
+
+#if defined(JUCE_UNIT_TESTS) && JUCE_UNIT_TESTS
+        invokeWorkerTestHook(
+            AnalysisCoordinator::WorkerTestOperation::beforeSpectrogramBoundaryAcknowledgement);
+#endif
+        auto expected = column.captureGeneration;
+        static_cast<void>(spectrogramBoundaryAwaitingGeneration.compare_exchange_strong(
+            expected, 0, std::memory_order_acq_rel, std::memory_order_acquire));
     }
 
     void noteEmptyRequestAvoided() noexcept
     {
         emptyAnalysisRequestsAvoided.fetch_add(1, std::memory_order_relaxed);
+    }
+
+    void noteCaptureBoundaryRequestDeferred() noexcept
+    {
+        captureBoundaryRequestsDeferred.fetch_add(1, std::memory_order_relaxed);
     }
 
     void armStaleClear(const std::uint64_t revision) noexcept
@@ -809,6 +843,41 @@ struct AnalysisCoordinator::State final : SharedAnalysisScheduler::JobClient,
         return true;
     }
 
+    void clearCaptureBoundaryState() noexcept
+    {
+        retainedBoundaryRawHandle.release();
+        retainedBoundaryMeterReading = { };
+        hasRetainedBoundaryMeterReading = false;
+        captureBoundaryPhase = CaptureBoundaryPhase::steady;
+        captureBoundaryRevision = 0;
+        captureBoundaryGeneration = 0;
+        captureBoundaryFramePublished = false;
+        captureBoundarySpectrogramMarkerPublished = false;
+        recoveryAnalysisStateDirty = false;
+        recoveryStereoStateDirty = false;
+        recoveryFramePublicationPending = false;
+        recoveryFrameCoveredCaptureRevision = 0;
+        workingFrame.captureBoundary = false;
+        captureBoundaryEpisodeGeneration.store(0, std::memory_order_release);
+        frameBoundaryAwaitingGeneration.store(0, std::memory_order_release);
+        spectrogramBoundaryAwaitingGeneration.store(0, std::memory_order_release);
+    }
+
+    void retainBoundaryRawHandle(StereoSampleCapture::ReadHandle&& handle) noexcept
+    {
+        if (!retainedBoundaryRawHandle)
+            retainedBoundaryRawHandle = std::move(handle);
+    }
+
+    void retainBoundaryMeterReading(const StereoMeterReading& reading) noexcept
+    {
+        if (!hasRetainedBoundaryMeterReading
+            || reading.capturedFrameEnd >= retainedBoundaryMeterReading.capturedFrameEnd) {
+            retainedBoundaryMeterReading = reading;
+            hasRetainedBoundaryMeterReading = true;
+        }
+    }
+
     void resetForCaptureDiscontinuity(const std::uint64_t captureGeneration) noexcept
     {
         workingFrame = { };
@@ -837,31 +906,67 @@ struct AnalysisCoordinator::State final : SharedAnalysisScheduler::JobClient,
         meterCapturedFrameEnd.store(0, std::memory_order_relaxed);
         hasPublishedAudioFrame.store(false, std::memory_order_release);
         staleClearPending.store(false, std::memory_order_release);
+        workingFrame.captureBoundary = true;
     }
 
-    [[nodiscard]] bool publishPendingCaptureBoundary(
+    [[nodiscard]] bool publishCaptureBoundaryArtifacts(
         const SharedAnalysisScheduler::JobContext& context, const std::uint64_t jobGeneration,
         const std::uint64_t lifecycleGeneration, const std::uint64_t captureGeneration) noexcept
     {
-        if (!captureBoundaryPublicationPending.load(std::memory_order_acquire))
+        if (captureBoundaryPhase != CaptureBoundaryPhase::publishing)
             return true;
 
-        if (captureGeneration != pendingCaptureBoundaryGeneration)
+        if (captureGeneration != captureBoundaryGeneration)
             return false;
 
-        captureBoundaryDeliveryGeneration.store(captureGeneration, std::memory_order_relaxed);
-        captureBoundaryDeliveryPending.store(true, std::memory_order_release);
-        if (!publishWorkingFrame(&context, jobGeneration, captureGeneration, lifecycleGeneration)) {
-            captureBoundaryDeliveryPending.store(false, std::memory_order_release);
-            captureBoundaryDeliveryGeneration.store(0, std::memory_order_relaxed);
-            return false;
+        if (!captureBoundarySpectrogramMarkerPublished) {
+            if (context.stopRequested()
+                || jobGeneration != currentJobGeneration.load(std::memory_order_acquire)
+                || captureGeneration != currentCaptureGeneration.load(std::memory_order_acquire)
+                || captureGeneration != activeCaptureGeneration.load(std::memory_order_acquire)
+                || lifecycleGeneration
+                    != currentCaptureLifecycleGeneration.load(std::memory_order_acquire)
+                || lifecycleGeneration
+                    != activeCaptureLifecycleGeneration.load(std::memory_order_acquire)) {
+                return false;
+            }
+
+            auto expected = std::uint64_t { 0 };
+            if (!spectrogramBoundaryAwaitingGeneration.compare_exchange_strong(expected,
+                    captureGeneration, std::memory_order_acq_rel, std::memory_order_acquire)
+                && expected != captureGeneration) {
+                return false;
+            }
+
+            if (!publishSpectrogramResetMarker(captureGeneration, true)) {
+                expected = captureGeneration;
+                static_cast<void>(spectrogramBoundaryAwaitingGeneration.compare_exchange_strong(
+                    expected, 0, std::memory_order_acq_rel, std::memory_order_acquire));
+                return false;
+            }
+            captureBoundarySpectrogramMarkerPublished = true;
         }
 
-        appliedCaptureDiscontinuityRevision = pendingCaptureDiscontinuityRevision;
-        samples.acknowledgeCaptureDiscontinuityRevision(appliedCaptureDiscontinuityRevision);
-        pendingCaptureDiscontinuityRevision = 0;
-        pendingCaptureBoundaryGeneration = 0;
-        captureBoundaryPublicationPending.store(false, std::memory_order_release);
+        if (!captureBoundaryFramePublished) {
+            auto expected = std::uint64_t { 0 };
+            if (!frameBoundaryAwaitingGeneration.compare_exchange_strong(expected,
+                    captureGeneration, std::memory_order_acq_rel, std::memory_order_acquire)
+                && expected != captureGeneration) {
+                return false;
+            }
+
+            workingFrame.captureBoundary = true;
+            if (!publishWorkingFrame(
+                    &context, jobGeneration, captureGeneration, lifecycleGeneration)) {
+                expected = captureGeneration;
+                static_cast<void>(frameBoundaryAwaitingGeneration.compare_exchange_strong(
+                    expected, 0, std::memory_order_acq_rel, std::memory_order_acquire));
+                return false;
+            }
+            captureBoundaryFramePublished = true;
+        }
+
+        captureBoundaryPhase = CaptureBoundaryPhase::awaitingDelivery;
         return true;
     }
 
@@ -873,10 +978,9 @@ struct AnalysisCoordinator::State final : SharedAnalysisScheduler::JobClient,
         if (discontinuityRevision <= appliedCaptureDiscontinuityRevision)
             return true;
 
-        if (captureBoundaryPublicationPending.load(std::memory_order_acquire)
-            && discontinuityRevision == pendingCaptureDiscontinuityRevision) {
-            return publishPendingCaptureBoundary(
-                context, jobGeneration, lifecycleGeneration, captureGeneration);
+        if (captureBoundaryPhase != CaptureBoundaryPhase::steady) {
+            captureBoundaryRevision = std::max(captureBoundaryRevision, discontinuityRevision);
+            return true;
         }
 
         if (context.stopRequested()
@@ -889,18 +993,6 @@ struct AnalysisCoordinator::State final : SharedAnalysisScheduler::JobClient,
         }
 
         const auto nextCaptureGeneration = allocateCaptureGeneration();
-        resetForCaptureDiscontinuity(nextCaptureGeneration);
-
-        if (context.stopRequested()
-            || jobGeneration != currentJobGeneration.load(std::memory_order_acquire)
-            || lifecycleGeneration
-                != currentCaptureLifecycleGeneration.load(std::memory_order_acquire)
-            || lifecycleGeneration
-                != activeCaptureLifecycleGeneration.load(std::memory_order_acquire)
-            || captureGeneration != activeCaptureGeneration.load(std::memory_order_acquire)) {
-            return false;
-        }
-
         auto expectedCaptureGeneration = captureGeneration;
         if (!activeCaptureGeneration.compare_exchange_strong(expectedCaptureGeneration,
                 nextCaptureGeneration, std::memory_order_acq_rel, std::memory_order_acquire)) {
@@ -909,12 +1001,85 @@ struct AnalysisCoordinator::State final : SharedAnalysisScheduler::JobClient,
 
         currentCaptureGeneration.store(nextCaptureGeneration, std::memory_order_release);
         captureGeneration = nextCaptureGeneration;
-        pendingCaptureDiscontinuityRevision = discontinuityRevision;
-        pendingCaptureBoundaryGeneration = captureGeneration;
-        captureBoundaryPublicationPending.store(true, std::memory_order_release);
-        static_cast<void>(publishSpectrogramResetMarker(captureGeneration));
-        return publishPendingCaptureBoundary(
+        appliedCaptureDiscontinuityRevision = discontinuityRevision;
+        captureBoundaryRevision = discontinuityRevision;
+        captureBoundaryGeneration = captureGeneration;
+        captureBoundaryFramePublished = false;
+        captureBoundarySpectrogramMarkerPublished = false;
+        recoveryAnalysisStateDirty = false;
+        recoveryStereoStateDirty = false;
+        recoveryFramePublicationPending = false;
+        recoveryFrameCoveredCaptureRevision = 0;
+        captureBoundaryPhase = CaptureBoundaryPhase::publishing;
+        captureBoundaryEpisodeGeneration.store(captureGeneration, std::memory_order_release);
+        resetForCaptureDiscontinuity(captureGeneration);
+        return publishCaptureBoundaryArtifacts(
             context, jobGeneration, lifecycleGeneration, captureGeneration);
+    }
+
+    [[nodiscard]] bool beginCaptureBoundaryRecoveryIfDelivered() noexcept
+    {
+        if (captureBoundaryPhase != CaptureBoundaryPhase::awaitingDelivery)
+            return captureBoundaryPhase == CaptureBoundaryPhase::recovering;
+
+        if (waitingForCaptureBoundaryDelivery())
+            return false;
+
+        workingFrame.captureBoundary = false;
+        captureBoundaryPhase = CaptureBoundaryPhase::recovering;
+        return true;
+    }
+
+    [[nodiscard]] bool prepareDirtyCaptureBoundaryRecoveryFrame() noexcept
+    {
+        if (captureBoundaryPhase != CaptureBoundaryPhase::recovering || !recoveryAnalysisStateDirty
+            || retainedBoundaryRawHandle || hasRetainedBoundaryMeterReading) {
+            return false;
+        }
+
+        if (recoveryStereoStateDirty) {
+            static_cast<void>(stereoField.writeFrame(workingFrame));
+            workingFrame.stereoSequence = nextStereoSequence++;
+            mirrorStereoFrameState();
+        }
+        static_cast<void>(refreshLoudnessFrameState());
+        newestCapturedFrameEnd = std::max({ newestCapturedFrameEnd,
+            workingFrame.stereoCapturedFrameEnd, workingFrame.loudnessMeasurementCapturedFrameEnd,
+            workingFrame.loudnessIntegratedCapturedFrameEnd });
+        workingFrame.generation = captureBoundaryGeneration;
+        workingFrame.captureBoundary = false;
+        workingFrame.capturedFrameEnd = newestCapturedFrameEnd;
+        workingFrame.droppedChunks = samples.telemetry().lostChunks();
+        recoveryStereoStateDirty = false;
+        recoveryFramePublicationPending = true;
+        return true;
+    }
+
+    void markCaptureBoundaryRecoveryDirty(const std::uint64_t coveredCaptureRevision) noexcept
+    {
+        recoveryAnalysisStateDirty = true;
+        if (recoveryFrameCoveredCaptureRevision == 0)
+            recoveryFrameCoveredCaptureRevision = coveredCaptureRevision;
+    }
+
+    void completeCaptureBoundaryRecovery() noexcept
+    {
+        const auto revision = captureBoundaryRevision;
+        appliedCaptureDiscontinuityRevision = revision;
+        retainedBoundaryRawHandle.release();
+        retainedBoundaryMeterReading = { };
+        hasRetainedBoundaryMeterReading = false;
+        captureBoundaryPhase = CaptureBoundaryPhase::steady;
+        captureBoundaryRevision = 0;
+        captureBoundaryGeneration = 0;
+        captureBoundaryFramePublished = false;
+        captureBoundarySpectrogramMarkerPublished = false;
+        recoveryAnalysisStateDirty = false;
+        recoveryStereoStateDirty = false;
+        recoveryFramePublicationPending = false;
+        recoveryFrameCoveredCaptureRevision = 0;
+        samples.acknowledgeCaptureDiscontinuityRevision(revision);
+        captureBoundaryEpisodeGeneration.store(0, std::memory_order_release);
     }
 
     void suppressUnpublishedLoudnessReset(VisualizationFrame& frame) const noexcept
@@ -963,12 +1128,37 @@ struct AnalysisCoordinator::State final : SharedAnalysisScheduler::JobClient,
             return;
         }
 
-        if (!publishPendingCaptureBoundary(
+        if (captureBoundaryPhase == CaptureBoundaryPhase::publishing
+            && !publishCaptureBoundaryArtifacts(
                 context, jobGeneration, lifecycleGeneration, captureGeneration)) {
             finish(true);
             return;
         }
-        if (waitingForCaptureBoundaryDelivery()) {
+
+        if (captureBoundaryPhase == CaptureBoundaryPhase::awaitingDelivery) {
+            if (!beginCaptureBoundaryRecoveryIfDelivered()) {
+                finish(false);
+                return;
+            }
+        }
+
+        if (captureBoundaryPhase == CaptureBoundaryPhase::recovering
+            && !recoveryFramePublicationPending) {
+            static_cast<void>(prepareDirtyCaptureBoundaryRecoveryFrame());
+        }
+
+        if (captureBoundaryPhase == CaptureBoundaryPhase::recovering
+            && recoveryFramePublicationPending) {
+            const auto coveredCaptureRevision = recoveryFrameCoveredCaptureRevision;
+            workingFrame.captureBoundary = false;
+            if (!publishWorkingFrame(
+                    &context, jobGeneration, captureGeneration, lifecycleGeneration)) {
+                finish(true);
+                return;
+            }
+
+            completeCaptureBoundaryRecovery();
+            lastAnalyzedCaptureRevision.store(coveredCaptureRevision, std::memory_order_release);
             finish(false);
             return;
         }
@@ -981,11 +1171,13 @@ struct AnalysisCoordinator::State final : SharedAnalysisScheduler::JobClient,
                       || advanceCaptureGenerationForDiscontinuity(context, jobGeneration,
                           lifecycleGeneration, latestRevision, captureGeneration);
               };
+        const auto phaseBeforeInitialDiscontinuityCheck = captureBoundaryPhase;
         if (!advanceToLatestCaptureDiscontinuity()) {
             finish(true);
             return;
         }
-        if (waitingForCaptureBoundaryDelivery()) {
+        if (phaseBeforeInitialDiscontinuityCheck == CaptureBoundaryPhase::steady
+            && captureBoundaryPhase != CaptureBoundaryPhase::steady) {
             finish(false);
             return;
         }
@@ -994,6 +1186,7 @@ struct AnalysisCoordinator::State final : SharedAnalysisScheduler::JobClient,
         bool stereoStateChanged = false;
         bool loudnessStateChanged = false;
         bool consumedValidAudio = false;
+        bool processedCaptureBoundaryInput = false;
         StereoSampleCapture::ReadHandle handle;
         std::size_t retainedFrames = 0;
         std::uint64_t retainedFrameEnd = 0;
@@ -1018,17 +1211,28 @@ struct AnalysisCoordinator::State final : SharedAnalysisScheduler::JobClient,
                 return;
             }
 
+            const auto phaseBeforeDiscontinuityCheck = captureBoundaryPhase;
             if (!advanceToLatestCaptureDiscontinuity()) {
                 finish(true);
                 return;
             }
-            if (waitingForCaptureBoundaryDelivery()) {
+            if (phaseBeforeDiscontinuityCheck == CaptureBoundaryPhase::steady
+                && captureBoundaryPhase != CaptureBoundaryPhase::steady) {
                 finish(false);
                 return;
             }
 
-            if (!samples.tryAcquireOldest(handle))
-                break;
+            if (captureBoundaryPhase == CaptureBoundaryPhase::recovering
+                && retainedBoundaryRawHandle) {
+                handle = std::move(retainedBoundaryRawHandle);
+            } else {
+#if defined(JUCE_UNIT_TESTS) && JUCE_UNIT_TESTS
+                invokeWorkerTestHook(
+                    AnalysisCoordinator::WorkerTestOperation::beforeRawAcquisition);
+#endif
+                if (!samples.tryAcquireOldest(handle))
+                    break;
+            }
 
             auto chunk = handle.view();
             if (chunk.captureLifecycleGeneration != lifecycleGeneration) {
@@ -1036,43 +1240,44 @@ struct AnalysisCoordinator::State final : SharedAnalysisScheduler::JobClient,
                 continue;
             }
 
-            if (chunk.captureDiscontinuityRevision < appliedCaptureDiscontinuityRevision) {
+            const auto minimumAcceptedDiscontinuityRevisionBeforeAcquisition
+                = captureBoundaryPhase == CaptureBoundaryPhase::recovering
+                ? captureBoundaryRevision
+                : appliedCaptureDiscontinuityRevision;
+            const auto observedDiscontinuityRevision = std::max(chunk.captureDiscontinuityRevision,
+                samples.captureDiscontinuityRevision(lifecycleGeneration));
+            if (observedDiscontinuityRevision
+                > minimumAcceptedDiscontinuityRevisionBeforeAcquisition) {
+                const auto phaseBeforeAcquisitionCheck = captureBoundaryPhase;
+                const auto acquiredPostGapInput
+                    = chunk.captureDiscontinuityRevision >= observedDiscontinuityRevision;
+                if (!advanceCaptureGenerationForDiscontinuity(context, jobGeneration,
+                        lifecycleGeneration, observedDiscontinuityRevision, captureGeneration)) {
+                    finish(true);
+                    return;
+                }
+
+                if (phaseBeforeAcquisitionCheck == CaptureBoundaryPhase::steady) {
+                    if (acquiredPostGapInput)
+                        retainBoundaryRawHandle(std::move(handle));
+                    finish(false);
+                    return;
+                }
+            }
+
+            const auto minimumAcceptedDiscontinuityRevision
+                = captureBoundaryPhase == CaptureBoundaryPhase::recovering
+                ? captureBoundaryRevision
+                : appliedCaptureDiscontinuityRevision;
+            if (chunk.captureDiscontinuityRevision < minimumAcceptedDiscontinuityRevision) {
                 ignoredGenerationChunks.fetch_add(1, std::memory_order_relaxed);
                 continue;
             }
 
-            const auto advancesCaptureGeneration
-                = chunk.captureDiscontinuityRevision > appliedCaptureDiscontinuityRevision;
-            if (advancesCaptureGeneration) {
-                if (!advanceCaptureGenerationForDiscontinuity(context, jobGeneration,
-                        lifecycleGeneration, chunk.captureDiscontinuityRevision,
-                        captureGeneration)) {
-                    finish(true);
-                    return;
-                }
-                if (waitingForCaptureBoundaryDelivery()) {
-                    finish(false);
-                    return;
-                }
-
-                frameChanged = false;
-                stereoStateChanged = false;
-                loudnessStateChanged = false;
-                consumedValidAudio = false;
-                retainedFrames = 0;
-                retainedFrameEnd = 0;
-                previousChunkSequence = 0;
-                previousChunkFrameEnd = 0;
-                retainedSampleRate = 0.0;
-                retainedChannelCount = 0;
-                hasPreviousChunk = false;
-                inputFollowsDiscontinuity = true;
-                retainedChunkCount = 0;
-                retentionCapacity = std::max(activeFftSize, StereoSampleCapture::framesPerSlot);
-            }
-
             chunk.generation = captureGeneration;
-            chunk.followsDiscontinuity = chunk.followsDiscontinuity || advancesCaptureGeneration;
+            chunk.followsDiscontinuity = chunk.followsDiscontinuity
+                || (captureBoundaryPhase == CaptureBoundaryPhase::recovering
+                    && !processedCaptureBoundaryInput);
 
             const auto hasValidRange = chunk.capturedFrameEnd >= chunk.frameCount;
             const auto chunkFrameStart
@@ -1086,6 +1291,11 @@ struct AnalysisCoordinator::State final : SharedAnalysisScheduler::JobClient,
 
             static_cast<void>(stereoField.process(chunk));
             stereoStateChanged = true;
+            if (captureBoundaryPhase == CaptureBoundaryPhase::recovering) {
+                markCaptureBoundaryRecoveryDirty(revisionAtStart);
+                recoveryStereoStateDirty = true;
+                processedCaptureBoundaryInput = true;
+            }
 
             ++retainedChunkCount;
             if (retainedChunkCount == 2) {
@@ -1220,48 +1430,74 @@ struct AnalysisCoordinator::State final : SharedAnalysisScheduler::JobClient,
 #if defined(JUCE_UNIT_TESTS) && JUCE_UNIT_TESTS
         invokeWorkerTestHook(AnalysisCoordinator::WorkerTestOperation::beforeMeterConsumption);
 #endif
+        const auto phaseBeforeMeterDiscontinuityCheck = captureBoundaryPhase;
         if (!advanceToLatestCaptureDiscontinuity()) {
             finish(true);
             return;
         }
-        if (waitingForCaptureBoundaryDelivery()) {
+        if (phaseBeforeMeterDiscontinuityCheck == CaptureBoundaryPhase::steady
+            && captureBoundaryPhase != CaptureBoundaryPhase::steady) {
             finish(false);
             return;
         }
-        if (meters.consumeLatest(meterReading)
-            && meterReading.captureLifecycleGeneration == lifecycleGeneration
-            && meterReading.captureDiscontinuityRevision >= appliedCaptureDiscontinuityRevision) {
-            const auto advancesCaptureGeneration
-                = meterReading.captureDiscontinuityRevision > appliedCaptureDiscontinuityRevision;
-            if (advancesCaptureGeneration) {
+
+        auto hasMeterReading = false;
+        auto appliedMeterReading = false;
+        if (captureBoundaryPhase == CaptureBoundaryPhase::recovering
+            && hasRetainedBoundaryMeterReading) {
+            meterReading = retainedBoundaryMeterReading;
+            retainedBoundaryMeterReading = { };
+            hasRetainedBoundaryMeterReading = false;
+            hasMeterReading = true;
+        } else {
+#if defined(JUCE_UNIT_TESTS) && JUCE_UNIT_TESTS
+            invokeWorkerTestHook(AnalysisCoordinator::WorkerTestOperation::beforeMeterAcquisition);
+#endif
+            hasMeterReading = meters.consumeLatest(meterReading);
+        }
+
+        if (hasMeterReading && meterReading.captureLifecycleGeneration == lifecycleGeneration) {
+            const auto observedDiscontinuityRevision
+                = std::max(meterReading.captureDiscontinuityRevision,
+                    samples.captureDiscontinuityRevision(lifecycleGeneration));
+            const auto minimumAcceptedDiscontinuityRevision
+                = captureBoundaryPhase == CaptureBoundaryPhase::recovering
+                ? captureBoundaryRevision
+                : appliedCaptureDiscontinuityRevision;
+            if (captureBoundaryPhase == CaptureBoundaryPhase::steady
+                && observedDiscontinuityRevision > appliedCaptureDiscontinuityRevision) {
+                if (meterReading.captureDiscontinuityRevision >= observedDiscontinuityRevision)
+                    retainBoundaryMeterReading(meterReading);
                 if (!advanceCaptureGenerationForDiscontinuity(context, jobGeneration,
-                        lifecycleGeneration, meterReading.captureDiscontinuityRevision,
-                        captureGeneration)) {
+                        lifecycleGeneration, observedDiscontinuityRevision, captureGeneration)) {
                     finish(true);
                     return;
                 }
-                if (waitingForCaptureBoundaryDelivery()) {
-                    finish(false);
-                    return;
-                }
-
-                frameChanged = false;
-                stereoStateChanged = false;
-                loudnessStateChanged = false;
-                consumedValidAudio = false;
+                finish(false);
+                return;
             }
 
-            meterReading.generation = captureGeneration;
-            meterReading.rawCaptureDiscontinuity
-                = meterReading.rawCaptureDiscontinuity || advancesCaptureGeneration;
-            applyPeakRmsReading(meterReading);
-            newestCapturedFrameEnd
-                = std::max(newestCapturedFrameEnd, meterReading.capturedFrameEnd);
-            workingFrame.sampleRate = meterReading.sampleRate;
-            meterCapturedFrameEnd.store(meterReading.capturedFrameEnd, std::memory_order_relaxed);
-            frameChanged = true;
-            stereoStateChanged = true;
-            consumedValidAudio = meterReading.valid;
+            if (meterReading.captureDiscontinuityRevision >= minimumAcceptedDiscontinuityRevision) {
+                meterReading.generation = captureGeneration;
+                meterReading.rawCaptureDiscontinuity = meterReading.rawCaptureDiscontinuity
+                    || (captureBoundaryPhase == CaptureBoundaryPhase::recovering
+                        && !processedCaptureBoundaryInput);
+                applyPeakRmsReading(meterReading);
+                newestCapturedFrameEnd
+                    = std::max(newestCapturedFrameEnd, meterReading.capturedFrameEnd);
+                workingFrame.sampleRate = meterReading.sampleRate;
+                meterCapturedFrameEnd.store(
+                    meterReading.capturedFrameEnd, std::memory_order_relaxed);
+                frameChanged = true;
+                stereoStateChanged = true;
+                consumedValidAudio = meterReading.valid;
+                appliedMeterReading = true;
+                if (captureBoundaryPhase == CaptureBoundaryPhase::recovering) {
+                    markCaptureBoundaryRecoveryDirty(revisionAtStart);
+                    recoveryStereoStateDirty = true;
+                    processedCaptureBoundaryInput = true;
+                }
+            }
         }
 
         const auto pendingResetEpoch
@@ -1269,7 +1505,7 @@ struct AnalysisCoordinator::State final : SharedAnalysisScheduler::JobClient,
         if (pendingResetEpoch != 0) {
             requiredUserResetEpoch = std::max(requiredUserResetEpoch, pendingResetEpoch);
 
-            const auto resetWasAlreadyApplied = meterReading.valid
+            const auto resetWasAlreadyApplied = appliedMeterReading && meterReading.valid
                 && meterReading.appliedUserResetEpoch >= requiredUserResetEpoch;
             if (workingFrame.meterValid && !resetWasAlreadyApplied) {
                 workingFrame.heldPeakDecibels.fill(minimumDisplayDecibels);
@@ -1331,20 +1567,38 @@ struct AnalysisCoordinator::State final : SharedAnalysisScheduler::JobClient,
             frameChanged = true;
         }
 
+        auto completedRecoveryCoveredCaptureRevision = std::uint64_t { 0 };
         if (frameChanged) {
             if (stereoStateChanged) {
                 workingFrame.stereoSequence = nextStereoSequence++;
                 mirrorStereoFrameState();
             }
             workingFrame.generation = captureGeneration;
+            workingFrame.captureBoundary = false;
             workingFrame.capturedFrameEnd = newestCapturedFrameEnd;
             workingFrame.droppedChunks = samples.telemetry().lostChunks();
-            static_cast<void>(publishWorkingFrame(
-                &context, jobGeneration, captureGeneration, lifecycleGeneration));
+            if (captureBoundaryPhase == CaptureBoundaryPhase::recovering
+                && processedCaptureBoundaryInput) {
+                recoveryFramePublicationPending = true;
+            }
+            const auto frameWasPublished = publishWorkingFrame(
+                &context, jobGeneration, captureGeneration, lifecycleGeneration);
+            if (captureBoundaryPhase == CaptureBoundaryPhase::recovering
+                && processedCaptureBoundaryInput) {
+                if (!frameWasPublished) {
+                    finish(true);
+                    return;
+                }
+
+                completedRecoveryCoveredCaptureRevision = recoveryFrameCoveredCaptureRevision;
+                completeCaptureBoundaryRecovery();
+            }
         }
 
-        captureBoundaryResumePending.store(false, std::memory_order_release);
-        lastAnalyzedCaptureRevision.store(revisionAtStart, std::memory_order_release);
+        lastAnalyzedCaptureRevision.store(completedRecoveryCoveredCaptureRevision != 0
+                ? completedRecoveryCoveredCaptureRevision
+                : revisionAtStart,
+            std::memory_order_release);
         finish(false);
     }
 
@@ -1436,6 +1690,8 @@ struct AnalysisCoordinator::State final : SharedAnalysisScheduler::JobClient,
             = lastAnalyzedCaptureRevision.load(std::memory_order_relaxed);
         result.emptyAnalysisRequestsAvoided
             = emptyAnalysisRequestsAvoided.load(std::memory_order_relaxed);
+        result.captureBoundaryRequestsDeferred
+            = captureBoundaryRequestsDeferred.load(std::memory_order_relaxed);
         result.staleFramesPublished = staleFramesPublished.load(std::memory_order_relaxed);
         result.peakRmsUserResets = peakRmsUserResets.load(std::memory_order_relaxed);
         result.spectrumUserClears = spectrumUserClears.load(std::memory_order_relaxed);
@@ -1486,6 +1742,8 @@ struct AnalysisCoordinator::State final : SharedAnalysisScheduler::JobClient,
     std::array<float, maximumFftSize> spectrumRightScratch { };
     VisualizationFrame workingFrame;
     SpectrogramColumn spectrogramColumnScratch;
+    StereoSampleCapture::ReadHandle retainedBoundaryRawHandle;
+    StereoMeterReading retainedBoundaryMeterReading;
     std::uint64_t newestCapturedFrameEnd = 0;
     std::uint64_t nextCoalescedInputSequence = 1;
     std::uint64_t nextSpectrumSequence = 1;
@@ -1497,13 +1755,21 @@ struct AnalysisCoordinator::State final : SharedAnalysisScheduler::JobClient,
     std::uint64_t requiredUserResetEpoch = 0;
     std::uint64_t requiredLiveClearEpoch = 0;
     std::uint64_t appliedCaptureDiscontinuityRevision = 0;
-    std::uint64_t pendingCaptureDiscontinuityRevision = 0;
-    std::uint64_t pendingCaptureBoundaryGeneration = 0;
+    std::uint64_t captureBoundaryRevision = 0;
+    std::uint64_t captureBoundaryGeneration = 0;
     std::uint64_t appliedLoudnessResetEpoch = 0;
     std::uint64_t mirroredLoudnessStateSequence = 0;
     std::uint64_t mirroredLoudnessResetEpoch = 0;
     bool mappingSeedPending = false;
     bool mappingSeedWasPublished = false;
+    bool hasRetainedBoundaryMeterReading = false;
+    bool captureBoundaryFramePublished = false;
+    bool captureBoundarySpectrogramMarkerPublished = false;
+    bool recoveryAnalysisStateDirty = false;
+    bool recoveryStereoStateDirty = false;
+    bool recoveryFramePublicationPending = false;
+    std::uint64_t recoveryFrameCoveredCaptureRevision = 0;
+    CaptureBoundaryPhase captureBoundaryPhase = CaptureBoundaryPhase::steady;
     mutable std::mutex loudnessMeasurementMutex;
     LoudnessMeasurement loudnessMeasurementTelemetry;
     std::atomic<std::uint64_t> captureGenerationCounter { 0 };
@@ -1515,10 +1781,9 @@ struct AnalysisCoordinator::State final : SharedAnalysisScheduler::JobClient,
     std::atomic<std::uint64_t> attemptedCaptureSampleRateBits { 0 };
     std::atomic<std::uint64_t> captureRevision { 0 };
     std::atomic<std::uint64_t> lastAnalyzedCaptureRevision { 0 };
-    std::atomic<bool> captureBoundaryPublicationPending { false };
-    std::atomic<std::uint64_t> captureBoundaryDeliveryGeneration { 0 };
-    std::atomic<bool> captureBoundaryDeliveryPending { false };
-    std::atomic<bool> captureBoundaryResumePending { false };
+    std::atomic<std::uint64_t> captureBoundaryEpisodeGeneration { 0 };
+    std::atomic<std::uint64_t> frameBoundaryAwaitingGeneration { 0 };
+    std::atomic<std::uint64_t> spectrogramBoundaryAwaitingGeneration { 0 };
     std::atomic<bool> hasPublishedAudioFrame { false };
     std::atomic<bool> staleClearPending { false };
     std::atomic<std::uint64_t> peakRmsResetPendingEpoch { 0 };
@@ -1544,6 +1809,7 @@ struct AnalysisCoordinator::State final : SharedAnalysisScheduler::JobClient,
     std::atomic<std::uint64_t> meterCapturedFrameEnd { 0 };
     std::atomic<std::uint64_t> stereoSequence { 0 };
     std::atomic<std::uint64_t> emptyAnalysisRequestsAvoided { 0 };
+    std::atomic<std::uint64_t> captureBoundaryRequestsDeferred { 0 };
     std::atomic<std::uint64_t> staleFramesPublished { 0 };
     std::atomic<std::uint64_t> peakRmsUserResets { 0 };
     std::atomic<std::uint64_t> spectrumUserClears { 0 };
@@ -1734,7 +2000,7 @@ void AnalysisCoordinator::requestAnalysis() noexcept
         if (!state_->isCaptureActive() || client_ == nullptr)
             return;
         if (state_->waitingForCaptureBoundaryDelivery()) {
-            state_->noteEmptyRequestAvoided();
+            state_->noteCaptureBoundaryRequestDeferred();
             return;
         }
 
@@ -1753,9 +2019,10 @@ void AnalysisCoordinator::requestAnalysis() noexcept
 
         const auto coveredRevision
             = std::max(lastRequestedCaptureRevision_, state_->analyzedCaptureRevision());
-        const auto hasNewCapture
-            = captureRevision > coveredRevision || state_->hasPendingCaptureBoundary();
-        const auto staleClearIsDue = !staleClearRequested_ && state_->hasAudioFrame()
+        const auto captureBoundaryWasPending = state_->hasPendingCaptureBoundary();
+        const auto hasNewCapture = captureRevision > coveredRevision || captureBoundaryWasPending;
+        const auto staleClearIsDue = !captureBoundaryWasPending && !staleClearRequested_
+            && state_->hasAudioFrame()
             && now - lastObservedCaptureNanoseconds_ >= staleInputTimeoutNanoseconds;
 
         if (!hasNewCapture && !staleClearIsDue) {
@@ -1786,7 +2053,7 @@ void AnalysisCoordinator::requestAnalysis() noexcept
             return;
         }
 
-        if (hasNewCapture)
+        if (hasNewCapture && !captureBoundaryWasPending)
             lastRequestedCaptureRevision_ = captureRevision;
 
         if (staleClearIsDue)

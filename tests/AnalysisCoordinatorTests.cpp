@@ -21,15 +21,139 @@ namespace audio_insight {
 namespace {
 using namespace std::chrono_literals;
 
+void drainSpectrogramColumns(
+    AnalysisCoordinator& coordinator, std::uint64_t& captureBoundaryGeneration)
+{
+    SpectrogramColumn column;
+    while (coordinator.copyNextSpectrogramColumn(column)) {
+        if (column.captureBoundary && column.resetMarker)
+            captureBoundaryGeneration = column.captureGeneration;
+    }
+}
+
+void drainRendererState(AnalysisCoordinator& coordinator)
+{
+    VisualizationFrame frame;
+    while (coordinator.copyLatestVisualizationFrame(frame)) { }
+
+    SpectrogramColumn column;
+    while (coordinator.copyNextSpectrogramColumn(column)) { }
+}
+
+[[nodiscard]] bool isFullyInvalidCaptureBoundary(const VisualizationFrame& frame) noexcept
+{
+    return frame.captureBoundary && !frame.spectrumValid && !frame.meterValid
+        && !frame.stereoFieldValid && !frame.stereoCorrelationValid && !frame.loudnessMomentaryValid
+        && !frame.loudnessShortTermValid && !frame.loudnessIntegratedValid;
+}
+
+template <typename Predicate>
+bool waitUntil(Predicate&& predicate, const std::chrono::milliseconds timeout = 2s)
+{
+    const auto deadline = std::chrono::steady_clock::now() + timeout;
+    while (std::chrono::steady_clock::now() < deadline) {
+        if (predicate())
+            return true;
+        std::this_thread::sleep_for(1ms);
+    }
+
+    return predicate();
+}
+
+bool waitForCaptureBoundaryPublication(AnalysisCoordinator& coordinator,
+    const std::uint64_t previousGeneration, const std::uint64_t previousPublishedFrames,
+    std::uint64_t& boundaryGeneration)
+{
+    return waitUntil([&] {
+        coordinator.requestAnalysis();
+        const auto telemetry = coordinator.telemetry();
+        if (telemetry.captureGeneration <= previousGeneration
+            || telemetry.publishedFrames <= previousPublishedFrames) {
+            return false;
+        }
+
+        boundaryGeneration = telemetry.captureGeneration;
+        return true;
+    });
+}
+
+bool copyCaptureBoundaryFrame(AnalysisCoordinator& coordinator,
+    const std::uint64_t expectedGeneration, VisualizationFrame& destination)
+{
+    return waitUntil([&] {
+        VisualizationFrame candidate;
+        if (!coordinator.copyLatestVisualizationFrame(candidate))
+            return false;
+        if (!candidate.captureBoundary || candidate.generation != expectedGeneration)
+            return false;
+        destination = candidate;
+        return true;
+    });
+}
+
+bool copyCaptureBoundaryMarker(AnalysisCoordinator& coordinator,
+    const std::uint64_t expectedGeneration, SpectrogramColumn& destination)
+{
+    return waitUntil([&] {
+        SpectrogramColumn candidate;
+        if (!coordinator.copyNextSpectrogramColumn(candidate))
+            return false;
+        if (!candidate.captureBoundary || !candidate.resetMarker
+            || candidate.captureGeneration != expectedGeneration) {
+            return false;
+        }
+        destination = candidate;
+        return true;
+    });
+}
+
+bool waitForCaptureBoundaryRecovery(AnalysisCoordinator& coordinator,
+    const std::uint64_t expectedGeneration, VisualizationFrame& destination)
+{
+    return waitUntil([&] {
+        coordinator.requestAnalysis();
+        VisualizationFrame candidate;
+        if (!coordinator.copyLatestVisualizationFrame(candidate))
+            return false;
+        if (candidate.captureBoundary || candidate.generation != expectedGeneration
+            || (!candidate.meterValid && !candidate.stereoFieldValid)) {
+            return false;
+        }
+        destination = candidate;
+        return true;
+    });
+}
+
+template <std::size_t FrameCount>
+void captureRepeated(AnalysisCoordinator& coordinator, const std::array<float, FrameCount>& left,
+    const std::array<float, FrameCount>& right, const std::size_t count,
+    const double sampleRate = 48'000.0)
+{
+    for (std::size_t index = 0; index < count; ++index)
+        coordinator.captureAudioBlock(left.data(), right.data(), left.size(), sampleRate, 2);
+}
+
 template <typename Predicate>
 bool waitForFrame(AnalysisCoordinator& coordinator, VisualizationFrame& frame,
     Predicate&& predicate, const std::chrono::milliseconds timeout = 2s)
 {
     const auto deadline = std::chrono::steady_clock::now() + timeout;
+    auto deliveredCaptureBoundaryGeneration = std::uint64_t { 0 };
     while (std::chrono::steady_clock::now() < deadline) {
         coordinator.requestAnalysis();
-        if (coordinator.copyLatestVisualizationFrame(frame) && predicate(frame))
-            return true;
+        drainSpectrogramColumns(coordinator, deliveredCaptureBoundaryGeneration);
+        if (coordinator.copyLatestVisualizationFrame(frame)) {
+            while (frame.captureBoundary && deliveredCaptureBoundaryGeneration != frame.generation
+                && std::chrono::steady_clock::now() < deadline) {
+                drainSpectrogramColumns(coordinator, deliveredCaptureBoundaryGeneration);
+                if (deliveredCaptureBoundaryGeneration != frame.generation)
+                    std::this_thread::sleep_for(1ms);
+            }
+            if (frame.captureBoundary && deliveredCaptureBoundaryGeneration != frame.generation)
+                return false;
+            if (predicate(frame))
+                return true;
+        }
 
         std::this_thread::sleep_for(2ms);
     }
@@ -42,9 +166,21 @@ bool waitForFrameWithoutRequest(AnalysisCoordinator& coordinator, VisualizationF
     Predicate&& predicate, const std::chrono::milliseconds timeout = 500ms)
 {
     const auto deadline = std::chrono::steady_clock::now() + timeout;
+    auto deliveredCaptureBoundaryGeneration = std::uint64_t { 0 };
     while (std::chrono::steady_clock::now() < deadline) {
-        if (coordinator.copyLatestVisualizationFrame(frame) && predicate(frame))
-            return true;
+        drainSpectrogramColumns(coordinator, deliveredCaptureBoundaryGeneration);
+        if (coordinator.copyLatestVisualizationFrame(frame)) {
+            while (frame.captureBoundary && deliveredCaptureBoundaryGeneration != frame.generation
+                && std::chrono::steady_clock::now() < deadline) {
+                drainSpectrogramColumns(coordinator, deliveredCaptureBoundaryGeneration);
+                if (deliveredCaptureBoundaryGeneration != frame.generation)
+                    std::this_thread::sleep_for(1ms);
+            }
+            if (frame.captureBoundary && deliveredCaptureBoundaryGeneration != frame.generation)
+                return false;
+            if (predicate(frame))
+                return true;
+        }
 
         std::this_thread::sleep_for(1ms);
     }
@@ -628,7 +764,7 @@ public:
 
             std::array<float, StereoSampleCapture::framesPerSlot> queuedBeforeReset { };
             queuedBeforeReset.fill(0.125F);
-            for (std::size_t index = 0; index < StereoSampleCapture::slotCount + 4; ++index) {
+            for (std::size_t index = 0; index < StereoSampleCapture::slotCount * 2; ++index) {
                 coordinator.captureAudioBlock(queuedBeforeReset.data(), queuedBeforeReset.data(),
                     queuedBeforeReset.size(), loudnessTestSampleRate, 2);
             }
@@ -638,14 +774,33 @@ public:
             barrier.release();
 
             VisualizationFrame afterGap;
-            expect(waitForFrame(
+            const auto receivedAfterGap = waitForFrame(
                 coordinator, afterGap,
                 [sequence = beforeGap.loudnessSequence, resetBoundary](const auto& candidate) {
                     return candidate.loudnessSequence > sequence
                         && candidate.capturedFrameEnd >= resetBoundary
                         && candidate.loudnessMomentaryValid;
                 },
-                2s));
+                2s);
+            const auto afterGapTelemetry = coordinator.telemetry();
+            expect(receivedAfterGap,
+                juce::String("No post-gap Loudness frame: frameEnd=")
+                    + juce::String(static_cast<juce::int64>(afterGap.capturedFrameEnd))
+                    + ", resetBoundary=" + juce::String(static_cast<juce::int64>(resetBoundary))
+                    + ", M valid=" + juce::String(afterGap.loudnessMomentaryValid ? 1 : 0)
+                    + ", ready=" + juce::String(afterGapTelemetry.capture.readySlots)
+                    + ", reclaimed="
+                    + juce::String(
+                        static_cast<juce::int64>(afterGapTelemetry.capture.reclaimedReadyChunks))
+                    + ", ignored="
+                    + juce::String(
+                        static_cast<juce::int64>(afterGapTelemetry.ignoredGenerationChunks))
+                    + ", loudnessEnd="
+                    + juce::String(
+                        static_cast<juce::int64>(afterGapTelemetry.loudness.capturedFrameEnd))
+                    + ", discontinuityResets="
+                    + juce::String(
+                        static_cast<juce::int64>(afterGapTelemetry.loudness.discontinuityResets)));
             expect(!afterGap.loudnessIntegratedValid,
                 "Pre-reset raw survivors entered the new Integrated interval");
 
@@ -1499,6 +1654,8 @@ public:
         }
 
 #if defined(JUCE_UNIT_TESTS) && JUCE_UNIT_TESTS
+        runCaptureBoundaryRolloverTests();
+
         beginTest("A rejected gap boundary is retried before post-gap state");
         {
             AnalysisCoordinator coordinator;
@@ -1677,6 +1834,734 @@ public:
         }
 #endif
     }
+
+#if defined(JUCE_UNIT_TESTS) && JUCE_UNIT_TESTS
+private:
+    void runCaptureBoundaryRolloverTests()
+    {
+        runIndependentCaptureBoundaryGateCase(true);
+        runIndependentCaptureBoundaryGateCase(false);
+        runSustainedOverflowCaptureBoundaryCase();
+        runRawAcquisitionRetentionAndCancellationCase();
+        runMeterAcquisitionRetentionCase();
+        runRecoveryPublicationRetryCase();
+        runRecoveryRetryPreservesLaterCaptureCase();
+        runPendingRecoverySuppressesStaleClearCase();
+        runBoundaryPublicationCancellationCase();
+        runBoundaryConfigurationSurvivalCase();
+        runStaleBoundaryAcknowledgementCase(
+            AnalysisCoordinator::WorkerTestOperation::beforeFrameBoundaryAcknowledgement);
+        runStaleBoundaryAcknowledgementCase(
+            AnalysisCoordinator::WorkerTestOperation::beforeSpectrogramBoundaryAcknowledgement);
+    }
+
+    void runIndependentCaptureBoundaryGateCase(const bool deliverFrameFirst)
+    {
+        beginTest(deliverFrameFirst
+                ? "Capture recovery waits independently for the Spectrogram boundary marker"
+                : "Capture recovery waits independently for the visualization boundary frame");
+
+        AnalysisCoordinator coordinator;
+        coordinator.setCaptureFormat(48'000.0, 2);
+        coordinator.setVisualizationActive(true);
+        drainRendererState(coordinator);
+
+        std::array<float, 64> left { };
+        std::array<float, 64> right { };
+        left.fill(0.25F);
+        right.fill(-0.125F);
+
+        const auto beforeBoundary = coordinator.telemetry();
+        captureRepeated(coordinator, left, right, StereoSampleCapture::slotCount + 1);
+
+        auto boundaryGeneration = std::uint64_t { 0 };
+        expect(waitForCaptureBoundaryPublication(coordinator, beforeBoundary.captureGeneration,
+            beforeBoundary.publishedFrames, boundaryGeneration));
+        expect(boundaryGeneration == beforeBoundary.captureGeneration + 1);
+
+        VisualizationFrame boundaryFrame;
+        SpectrogramColumn boundaryMarker;
+        if (deliverFrameFirst) {
+            expect(copyCaptureBoundaryFrame(coordinator, boundaryGeneration, boundaryFrame));
+        } else {
+            expect(copyCaptureBoundaryMarker(coordinator, boundaryGeneration, boundaryMarker));
+        }
+
+        constexpr auto deferredRequests = std::uint64_t { 4 };
+        const auto beforeDeferredRequests = coordinator.telemetry();
+        for (auto request = std::uint64_t { 0 }; request < deferredRequests; ++request)
+            coordinator.requestAnalysis();
+        const auto afterDeferredRequests = coordinator.telemetry();
+        expect(afterDeferredRequests.captureBoundaryRequestsDeferred
+            == beforeDeferredRequests.captureBoundaryRequestsDeferred + deferredRequests);
+        expect(afterDeferredRequests.emptyAnalysisRequestsAvoided
+            == beforeDeferredRequests.emptyAnalysisRequestsAvoided);
+        expect(afterDeferredRequests.publishedFrames == beforeDeferredRequests.publishedFrames,
+            "Post-gap state was published while one renderer boundary was withheld");
+
+        if (deliverFrameFirst) {
+            expect(copyCaptureBoundaryMarker(coordinator, boundaryGeneration, boundaryMarker));
+        } else {
+            expect(copyCaptureBoundaryFrame(coordinator, boundaryGeneration, boundaryFrame));
+        }
+        expect(isFullyInvalidCaptureBoundary(boundaryFrame));
+        expect(boundaryMarker.captureBoundary && boundaryMarker.resetMarker);
+
+        VisualizationFrame recovered;
+        expect(waitForCaptureBoundaryRecovery(coordinator, boundaryGeneration, recovered));
+        expect(recovered.meterValid);
+        expect(recovered.stereoFieldValid);
+
+        const auto beforeEmptyRequest = coordinator.telemetry();
+        coordinator.requestAnalysis();
+        const auto afterEmptyRequest = coordinator.telemetry();
+        expect(afterEmptyRequest.emptyAnalysisRequestsAvoided
+            == beforeEmptyRequest.emptyAnalysisRequestsAvoided + 1);
+        expect(afterEmptyRequest.captureBoundaryRequestsDeferred
+            == beforeEmptyRequest.captureBoundaryRequestsDeferred);
+    }
+
+    void runSustainedOverflowCaptureBoundaryCase()
+    {
+        beginTest("Sustained overflow remains one episode until post-gap recovery publishes");
+
+        AnalysisCoordinator coordinator;
+        coordinator.setCaptureFormat(48'000.0, 2);
+        coordinator.setVisualizationActive(true);
+        drainRendererState(coordinator);
+
+        std::array<float, 64> signal { };
+        signal.fill(0.2F);
+        const auto beforeBoundary = coordinator.telemetry();
+        captureRepeated(coordinator, signal, signal, StereoSampleCapture::slotCount + 1);
+
+        auto boundaryGeneration = std::uint64_t { 0 };
+        expect(waitForCaptureBoundaryPublication(coordinator, beforeBoundary.captureGeneration,
+            beforeBoundary.publishedFrames, boundaryGeneration));
+
+        for (std::size_t burst = 0; burst < 3; ++burst) {
+            captureRepeated(coordinator, signal, signal, StereoSampleCapture::slotCount + 1);
+        }
+        const auto capturedFrameEnd = coordinator.telemetry().capture.capturedFrames;
+        expect(coordinator.telemetry().captureGeneration == boundaryGeneration,
+            "Overflow churn advanced the public generation while the first fence was pending");
+
+        VisualizationFrame boundaryFrame;
+        SpectrogramColumn boundaryMarker;
+        expect(copyCaptureBoundaryFrame(coordinator, boundaryGeneration, boundaryFrame));
+        expect(copyCaptureBoundaryMarker(coordinator, boundaryGeneration, boundaryMarker));
+
+        VisualizationFrame recovered;
+        expect(waitForCaptureBoundaryRecovery(coordinator, boundaryGeneration, recovered));
+        expect(recovered.meterValid);
+        expect(recovered.capturedFrameEnd == capturedFrameEnd);
+        expect(recovered.generation == beforeBoundary.captureGeneration + 1);
+        expect(coordinator.telemetry().captureGeneration == boundaryGeneration);
+
+        for (std::size_t request = 0; request < 4; ++request)
+            coordinator.requestAnalysis();
+        expect(coordinator.telemetry().captureGeneration == boundaryGeneration,
+            "The completed overflow episode reopened without another audio block");
+    }
+
+    void runRawAcquisitionRetentionAndCancellationCase()
+    {
+        beginTest("A post-gap raw chunk acquired across a gap survives boundary delivery and "
+                  "worker cancellation");
+
+        AnalysisCoordinator coordinator;
+        coordinator.setCaptureFormat(48'000.0, 2);
+        coordinator.setVisualizationActive(true);
+        drainRendererState(coordinator);
+
+        WorkerHookBarrier acquisitionBarrier(
+            AnalysisCoordinator::WorkerTestOperation::beforeRawAcquisition);
+        coordinator.setWorkerTestHook(&acquisitionBarrier, &WorkerHookBarrier::invoke);
+
+        constexpr std::array<float, 64> silence { };
+        coordinator.captureAudioBlock(silence.data(), silence.data(), silence.size(), 48'000.0, 2);
+        coordinator.requestAnalysis();
+        const auto reachedAcquisition = acquisitionBarrier.waitUntilEntered();
+        expect(reachedAcquisition, "The worker did not reach the raw acquisition seam");
+
+        captureRepeated(coordinator, silence, silence, StereoSampleCapture::slotCount - 1);
+        std::array<float, 64> retainedLeft { };
+        std::array<float, 64> retainedRight { };
+        retainedLeft.fill(0.8F);
+        retainedRight.fill(-0.8F);
+        coordinator.captureAudioBlock(
+            retainedLeft.data(), retainedRight.data(), retainedLeft.size(), 48'000.0, 2);
+        captureRepeated(
+            coordinator, retainedLeft, retainedRight, StereoSampleCapture::slotCount - 1);
+
+        const auto beforeBoundary = coordinator.telemetry();
+        acquisitionBarrier.release();
+        auto boundaryGeneration = std::uint64_t { 0 };
+        expect(waitForCaptureBoundaryPublication(coordinator, beforeBoundary.captureGeneration,
+            beforeBoundary.publishedFrames, boundaryGeneration));
+        coordinator.setWorkerTestHook(nullptr, nullptr);
+
+        VisualizationFrame boundaryFrame;
+        SpectrogramColumn boundaryMarker;
+        expect(copyCaptureBoundaryFrame(coordinator, boundaryGeneration, boundaryFrame));
+        expect(copyCaptureBoundaryMarker(coordinator, boundaryGeneration, boundaryMarker));
+
+        WorkerHookBarrier cancellationBarrier(
+            AnalysisCoordinator::WorkerTestOperation::beforeMeterConsumption);
+        coordinator.setWorkerTestHook(&cancellationBarrier, &WorkerHookBarrier::invoke);
+        const auto processedRetainedRaw = waitUntil([&] {
+            coordinator.requestAnalysis();
+            return cancellationBarrier.waitUntilEntered(2ms);
+        });
+        expect(processedRetainedRaw,
+            "The recovery worker did not process retained raw input before cancellation");
+
+        const auto jobsStoppedBeforeCancellation = coordinator.telemetry().jobsStopped;
+        std::atomic<bool> reconfigurationStarted { false };
+        std::atomic<bool> reconfigurationReturned { false };
+        std::thread reconfigure([&] {
+            reconfigurationStarted.store(true, std::memory_order_release);
+            coordinator.setSpectrumAnalysisConfiguration(
+                { 2048, FftWindow::fourTermBlackmanHarris, 60 });
+            reconfigurationReturned.store(true, std::memory_order_release);
+        });
+        expect(waitUntil([&] { return reconfigurationStarted.load(std::memory_order_acquire); }));
+        std::this_thread::sleep_for(10ms);
+        expect(!reconfigurationReturned.load(std::memory_order_acquire),
+            "Reconfiguration returned while the recovery worker was blocked");
+
+        cancellationBarrier.release();
+        reconfigure.join();
+        coordinator.setWorkerTestHook(nullptr, nullptr);
+        expect(reconfigurationReturned.load(std::memory_order_acquire));
+        expect(coordinator.telemetry().jobsStopped > jobsStoppedBeforeCancellation);
+
+        VisualizationFrame recovered;
+        const auto recoveredFromReconfigurationRequest
+            = coordinator.copyLatestVisualizationFrame(recovered);
+        if (!recoveredFromReconfigurationRequest) {
+            expect(waitForCaptureBoundaryRecovery(coordinator, boundaryGeneration, recovered));
+        }
+        expect(!recovered.captureBoundary && recovered.generation == boundaryGeneration,
+            "Cancellation or reconfiguration published partial boundary state");
+        expect(recovered.stereoFieldValid);
+        const auto retainedPointWasPublished = std::any_of(recovered.stereoFieldPoints.begin(),
+            recovered.stereoFieldPoints.begin()
+                + static_cast<std::ptrdiff_t>(recovered.stereoFieldPointCount),
+            [](const auto& point) { return std::abs(point.horizontal) > 0.7F; });
+        expect(retainedPointWasPublished,
+            "The destructively acquired raw chunk was absent from the recovered point cloud");
+        expect(recovered.generation == boundaryGeneration);
+    }
+
+    void runMeterAcquisitionRetentionCase()
+    {
+        beginTest("A meter endpoint acquired across a gap survives without later audio");
+
+        AnalysisCoordinator coordinator;
+        coordinator.setCaptureFormat(48'000.0, 2);
+        coordinator.setVisualizationActive(true);
+        drainRendererState(coordinator);
+
+        WorkerHookBarrier acquisitionBarrier(
+            AnalysisCoordinator::WorkerTestOperation::beforeMeterAcquisition);
+        coordinator.setWorkerTestHook(&acquisitionBarrier, &WorkerHookBarrier::invoke);
+
+        constexpr std::array<float, 64> silence { };
+        coordinator.captureAudioBlock(silence.data(), silence.data(), silence.size(), 48'000.0, 2);
+        coordinator.requestAnalysis();
+        const auto reachedAcquisition = acquisitionBarrier.waitUntilEntered();
+        expect(reachedAcquisition, "The worker did not reach the meter acquisition seam");
+
+        captureRepeated(coordinator, silence, silence, StereoSampleCapture::slotCount);
+        std::array<float, 64> finalSignal { };
+        finalSignal.fill(0.5F);
+        coordinator.captureAudioBlock(
+            finalSignal.data(), finalSignal.data(), finalSignal.size(), 48'000.0, 2);
+
+        const auto beforeBoundary = coordinator.telemetry();
+        acquisitionBarrier.release();
+        auto boundaryGeneration = std::uint64_t { 0 };
+        expect(waitForCaptureBoundaryPublication(coordinator, beforeBoundary.captureGeneration,
+            beforeBoundary.publishedFrames, boundaryGeneration));
+        coordinator.setWorkerTestHook(nullptr, nullptr);
+
+        VisualizationFrame boundaryFrame;
+        SpectrogramColumn boundaryMarker;
+        expect(copyCaptureBoundaryFrame(coordinator, boundaryGeneration, boundaryFrame));
+        expect(copyCaptureBoundaryMarker(coordinator, boundaryGeneration, boundaryMarker));
+
+        VisualizationFrame recovered;
+        expect(waitForCaptureBoundaryRecovery(coordinator, boundaryGeneration, recovered));
+        expect(recovered.meterValid,
+            "The destructively consumed post-gap meter endpoint was not recovered");
+        expectWithinAbsoluteError(recovered.peakDecibels[0], -6.0206F, 0.02F);
+        expect(recovered.generation == boundaryGeneration);
+    }
+
+    void runRecoveryPublicationRetryCase()
+    {
+        beginTest("A rejected recovery frame retries without acknowledging the overflow episode");
+
+        AnalysisCoordinator coordinator;
+        coordinator.setCaptureFormat(48'000.0, 2);
+        coordinator.setVisualizationActive(true);
+        drainRendererState(coordinator);
+
+        std::array<float, 64> signal { };
+        signal.fill(0.3F);
+        const auto beforeBoundary = coordinator.telemetry();
+        captureRepeated(coordinator, signal, signal, StereoSampleCapture::slotCount + 1);
+
+        auto boundaryGeneration = std::uint64_t { 0 };
+        expect(waitForCaptureBoundaryPublication(coordinator, beforeBoundary.captureGeneration,
+            beforeBoundary.publishedFrames, boundaryGeneration));
+
+        VisualizationFrame boundaryFrame;
+        SpectrogramColumn boundaryMarker;
+        expect(copyCaptureBoundaryFrame(coordinator, boundaryGeneration, boundaryFrame));
+        expect(copyCaptureBoundaryMarker(coordinator, boundaryGeneration, boundaryMarker));
+
+        const auto droppedBeforeRecovery = coordinator.telemetry().droppedFramePublications;
+        coordinator.failNextFramePublicationForTesting();
+        expect(waitUntil([&] {
+            coordinator.requestAnalysis();
+            return coordinator.telemetry().droppedFramePublications == droppedBeforeRecovery + 1;
+        }));
+
+        VisualizationFrame rejectedRecovery;
+        expect(!coordinator.copyLatestVisualizationFrame(rejectedRecovery));
+        expect(coordinator.telemetry().captureGeneration == boundaryGeneration);
+
+        VisualizationFrame recovered;
+        expect(waitForCaptureBoundaryRecovery(coordinator, boundaryGeneration, recovered));
+        expect(recovered.meterValid);
+        expect(coordinator.telemetry().droppedFramePublications == droppedBeforeRecovery + 1);
+        expect(coordinator.telemetry().captureGeneration == boundaryGeneration);
+    }
+
+    void runRecoveryRetryPreservesLaterCaptureCase()
+    {
+        beginTest("A cached recovery retry leaves later captured audio pending for follow-up");
+
+        AnalysisCoordinator coordinator;
+        coordinator.setCaptureFormat(48'000.0, 2);
+        coordinator.setVisualizationActive(true);
+        drainRendererState(coordinator);
+
+        std::array<float, 64> recoverySignal { };
+        recoverySignal.fill(0.25F);
+        const auto beforeBoundary = coordinator.telemetry();
+        captureRepeated(
+            coordinator, recoverySignal, recoverySignal, StereoSampleCapture::slotCount + 1);
+
+        auto boundaryGeneration = std::uint64_t { 0 };
+        expect(waitForCaptureBoundaryPublication(coordinator, beforeBoundary.captureGeneration,
+            beforeBoundary.publishedFrames, boundaryGeneration));
+
+        VisualizationFrame boundaryFrame;
+        SpectrogramColumn boundaryMarker;
+        expect(copyCaptureBoundaryFrame(coordinator, boundaryGeneration, boundaryFrame));
+        expect(copyCaptureBoundaryMarker(coordinator, boundaryGeneration, boundaryMarker));
+
+        WorkerHookBarrier recoveryPublicationBarrier(
+            AnalysisCoordinator::WorkerTestOperation::beforeFramePublication);
+        coordinator.setWorkerTestHook(&recoveryPublicationBarrier, &WorkerHookBarrier::invoke);
+        coordinator.failNextFramePublicationForTesting();
+
+        const auto beforeFailedRecovery = coordinator.telemetry();
+        expect(waitUntil([&] {
+            coordinator.requestAnalysis();
+            return coordinator.telemetry().scheduler.submitted
+                > beforeFailedRecovery.scheduler.submitted;
+        }));
+        expect(recoveryPublicationBarrier.waitUntilEntered(),
+            "Recovery did not reach publication after applying its retained input");
+        expect(coordinator.telemetry().stereoFieldProcessedChunks
+                > beforeFailedRecovery.stereoFieldProcessedChunks,
+            "Recovery reached publication without applying retained input");
+
+        recoveryPublicationBarrier.release();
+        expect(waitUntil([&] {
+            const auto telemetry = coordinator.telemetry();
+            return telemetry.droppedFramePublications
+                == beforeFailedRecovery.droppedFramePublications + 1
+                && telemetry.jobsStopped > beforeFailedRecovery.jobsStopped;
+        }));
+        coordinator.setWorkerTestHook(nullptr, nullptr);
+
+        std::array<float, 64> laterSignal { };
+        laterSignal.fill(-0.75F);
+        coordinator.captureAudioBlock(
+            laterSignal.data(), laterSignal.data(), laterSignal.size(), 48'000.0, 2);
+        const auto afterLaterCapture = coordinator.telemetry();
+        const auto laterCapturedFrameEnd = afterLaterCapture.capture.capturedFrames;
+        expect(afterLaterCapture.latestCaptureRevision
+            > afterLaterCapture.lastAnalyzedCaptureRevision);
+
+        const auto beforeRetry = coordinator.telemetry();
+        expect(waitUntil([&] {
+            coordinator.requestAnalysis();
+            return coordinator.telemetry().scheduler.submitted > beforeRetry.scheduler.submitted;
+        }));
+        expect(waitUntil([&] {
+            const auto telemetry = coordinator.telemetry();
+            return telemetry.publishedFrames > beforeRetry.publishedFrames
+                && telemetry.jobsCompleted > beforeRetry.jobsCompleted;
+        }));
+
+        VisualizationFrame retriedRecovery;
+        expect(coordinator.copyLatestVisualizationFrame(retriedRecovery));
+        expect(!retriedRecovery.captureBoundary);
+        expect(retriedRecovery.generation == boundaryGeneration);
+        expect(retriedRecovery.capturedFrameEnd < laterCapturedFrameEnd,
+            "The cached recovery frame unexpectedly claimed the later queued audio");
+
+        const auto afterRetry = coordinator.telemetry();
+        expect(afterRetry.lastAnalyzedCaptureRevision < afterRetry.latestCaptureRevision,
+            "The cached retry incorrectly marked the later capture revision analyzed");
+
+        const auto beforeFollowUp = coordinator.telemetry();
+        expect(waitUntil([&] {
+            coordinator.requestAnalysis();
+            return coordinator.telemetry().scheduler.submitted > beforeFollowUp.scheduler.submitted;
+        }));
+        expect(waitUntil([&] {
+            const auto telemetry = coordinator.telemetry();
+            return telemetry.publishedFrames > beforeFollowUp.publishedFrames
+                && telemetry.jobsCompleted > beforeFollowUp.jobsCompleted;
+        }));
+
+        VisualizationFrame followUp;
+        expect(coordinator.copyLatestVisualizationFrame(followUp));
+        expect(!followUp.captureBoundary);
+        expect(followUp.generation == boundaryGeneration);
+        expect(followUp.capturedFrameEnd >= laterCapturedFrameEnd,
+            "Later queued audio did not receive a follow-up analysis publication");
+
+        const auto afterFollowUp = coordinator.telemetry();
+        expect(afterFollowUp.capture.capturedFrames == laterCapturedFrameEnd,
+            "The follow-up relied on still newer audio");
+        expect(afterFollowUp.staleFramesPublished == afterLaterCapture.staleFramesPublished,
+            "The follow-up relied on the stale-input timeout");
+    }
+
+    void runPendingRecoverySuppressesStaleClearCase()
+    {
+        beginTest("Pending recovery suppresses stale clear without disabling later staleness");
+
+        AnalysisCoordinator coordinator;
+        coordinator.setCaptureFormat(48'000.0, 2);
+        coordinator.setVisualizationActive(true);
+        drainRendererState(coordinator);
+
+        std::array<float, 64> signal { };
+        signal.fill(0.4F);
+        const auto beforeBoundary = coordinator.telemetry();
+        captureRepeated(coordinator, signal, signal, StereoSampleCapture::slotCount + 1);
+
+        auto boundaryGeneration = std::uint64_t { 0 };
+        expect(waitForCaptureBoundaryPublication(coordinator, beforeBoundary.captureGeneration,
+            beforeBoundary.publishedFrames, boundaryGeneration));
+
+        VisualizationFrame boundaryFrame;
+        SpectrogramColumn boundaryMarker;
+        expect(copyCaptureBoundaryFrame(coordinator, boundaryGeneration, boundaryFrame));
+        expect(copyCaptureBoundaryMarker(coordinator, boundaryGeneration, boundaryMarker));
+
+        WorkerHookBarrier failedPublicationBarrier(
+            AnalysisCoordinator::WorkerTestOperation::beforeFramePublication);
+        coordinator.setWorkerTestHook(&failedPublicationBarrier, &WorkerHookBarrier::invoke);
+        coordinator.failNextFramePublicationForTesting();
+
+        const auto beforeFailedRecovery = coordinator.telemetry();
+        expect(waitUntil([&] {
+            coordinator.requestAnalysis();
+            return coordinator.telemetry().scheduler.submitted
+                > beforeFailedRecovery.scheduler.submitted;
+        }));
+        expect(failedPublicationBarrier.waitUntilEntered(),
+            "Recovery did not reach publication after applying valid input");
+        expect(coordinator.telemetry().stereoFieldProcessedChunks
+                > beforeFailedRecovery.stereoFieldProcessedChunks,
+            "The failed recovery publication had not applied valid input");
+
+        failedPublicationBarrier.release();
+        expect(waitUntil([&] {
+            const auto telemetry = coordinator.telemetry();
+            return telemetry.droppedFramePublications
+                == beforeFailedRecovery.droppedFramePublications + 1
+                && telemetry.jobsStopped > beforeFailedRecovery.jobsStopped;
+        }));
+        coordinator.setWorkerTestHook(nullptr, nullptr);
+
+        const auto pendingRecovery = coordinator.telemetry();
+        std::this_thread::sleep_for(300ms);
+
+        WorkerHookBarrier retryPublicationBarrier(
+            AnalysisCoordinator::WorkerTestOperation::beforeFramePublication);
+        coordinator.setWorkerTestHook(&retryPublicationBarrier, &WorkerHookBarrier::invoke);
+        const auto beforeStalePolling = coordinator.telemetry();
+        expect(waitUntil([&] {
+            coordinator.requestAnalysis();
+            return coordinator.telemetry().scheduler.submitted
+                > beforeStalePolling.scheduler.submitted;
+        }));
+        expect(retryPublicationBarrier.waitUntilEntered(),
+            "The cached recovery retry did not reach publication");
+
+        expect(waitUntil([&] {
+            coordinator.requestAnalysis();
+            return coordinator.telemetry().scheduler.submitted
+                >= beforeStalePolling.scheduler.submitted + 2;
+        }));
+        const auto whileRetryBlocked = coordinator.telemetry();
+        expect(whileRetryBlocked.captureGeneration == boundaryGeneration);
+        expect(whileRetryBlocked.publishedFrames == beforeStalePolling.publishedFrames);
+        expect(whileRetryBlocked.staleFramesPublished == pendingRecovery.staleFramesPublished,
+            "Polling armed and published a stale frame while recovery was pending");
+
+        retryPublicationBarrier.release();
+        expect(waitUntil([&] {
+            const auto telemetry = coordinator.telemetry();
+            return telemetry.jobsCompleted >= beforeStalePolling.jobsCompleted + 2;
+        }));
+        coordinator.setWorkerTestHook(nullptr, nullptr);
+
+        VisualizationFrame recovered;
+        expect(coordinator.copyLatestVisualizationFrame(recovered));
+        expect(!recovered.captureBoundary && recovered.generation == boundaryGeneration);
+        expect(recovered.meterValid);
+
+        const auto afterRecovery = coordinator.telemetry();
+        expect(afterRecovery.publishedFrames == beforeStalePolling.publishedFrames + 1,
+            "A stale frame followed the cached recovery publication");
+        expect(afterRecovery.staleFramesPublished == pendingRecovery.staleFramesPublished,
+            "A pending recovery request was misclassified as stale work");
+
+        VisualizationFrame ordinaryStaleClear;
+        expect(waitForFrame(
+            coordinator, ordinaryStaleClear,
+            [sequence = recovered.meterSequence](const auto& candidate) {
+                return candidate.meterSequence > sequence && !candidate.spectrumValid
+                    && isDisplayFloor(candidate.peakDecibels[0])
+                    && isDisplayFloor(candidate.rmsDecibels[0]);
+            },
+            1s));
+        expect(coordinator.telemetry().staleFramesPublished
+                == pendingRecovery.staleFramesPublished + 1,
+            "Recovery permanently suppressed ordinary stale-input scheduling");
+    }
+
+    void runBoundaryPublicationCancellationCase()
+    {
+        beginTest("Settings cancellation resumes one committed capture-boundary fence");
+
+        AnalysisCoordinator coordinator;
+        coordinator.setCaptureFormat(48'000.0, 2);
+        coordinator.setVisualizationActive(true);
+        drainRendererState(coordinator);
+
+        std::array<float, 64> signal { };
+        signal.fill(0.2F);
+        const auto beforeBoundary = coordinator.telemetry();
+        captureRepeated(coordinator, signal, signal, StereoSampleCapture::slotCount + 1);
+
+        WorkerHookBarrier publicationBarrier(
+            AnalysisCoordinator::WorkerTestOperation::beforeFramePublication);
+        coordinator.setWorkerTestHook(&publicationBarrier, &WorkerHookBarrier::invoke);
+        coordinator.requestAnalysis();
+        expect(publicationBarrier.waitUntilEntered(),
+            "The initial capture-boundary frame did not reach its publication seam");
+
+        const auto whilePublicationPaused = coordinator.telemetry();
+        const auto committedBoundaryGeneration = whilePublicationPaused.captureGeneration;
+        expect(committedBoundaryGeneration > beforeBoundary.captureGeneration,
+            "The capture generation was not committed before boundary publication");
+        expect(whilePublicationPaused.publishedFrames == beforeBoundary.publishedFrames);
+
+        std::atomic<bool> settingsStarted { false };
+        std::atomic<bool> settingsReturned { false };
+        std::thread reconfigure([&] {
+            settingsStarted.store(true, std::memory_order_release);
+            coordinator.setSpectrumAnalysisConfiguration(
+                { 2048, FftWindow::fourTermBlackmanHarris, 60 });
+            settingsReturned.store(true, std::memory_order_release);
+        });
+        expect(waitUntil([&] { return settingsStarted.load(std::memory_order_acquire); }));
+        std::this_thread::sleep_for(10ms);
+        expect(!settingsReturned.load(std::memory_order_acquire),
+            "Settings returned while the boundary publication worker was blocked");
+
+        publicationBarrier.release();
+        reconfigure.join();
+        coordinator.setWorkerTestHook(nullptr, nullptr);
+        expect(settingsReturned.load(std::memory_order_acquire));
+
+        const auto afterSettings = coordinator.telemetry();
+        expect(afterSettings.jobsStopped > whilePublicationPaused.jobsStopped,
+            "Settings did not cancel the paused boundary-publication job");
+        expect(afterSettings.captureGeneration == committedBoundaryGeneration,
+            "Settings replaced the already committed capture generation");
+        expect(afterSettings.configuredFftSize == 2048);
+
+        VisualizationFrame boundaryFrame;
+        SpectrogramColumn boundaryMarker;
+        expect(copyCaptureBoundaryFrame(coordinator, committedBoundaryGeneration, boundaryFrame));
+        expect(copyCaptureBoundaryMarker(coordinator, committedBoundaryGeneration, boundaryMarker));
+        expect(isFullyInvalidCaptureBoundary(boundaryFrame));
+        expect(boundaryFrame.generation != beforeBoundary.captureGeneration,
+            "A tagged old-generation frame escaped the cancelled publication");
+        expect(boundaryMarker.captureGeneration == committedBoundaryGeneration);
+
+        const auto afterFenceDelivery = coordinator.telemetry();
+        expect(afterFenceDelivery.captureGeneration == committedBoundaryGeneration);
+        expect(afterFenceDelivery.publishedFrames == beforeBoundary.publishedFrames + 1,
+            "Cancellation leaked an extra boundary frame before the committed fence resumed");
+
+        VisualizationFrame recovered;
+        expect(waitForCaptureBoundaryRecovery(coordinator, committedBoundaryGeneration, recovered));
+        expect(recovered.generation == committedBoundaryGeneration);
+        expect(recovered.meterValid);
+    }
+
+    void runBoundaryConfigurationSurvivalCase()
+    {
+        beginTest("Pending capture fences survive renderer discard and analyzer reconfiguration");
+
+        AnalysisCoordinator coordinator;
+        coordinator.setCaptureFormat(48'000.0, 2);
+        coordinator.setVisualizationActive(true);
+        drainRendererState(coordinator);
+
+        std::array<float, 64> signal { };
+        signal.fill(0.2F);
+        const auto beforeBoundary = coordinator.telemetry();
+        captureRepeated(coordinator, signal, signal, StereoSampleCapture::slotCount + 1);
+
+        auto boundaryGeneration = std::uint64_t { 0 };
+        expect(waitForCaptureBoundaryPublication(coordinator, beforeBoundary.captureGeneration,
+            beforeBoundary.publishedFrames, boundaryGeneration));
+        const auto boundaryPublishedFrames = coordinator.telemetry().publishedFrames;
+
+        coordinator.discardPendingSpectrogramColumns();
+        coordinator.setSpectrumAnalysisConfiguration({ 2048, FftWindow::fiveTermFlatTop, 120 });
+        coordinator.setSpectrumTemporalConfiguration(
+            { false, 75.0, SpectrumPeakHoldMode::finite, 1.0 });
+        coordinator.setSpectrogramFrequencySpacing(0.35);
+
+        const auto afterConfiguration = coordinator.telemetry();
+        expect(afterConfiguration.captureGeneration == boundaryGeneration);
+        expect(afterConfiguration.publishedFrames == boundaryPublishedFrames,
+            "A configuration snapshot replaced the pending tagged boundary frame");
+
+        VisualizationFrame boundaryFrame;
+        SpectrogramColumn boundaryMarker;
+        expect(copyCaptureBoundaryFrame(coordinator, boundaryGeneration, boundaryFrame));
+        expect(copyCaptureBoundaryMarker(coordinator, boundaryGeneration, boundaryMarker));
+        expect(isFullyInvalidCaptureBoundary(boundaryFrame));
+
+        VisualizationFrame recovered;
+        expect(waitForCaptureBoundaryRecovery(coordinator, boundaryGeneration, recovered));
+        expect(recovered.meterValid);
+        expect(recovered.generation == boundaryGeneration);
+        expect(coordinator.telemetry().configuredFftSize == 2048);
+    }
+
+    void runStaleBoundaryAcknowledgementCase(
+        const AnalysisCoordinator::WorkerTestOperation acknowledgementOperation)
+    {
+        const auto testsFrameAcknowledgement = acknowledgementOperation
+            == AnalysisCoordinator::WorkerTestOperation::beforeFrameBoundaryAcknowledgement;
+        beginTest(testsFrameAcknowledgement
+                ? "A stale frame acknowledgement cannot clear a restarted generation fence"
+                : "A stale Spectrogram acknowledgement cannot clear a restarted generation fence");
+
+        AnalysisCoordinator coordinator;
+        coordinator.setCaptureFormat(48'000.0, 2);
+        coordinator.setVisualizationActive(true);
+        drainRendererState(coordinator);
+
+        std::array<float, 64> signal { };
+        signal.fill(0.2F);
+        const auto beforeFirstBoundary = coordinator.telemetry();
+        captureRepeated(coordinator, signal, signal, StereoSampleCapture::slotCount + 1);
+
+        auto firstBoundaryGeneration = std::uint64_t { 0 };
+        expect(waitForCaptureBoundaryPublication(coordinator, beforeFirstBoundary.captureGeneration,
+            beforeFirstBoundary.publishedFrames, firstBoundaryGeneration));
+
+        WorkerHookBarrier acknowledgementBarrier(acknowledgementOperation);
+        coordinator.setWorkerTestHook(&acknowledgementBarrier, &WorkerHookBarrier::invoke);
+        std::atomic<bool> staleCopySucceeded { false };
+        VisualizationFrame staleFrame;
+        SpectrogramColumn staleMarker;
+        std::thread staleRenderer([&] {
+            const auto copied = testsFrameAcknowledgement
+                ? coordinator.copyLatestVisualizationFrame(staleFrame)
+                : coordinator.copyNextSpectrogramColumn(staleMarker);
+            staleCopySucceeded.store(copied, std::memory_order_release);
+        });
+        const auto acknowledgementPaused = acknowledgementBarrier.waitUntilEntered();
+        expect(acknowledgementPaused,
+            "The renderer acknowledgement did not reach the stale-token seam");
+
+        coordinator.setCaptureFormat(96'000.0, 2);
+        const auto restartedGeneration = coordinator.telemetry().captureGeneration;
+        expect(restartedGeneration > firstBoundaryGeneration);
+        drainRendererState(coordinator);
+
+        const auto beforeSecondBoundary = coordinator.telemetry();
+        captureRepeated(coordinator, signal, signal, StereoSampleCapture::slotCount + 1, 96'000.0);
+        auto secondBoundaryGeneration = std::uint64_t { 0 };
+        expect(
+            waitForCaptureBoundaryPublication(coordinator, beforeSecondBoundary.captureGeneration,
+                beforeSecondBoundary.publishedFrames, secondBoundaryGeneration));
+
+        acknowledgementBarrier.release();
+        staleRenderer.join();
+        coordinator.setWorkerTestHook(nullptr, nullptr);
+        expect(staleCopySucceeded.load(std::memory_order_acquire));
+        if (testsFrameAcknowledgement)
+            expect(staleFrame.generation == firstBoundaryGeneration);
+        else
+            expect(staleMarker.captureGeneration == firstBoundaryGeneration);
+
+        VisualizationFrame secondBoundaryFrame;
+        SpectrogramColumn secondBoundaryMarker;
+        if (testsFrameAcknowledgement) {
+            expect(copyCaptureBoundaryMarker(
+                coordinator, secondBoundaryGeneration, secondBoundaryMarker));
+        } else {
+            expect(copyCaptureBoundaryFrame(
+                coordinator, secondBoundaryGeneration, secondBoundaryFrame));
+        }
+
+        constexpr auto deferredRequests = std::uint64_t { 3 };
+        const auto beforeDeferredRequests = coordinator.telemetry();
+        for (auto request = std::uint64_t { 0 }; request < deferredRequests; ++request)
+            coordinator.requestAnalysis();
+        const auto afterDeferredRequests = coordinator.telemetry();
+        expect(afterDeferredRequests.captureBoundaryRequestsDeferred
+                == beforeDeferredRequests.captureBoundaryRequestsDeferred + deferredRequests,
+            "The stale acknowledgement cleared the newer generation's delivery token");
+        expect(afterDeferredRequests.publishedFrames == beforeDeferredRequests.publishedFrames);
+
+        if (testsFrameAcknowledgement) {
+            expect(copyCaptureBoundaryFrame(
+                coordinator, secondBoundaryGeneration, secondBoundaryFrame));
+        } else {
+            expect(copyCaptureBoundaryMarker(
+                coordinator, secondBoundaryGeneration, secondBoundaryMarker));
+        }
+        expect(isFullyInvalidCaptureBoundary(secondBoundaryFrame));
+
+        VisualizationFrame recovered;
+        expect(waitForCaptureBoundaryRecovery(coordinator, secondBoundaryGeneration, recovered));
+        expect(recovered.generation == secondBoundaryGeneration);
+        expect(recovered.meterValid);
+    }
+#endif
 };
 
 AnalysisCoordinatorTests analysisCoordinatorTests;

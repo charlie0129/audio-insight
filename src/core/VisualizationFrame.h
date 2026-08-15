@@ -64,5 +64,8 @@ struct VisualizationFrame {
     bool loudnessMomentaryValid = false;
     bool loudnessShortTermValid = false;
     bool loudnessIntegratedValid = false;
+    // True only for the fully invalid renderer fence that starts one capture
+    // discontinuity generation. Ordinary invalid/configuration frames are false.
+    bool captureBoundary = false;
 };
 } // namespace audio_insight

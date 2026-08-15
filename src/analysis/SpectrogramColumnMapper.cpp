@@ -106,6 +106,7 @@ bool SpectrogramColumnMapper::map(const SpectrumTransformView& transform,
     destination.requestedSliceRateHz = transform.requestedSliceRateHz;
     destination.resetMarker = false;
     destination.mappingSeed = mappingSeed;
+    destination.captureBoundary = false;
     return true;
 }
 

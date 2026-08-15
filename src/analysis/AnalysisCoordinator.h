@@ -155,8 +155,12 @@ public:
 
     enum class WorkerTestOperation {
         beforeMeterConsumption,
+        beforeRawAcquisition,
+        beforeMeterAcquisition,
         beforeFramePublication,
         afterFramePublication,
+        beforeFrameBoundaryAcknowledgement,
+        beforeSpectrogramBoundaryAcknowledgement,
     };
 
     using LifecycleTestHook = void (*)(void*, LifecycleTestOperation) noexcept;
@@ -165,7 +169,7 @@ public:
     /** Installs a synchronous test seam invoked while the non-real-time gate is held. */
     void setLifecycleTestHook(void* context, LifecycleTestHook hook) noexcept;
 
-    /** Installs a bounded worker test seam; never used in production builds. */
+    /** Installs a bounded non-audio worker/renderer test seam; absent from production builds. */
     void setWorkerTestHook(void* context, WorkerTestHook hook) noexcept;
 
     /** Simulates one lost meter endpoint without disturbing the raw-sample capture sequence. */
