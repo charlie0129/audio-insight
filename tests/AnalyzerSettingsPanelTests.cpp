@@ -227,7 +227,7 @@ public:
             expectWithinAbsoluteError(lastPublished.sharedAnalysis.frequencySpacing, 1.0, 1.0e-12);
         }
 
-        beginTest("Spectrum, Spectrogram, and Stereo are live while Loudness stays disabled");
+        beginTest("Every implemented analyzer section exposes only its supported controls");
         {
             AnalyzerSettingsPanel panel(
                 AnalyzerConfigurationCodec::defaults(), [](const AnalyzerConfiguration&) { },
@@ -260,6 +260,9 @@ public:
             expectAvailable("settingsSpectrogramHistoryMode");
             expectAvailable("settingsSpectrogramReset");
             expectAvailable("settingsStereoStatus");
+            expectAvailable("settingsLoudnessStatus");
+            expectAvailable("settingsLoudnessReference");
+            expectAvailable("settingsLoudnessReset");
 
             const auto* peakHoldDuration
                 = findDescendantWithId(panel, "settingsSpectrumPeakHoldDuration");
@@ -268,8 +271,6 @@ public:
             expect(peakHoldDuration != nullptr && !peakHoldDuration->getWantsKeyboardFocus());
 
             expectUnavailable("settingsStereoReset");
-            expectUnavailable("settingsLoudnessUnavailable");
-            expectUnavailable("settingsLoudnessReference");
 
             const auto* stereoStatus = dynamic_cast<const juce::Label*>(
                 findDescendantWithId(panel, "settingsStereoStatus"));
@@ -590,6 +591,42 @@ public:
             expect(historyMode != nullptr && historyMode->getText() == "Scroll");
         }
 
+        beginTest("Loudness reference edits and section reset publish presentation state");
+        {
+            auto configuration = AnalyzerConfigurationCodec::defaults();
+            configuration.loudness.referenceLufs = -14.5;
+
+            auto callbackCount = 0;
+            AnalyzerConfiguration lastPublished;
+            AnalyzerSettingsPanel panel(
+                configuration,
+                [&](const AnalyzerConfiguration& published) {
+                    ++callbackCount;
+                    lastPublished = published;
+                },
+                [] { });
+            panel.setBounds(0, 0, 360, 720);
+
+            auto* reference = dynamic_cast<juce::Slider*>(
+                findDescendantWithId(panel, "settingsLoudnessReference"));
+            auto* reset
+                = dynamic_cast<juce::Button*>(findDescendantWithId(panel, "settingsLoudnessReset"));
+            expect(reference != nullptr);
+            expect(reset != nullptr);
+            if (reference == nullptr || reset == nullptr)
+                return;
+
+            expect(!reference->isScrollWheelEnabled());
+            reference->setValue(-18.0, juce::sendNotificationSync);
+            expectEquals(callbackCount, 1);
+            expectWithinAbsoluteError(lastPublished.loudness.referenceLufs, -18.0, 1.0e-12);
+
+            reset->onClick();
+            expectEquals(callbackCount, 2);
+            expectWithinAbsoluteError(lastPublished.loudness.referenceLufs, -23.0, 1.0e-12);
+            expectWithinAbsoluteError(reference->getValue(), -23.0, 1.0e-12);
+        }
+
         beginTest("External state refresh does not publish and Escape requests close");
         {
             auto callbackCount = 0;
@@ -743,6 +780,8 @@ public:
                 ExpectedControl { "settingsSpectrogramColorCeiling", "Spectrogram colour ceiling" },
                 ExpectedControl { "settingsSpectrogramHistory", "Spectrogram history duration" },
                 ExpectedControl { "settingsSpectrogramHistoryMode", "Spectrogram history mode" },
+                ExpectedControl { "settingsLoudnessReset", "Loudness" },
+                ExpectedControl { "settingsLoudnessReference", "Loudness reference" },
             };
 
             const auto focusComponents = traverser->getAllComponents(&panel);

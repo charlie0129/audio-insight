@@ -19,6 +19,7 @@ static_assert(detail::maximumFrequencyAxisLabelGlyphs >= 10);
 static_assert(detail::MetalVisualizationGeometryLimits::maximumDecibelLabelGlyphs >= 7);
 static_assert(detail::maximumPeakRmsReadoutGlyphs >= 6);
 static_assert(detail::maximumStereoCorrelationReadoutGlyphs >= 5);
+static_assert(detail::maximumLoudnessReadoutGlyphs >= 6);
 
 class StubVisualizationDataSource final : public VisualizationDataSource {
 public:
@@ -38,10 +39,17 @@ public:
     {
     }
 
+    void resetLoudness() noexcept override
+    {
+        ++loudnessResetCount;
+    }
+
     [[nodiscard]] bool copyLatestVisualizationFrame(VisualizationFrame&) const noexcept override
     {
         return false;
     }
+
+    int loudnessResetCount = 0;
 };
 
 class MetalVisualizationTests final : public juce::UnitTest {
@@ -623,6 +631,97 @@ public:
         expectEquals(hiddenClearLayout.clearHitBounds.width(), 0.0F);
         expect(!hiddenClearLayout.clearHitBounds.contains(0.0F, 0.0F));
 
+        beginTest("Loudness mapping and readouts preserve readiness, silence, and finite values");
+
+        expectEquals(detail::mapLoudnessLufsToUnit(-60.0F), 0.0F);
+        expectEquals(detail::mapLoudnessLufsToUnit(-30.0F), 0.5F);
+        expectEquals(detail::mapLoudnessLufsToUnit(0.0F), 1.0F);
+        expectEquals(detail::mapLoudnessLufsToUnit(-90.0F), 0.0F);
+        expectEquals(detail::mapLoudnessLufsToUnit(12.0F), 1.0F);
+        expectEquals(detail::mapLoudnessLufsToUnit(std::numeric_limits<float>::quiet_NaN()), 0.0F);
+
+        expect(detail::classifyLoudnessReadout(-std::numeric_limits<double>::infinity(), false).kind
+            == detail::LoudnessReadout::Kind::emDash);
+        expect(detail::classifyLoudnessReadout(-std::numeric_limits<double>::infinity(), true).kind
+            == detail::LoudnessReadout::Kind::minusInfinity);
+        expect(detail::classifyLoudnessReadout(std::numeric_limits<double>::quiet_NaN(), true).kind
+            == detail::LoudnessReadout::Kind::emDash);
+        expect(detail::classifyLoudnessReadout(std::numeric_limits<double>::infinity(), true).kind
+            == detail::LoudnessReadout::Kind::emDash);
+        expect(detail::classifyLoudnessReadout(-23.0, false).kind
+                == detail::LoudnessReadout::Kind::emDash,
+            "A finite Integrated value invalidated by capacity overflow must render as not ready");
+        const auto finiteLoudness = detail::classifyLoudnessReadout(-23.46, true);
+        expect(finiteLoudness.kind == detail::LoudnessReadout::Kind::lufsTenths);
+        expectEquals(finiteLoudness.lufsTenths, -235);
+        const auto belowVisualFloor = detail::classifyLoudnessReadout(-80.0, true);
+        expect(belowVisualFloor.kind == detail::LoudnessReadout::Kind::lufsTenths);
+        expectEquals(belowVisualFloor.lufsTenths, -800);
+        expectEquals(detail::classifyLoudnessReadout(4.2, true).lufsTenths, 42);
+        expectEquals(detail::classifyLoudnessReadout(10'000.0, true).lufsTenths,
+            detail::maximumCachedLoudnessReadoutTenths);
+        expectEquals(
+            detail::formatLoudnessAccessibilityReading(-23.46, true), juce::String("-23.5 LUFS"));
+        expectEquals(
+            detail::formatLoudnessAccessibilityReading(-0.01, true), juce::String("0.0 LUFS"));
+        expectEquals(
+            detail::formatLoudnessAccessibilityReading(4.2, true), juce::String("+4.2 LUFS"));
+        expectEquals(
+            detail::formatLoudnessAccessibilityReading(-23.0, false), juce::String("not ready"));
+        expectEquals(detail::formatLoudnessAccessibilityReading(
+                         -std::numeric_limits<double>::infinity(), true),
+            juce::String("minus infinity"));
+
+        beginTest("Loudness layout keeps a slim centred bar and responsive readout rows");
+
+        const auto checkLoudnessLayout = [this](const float width, const float height) {
+            const auto layout
+                = detail::calculateLoudnessPanelLayout(width, height, 22.0F, 10.0F, 42.0F);
+            const auto expectInside
+                = [this, width, height](const detail::PeakRmsLogicalRect& rect) {
+                      expect(rect.left >= 0.0F);
+                      expect(rect.bottom >= 0.0F);
+                      expect(rect.right <= width + 0.0001F);
+                      expect(rect.top <= height + 0.0001F);
+                  };
+            expect(layout.trackBounds.width() > 0.0F);
+            expect(layout.trackBounds.width() <= 16.0F);
+            expectWithinAbsoluteError(
+                (layout.trackBounds.left + layout.trackBounds.right) * 0.5F, width * 0.5F, 0.0001F);
+            expect(layout.showMomentaryText);
+            expect(layout.showSecondaryText);
+            expect(layout.momentaryTextBounds.bottom > layout.trackBounds.top);
+            expect(layout.shortTermTextBounds.top < layout.trackBounds.bottom);
+            expect(layout.integratedTextBounds.top < layout.shortTermTextBounds.bottom);
+            expect(layout.resetHitBounds.height() >= 24.0F);
+            expect(layout.resetHitBounds.contains(
+                (layout.resetVisualBounds.left + layout.resetVisualBounds.right) * 0.5F,
+                (layout.resetVisualBounds.bottom + layout.resetVisualBounds.top) * 0.5F));
+            expectInside(layout.trackBounds);
+            expectInside(layout.resetVisualBounds);
+            expectInside(layout.resetHitBounds);
+            expectInside(layout.momentaryTextBounds);
+            expectInside(layout.shortTermTextBounds);
+            expectInside(layout.integratedTextBounds);
+        };
+
+        const auto defaultTiles = DashboardLayout::calculateTileLayout(
+            { 0.0, 0.0, 720.0, 420.0 }, DashboardLayout::defaultSplits);
+        const auto defaultLoudnessTile = defaultTiles[DashboardPanel::loudness];
+        checkLoudnessLayout(static_cast<float>(defaultLoudnessTile.width),
+            static_cast<float>(defaultLoudnessTile.height));
+        constexpr DashboardLayoutSplits minimumLoudnessSplits { 26, 36, 28, 42 };
+        const auto minimumTiles = DashboardLayout::calculateTileLayout(
+            { 0.0, 0.0, 720.0, 420.0 }, minimumLoudnessSplits);
+        const auto minimumLoudnessTile = minimumTiles[DashboardPanel::loudness];
+        checkLoudnessLayout(static_cast<float>(minimumLoudnessTile.width),
+            static_cast<float>(minimumLoudnessTile.height));
+
+        const auto invalidLoudnessLayout = detail::calculateLoudnessPanelLayout(
+            std::numeric_limits<float>::quiet_NaN(), 180.0F, 22.0F, 10.0F, 42.0F);
+        expectEquals(invalidLoudnessLayout.trackBounds.width(), 0.0F);
+        expectEquals(invalidLoudnessLayout.resetHitBounds.width(), 0.0F);
+
         beginTest("Stereo field coordinates remain fixed at full scale without edge clamping");
 
         expectWithinAbsoluteError(
@@ -721,7 +820,7 @@ public:
         beginTest("Axis and meter geometry remain within the fixed Metal vertex buffer");
 
         expectEquals(detail::MetalVisualizationGeometryLimits::maximumGeneratedVertices,
-            std::size_t { 53'470 });
+            std::size_t { 53'590 });
         expect(detail::MetalVisualizationGeometryLimits::maximumGeneratedVertices
             <= detail::MetalVisualizationGeometryLimits::vertexCapacity);
         expectEquals(
@@ -730,6 +829,8 @@ public:
             (6 * maximumSpectrumBinCount) + 30);
         expectEquals(
             detail::MetalVisualizationGeometryLimits::maximumStereoVertices, std::size_t { 84 });
+        expectEquals(
+            detail::MetalVisualizationGeometryLimits::maximumLoudnessVertices, std::size_t { 78 });
 
         beginTest("Spectrum frame metadata accepts only supported FFT storage bounds");
 
@@ -769,6 +870,7 @@ public:
         visualization.setRenderingActive(true);
         expectEquals(effectiveActivityChanges, 0,
             "Detached render requests are not effective-activity transitions");
+        visualization.setLoudnessSettings({ -18.5F });
 
         const auto beforeReset = visualization.getRenderTelemetry();
         visualization.resetRenderTelemetry();
@@ -806,6 +908,22 @@ public:
             afterReset.stereoCorrelation, beforeReset.stereoCorrelation, 0.000001);
         expect(afterReset.stereoCorrelationValid == beforeReset.stereoCorrelationValid);
         expect(afterReset.stereoMono == beforeReset.stereoMono);
+        expect(afterReset.lastLoudnessSequence == 0);
+        expect(afterReset.loudnessMeasurementCapturedFrameEnd
+            == beforeReset.loudnessMeasurementCapturedFrameEnd);
+        expect(afterReset.loudnessIntegratedCapturedFrameEnd
+            == beforeReset.loudnessIntegratedCapturedFrameEnd);
+        expectWithinAbsoluteError(
+            afterReset.loudnessMomentaryLufs, beforeReset.loudnessMomentaryLufs, 0.000001);
+        expectWithinAbsoluteError(
+            afterReset.loudnessShortTermLufs, beforeReset.loudnessShortTermLufs, 0.000001);
+        expectWithinAbsoluteError(
+            afterReset.loudnessIntegratedLufs, beforeReset.loudnessIntegratedLufs, 0.000001);
+        expectWithinAbsoluteError(
+            afterReset.loudnessReferenceLufs, beforeReset.loudnessReferenceLufs, 0.000001);
+        expect(afterReset.loudnessMomentaryValid == beforeReset.loudnessMomentaryValid);
+        expect(afterReset.loudnessShortTermValid == beforeReset.loudnessShortTermValid);
+        expect(afterReset.loudnessIntegratedValid == beforeReset.loudnessIntegratedValid);
         expect(afterReset.metalAvailable == beforeReset.metalAvailable);
         expect(afterReset.renderingRequested == beforeReset.renderingRequested);
         expect(afterReset.effectivelyRendering == beforeReset.effectivelyRendering);
@@ -904,6 +1022,21 @@ public:
         expectWithinAbsoluteError(defaultedSpectrogramSettings.colorResponse, 0.0F, 0.0001F);
         expectWithinAbsoluteError(defaultedSpectrogramSettings.colorFloorDecibels, -120.0F, 0.001F);
         expectWithinAbsoluteError(defaultedSpectrogramSettings.colorCeilingDecibels, 0.0F, 0.001F);
+
+        beginTest("Loudness reference settings clamp and snap to half-LU steps");
+
+        visualization.setLoudnessSettings({ -17.8F });
+        expectWithinAbsoluteError(
+            visualization.getLoudnessSettings().referenceLufs, -18.0F, 0.0001F);
+        visualization.setLoudnessSettings({ -100.0F });
+        expectWithinAbsoluteError(
+            visualization.getLoudnessSettings().referenceLufs, -36.0F, 0.0001F);
+        visualization.setLoudnessSettings({ 100.0F });
+        expectWithinAbsoluteError(
+            visualization.getLoudnessSettings().referenceLufs, -9.0F, 0.0001F);
+        visualization.setLoudnessSettings({ notFinite });
+        expectWithinAbsoluteError(
+            visualization.getLoudnessSettings().referenceLufs, -23.0F, 0.0001F);
 
         visualization.setEffectiveActivityCallback({ });
     }

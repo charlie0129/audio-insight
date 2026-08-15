@@ -326,6 +326,11 @@ void PluginProcessor::resetSpectrum() noexcept
     analysisCoordinator.resetSpectrum();
 }
 
+void PluginProcessor::resetLoudness() noexcept
+{
+    analysisCoordinator.resetLoudness();
+}
+
 bool PluginProcessor::copyLatestVisualizationFrame(VisualizationFrame& destination) const noexcept
 {
     return analysisCoordinator.copyLatestVisualizationFrame(destination);

@@ -206,8 +206,8 @@ struct AnalysisCoordinator::State final : SharedAnalysisScheduler::JobClient,
         captureRevision.fetch_add(1, std::memory_order_release);
     }
 
-    void beginGeneration(
-        const std::uint64_t captureGeneration, const std::uint64_t jobGeneration) noexcept
+    void beginGeneration(const std::uint64_t captureGeneration, const std::uint64_t jobGeneration,
+        const bool followsFormatChange) noexcept
     {
         workingFrame = { };
         workingFrame.spectrumDecibels.fill(minimumSpectrumDecibels);
@@ -222,6 +222,14 @@ struct AnalysisCoordinator::State final : SharedAnalysisScheduler::JobClient,
         workingFrame.stereoCorrelationValid = false;
         workingFrame.stereoSequence = nextStereoSequence++;
         mirrorStereoFrameState();
+        if (followsFormatChange)
+            loudness.resetForFormatChange();
+        else
+            loudness.resetForLifecycle();
+        appliedLoudnessResetEpoch = loudnessResetRequestEpoch.load(std::memory_order_acquire);
+        mirroredLoudnessStateSequence = 0;
+        mirroredLoudnessResetEpoch = 0;
+        static_cast<void>(refreshLoudnessFrameState(true));
         spectrumCapturedFrameEnd.store(0, std::memory_order_relaxed);
         meterCapturedFrameEnd.store(0, std::memory_order_relaxed);
         hasPublishedAudioFrame.store(false, std::memory_order_relaxed);
@@ -233,7 +241,7 @@ struct AnalysisCoordinator::State final : SharedAnalysisScheduler::JobClient,
         lastAnalyzedCaptureRevision.store(
             captureRevision.load(std::memory_order_acquire), std::memory_order_release);
 
-        static_cast<void>(snapshots.publish(workingFrame));
+        static_cast<void>(publishWorkingFrame());
 
         // Publish generations only after all worker-owned state and the initial
         // snapshot are complete. Defensive checks in execute() can therefore
@@ -262,7 +270,8 @@ struct AnalysisCoordinator::State final : SharedAnalysisScheduler::JobClient,
             std::memory_order_relaxed);
         currentFftGeneration.store(fftGeneration, std::memory_order_relaxed);
         fftConfigurationChanges.fetch_add(1, std::memory_order_relaxed);
-        static_cast<void>(snapshots.publish(workingFrame));
+        static_cast<void>(refreshLoudnessFrameState());
+        static_cast<void>(publishWorkingFrame());
 
         currentJobGeneration.store(jobGeneration, std::memory_order_release);
         return true;
@@ -279,7 +288,8 @@ struct AnalysisCoordinator::State final : SharedAnalysisScheduler::JobClient,
         workingFrame.spectrumSequence = nextSpectrumSequence++;
         spectrumCapturedFrameEnd.store(0, std::memory_order_relaxed);
         spectrumTemporalConfigurationChanges.fetch_add(1, std::memory_order_relaxed);
-        static_cast<void>(snapshots.publish(workingFrame));
+        static_cast<void>(refreshLoudnessFrameState());
+        static_cast<void>(publishWorkingFrame());
         currentJobGeneration.store(jobGeneration, std::memory_order_release);
         return true;
     }
@@ -447,6 +457,21 @@ struct AnalysisCoordinator::State final : SharedAnalysisScheduler::JobClient,
         staleClearPending.store(false, std::memory_order_release);
     }
 
+#if defined(JUCE_UNIT_TESTS) && JUCE_UNIT_TESTS
+    void setWorkerTestHook(
+        void* const context, const AnalysisCoordinator::WorkerTestHook hook) noexcept
+    {
+        workerTestHookContext.store(context, std::memory_order_relaxed);
+        workerTestHook.store(hook, std::memory_order_release);
+    }
+
+    void invokeWorkerTestHook(const AnalysisCoordinator::WorkerTestOperation operation) noexcept
+    {
+        if (const auto hook = workerTestHook.load(std::memory_order_acquire); hook != nullptr)
+            hook(workerTestHookContext.load(std::memory_order_relaxed), operation);
+    }
+#endif
+
     void requestPeakRmsReset() noexcept
     {
         const auto epoch = meters.requestUserReset();
@@ -458,6 +483,15 @@ struct AnalysisCoordinator::State final : SharedAnalysisScheduler::JobClient,
     {
         spectrumClearPending.store(true, std::memory_order_release);
         spectrumUserClears.fetch_add(1, std::memory_order_relaxed);
+    }
+
+    void requestLoudnessReset() noexcept
+    {
+        loudnessResetCapturedFrameEnd.store(
+            samples.telemetry().capturedFrames, std::memory_order_relaxed);
+        auto requested = loudnessResetRequestEpoch.fetch_add(1, std::memory_order_release) + 1;
+        if (requested == 0)
+            static_cast<void>(loudnessResetRequestEpoch.fetch_add(1, std::memory_order_release));
     }
 
     void applyPeakRmsReading(const StereoMeterReading& reading) noexcept
@@ -505,6 +539,86 @@ struct AnalysisCoordinator::State final : SharedAnalysisScheduler::JobClient,
         stereoMono.store(workingFrame.stereoMono, std::memory_order_relaxed);
     }
 
+    [[nodiscard]] bool loudnessResetIsPending() const noexcept
+    {
+        return loudnessResetRequestEpoch.load(std::memory_order_acquire)
+            != appliedLoudnessResetEpoch;
+    }
+
+    [[nodiscard]] bool applyLoudnessResetAtFrameBoundary(
+        const std::uint64_t observedCapturedFrameEnd) noexcept
+    {
+        const auto requested = loudnessResetRequestEpoch.load(std::memory_order_acquire);
+        if (requested == appliedLoudnessResetEpoch)
+            return false;
+
+        const auto boundary = loudnessResetCapturedFrameEnd.load(std::memory_order_relaxed);
+        if (observedCapturedFrameEnd < boundary)
+            return false;
+
+        loudness.resetIntegration();
+        appliedLoudnessResetEpoch = requested;
+        return true;
+    }
+
+    [[nodiscard]] bool refreshLoudnessFrameState(const bool force = false) noexcept
+    {
+        const auto& measurement = loudness.current();
+        const auto resetEpoch = loudnessResetRequestEpoch.load(std::memory_order_acquire);
+        if (!force && measurement.stateSequence == mirroredLoudnessStateSequence
+            && resetEpoch == mirroredLoudnessResetEpoch) {
+            return false;
+        }
+
+        workingFrame.loudnessMomentaryLufs = measurement.momentaryLufs;
+        workingFrame.loudnessShortTermLufs = measurement.shortTermLufs;
+        workingFrame.loudnessIntegratedLufs = measurement.integratedLufs;
+        workingFrame.loudnessMeasurementCapturedFrameEnd = measurement.measurementCapturedFrameEnd;
+        workingFrame.loudnessIntegratedCapturedFrameEnd = measurement.integratedCapturedFrameEnd;
+        workingFrame.loudnessMomentaryValid = measurement.momentaryValid;
+        workingFrame.loudnessShortTermValid = measurement.shortTermValid;
+        workingFrame.loudnessIntegratedValid
+            = measurement.integratedValid && !loudnessResetIsPending();
+        workingFrame.loudnessSequence = nextLoudnessSequence++;
+        workingFrame.loudnessAppliedResetEpoch = appliedLoudnessResetEpoch;
+
+        {
+            const std::lock_guard telemetryLock(loudnessMeasurementMutex);
+            loudnessMeasurementTelemetry = measurement;
+            if (loudnessResetIsPending())
+                loudnessMeasurementTelemetry.integratedValid = false;
+        }
+
+        mirroredLoudnessStateSequence = measurement.stateSequence;
+        mirroredLoudnessResetEpoch = resetEpoch;
+        return true;
+    }
+
+    [[nodiscard]] bool publishWorkingFrame() noexcept
+    {
+#if defined(JUCE_UNIT_TESTS) && JUCE_UNIT_TESTS
+        invokeWorkerTestHook(AnalysisCoordinator::WorkerTestOperation::beforeFramePublication);
+#endif
+        if (!snapshots.publish(workingFrame)) {
+#if defined(JUCE_UNIT_TESTS) && JUCE_UNIT_TESTS
+            invokeWorkerTestHook(AnalysisCoordinator::WorkerTestOperation::afterFramePublication);
+#endif
+            return false;
+        }
+
+#if defined(JUCE_UNIT_TESTS) && JUCE_UNIT_TESTS
+        invokeWorkerTestHook(AnalysisCoordinator::WorkerTestOperation::afterFramePublication);
+#endif
+        return true;
+    }
+
+    void suppressUnpublishedLoudnessReset(VisualizationFrame& frame) const noexcept
+    {
+        const auto requested = loudnessResetRequestEpoch.load(std::memory_order_acquire);
+        if (requested != frame.loudnessAppliedResetEpoch)
+            frame.loudnessIntegratedValid = false;
+    }
+
     void execute(const SharedAnalysisScheduler::JobContext& context) override
     {
         const auto startedAt = Clock::now();
@@ -541,6 +655,7 @@ struct AnalysisCoordinator::State final : SharedAnalysisScheduler::JobClient,
 
         bool frameChanged = false;
         bool stereoStateChanged = false;
+        bool loudnessStateChanged = false;
         bool consumedValidAudio = false;
         StereoSampleCapture::ReadHandle handle;
         std::size_t retainedFrames = 0;
@@ -556,6 +671,10 @@ struct AnalysisCoordinator::State final : SharedAnalysisScheduler::JobClient,
         auto retentionCapacity = std::max(activeFftSize, StereoSampleCapture::framesPerSlot);
         auto retainedChunkCount = std::size_t { 0 };
 
+        static_cast<void>(
+            applyLoudnessResetAtFrameBoundary(loudness.statistics().capturedFrameEnd));
+        loudnessStateChanged = refreshLoudnessFrameState();
+
         for (std::size_t consumed = 0; consumed < StereoSampleCapture::slotCount; ++consumed) {
             if (context.stopRequested()) {
                 finish(true);
@@ -570,6 +689,16 @@ struct AnalysisCoordinator::State final : SharedAnalysisScheduler::JobClient,
                 ignoredGenerationChunks.fetch_add(1, std::memory_order_relaxed);
                 continue;
             }
+
+            const auto hasValidRange = chunk.capturedFrameEnd >= chunk.frameCount;
+            const auto chunkFrameStart
+                = hasValidRange ? chunk.capturedFrameEnd - chunk.frameCount : 0;
+            if (hasValidRange)
+                static_cast<void>(applyLoudnessResetAtFrameBoundary(chunkFrameStart));
+            static_cast<void>(loudness.process(chunk));
+            if (hasValidRange)
+                static_cast<void>(applyLoudnessResetAtFrameBoundary(chunk.capturedFrameEnd));
+            loudnessStateChanged = refreshLoudnessFrameState() || loudnessStateChanged;
 
             static_cast<void>(stereoField.process(chunk));
             stereoStateChanged = true;
@@ -595,9 +724,6 @@ struct AnalysisCoordinator::State final : SharedAnalysisScheduler::JobClient,
                 }
             }
 
-            const auto hasValidRange = chunk.capturedFrameEnd >= chunk.frameCount;
-            const auto chunkFrameStart
-                = hasValidRange ? chunk.capturedFrameEnd - chunk.frameCount : 0;
             const auto isContiguous = hasPreviousChunk
                 && previousChunkSequence != std::numeric_limits<std::uint64_t>::max()
                 && chunk.sequence == previousChunkSequence + 1 && hasValidRange
@@ -664,6 +790,13 @@ struct AnalysisCoordinator::State final : SharedAnalysisScheduler::JobClient,
             frameChanged = true;
         }
 
+        if (loudnessStateChanged) {
+            newestCapturedFrameEnd = std::max(
+                { newestCapturedFrameEnd, workingFrame.loudnessMeasurementCapturedFrameEnd,
+                    workingFrame.loudnessIntegratedCapturedFrameEnd });
+            frameChanged = true;
+        }
+
         if (context.stopRequested()) {
             finish(true);
             return;
@@ -698,11 +831,21 @@ struct AnalysisCoordinator::State final : SharedAnalysisScheduler::JobClient,
         }
 
         StereoMeterReading meterReading;
+#if defined(JUCE_UNIT_TESTS) && JUCE_UNIT_TESTS
+        invokeWorkerTestHook(AnalysisCoordinator::WorkerTestOperation::beforeMeterConsumption);
+#endif
         if (meters.consumeLatest(meterReading) && meterReading.generation == captureGeneration) {
             const auto meterGapIsNewerThanField = meterReading.rawCaptureDiscontinuity
                 && meterReading.capturedFrameEnd > workingFrame.stereoCapturedFrameEnd;
             if (meterGapIsNewerThanField)
                 stereoField.reset(&workingFrame);
+
+            const auto meterGapIsNewerThanLoudness = meterReading.rawCaptureDiscontinuity
+                && meterReading.capturedFrameEnd > loudness.statistics().capturedFrameEnd;
+            if (meterGapIsNewerThanLoudness) {
+                loudness.resetForDiscontinuity();
+                loudnessStateChanged = refreshLoudnessFrameState() || loudnessStateChanged;
+            }
 
             applyPeakRmsReading(meterReading);
             newestCapturedFrameEnd
@@ -757,6 +900,8 @@ struct AnalysisCoordinator::State final : SharedAnalysisScheduler::JobClient,
             workingFrame.rmsDecibels.fill(minimumDisplayDecibels);
             workingFrame.stereoCorrelation = 0.0F;
             workingFrame.stereoCorrelationValid = false;
+            loudness.clearLiveMeasurementsPreservingIntegration();
+            loudnessStateChanged = refreshLoudnessFrameState() || loudnessStateChanged;
             workingFrame.meterSequence = nextMeterSequence++;
             workingFrame.spectrumSequence = nextSpectrumSequence++;
             stereoStateChanged = true;
@@ -767,6 +912,13 @@ struct AnalysisCoordinator::State final : SharedAnalysisScheduler::JobClient,
             hasPublishedAudioFrame.store(true, std::memory_order_release);
         }
 
+        if (refreshLoudnessFrameState()) {
+            newestCapturedFrameEnd = std::max(
+                { newestCapturedFrameEnd, workingFrame.loudnessMeasurementCapturedFrameEnd,
+                    workingFrame.loudnessIntegratedCapturedFrameEnd });
+            frameChanged = true;
+        }
+
         if (frameChanged) {
             if (stereoStateChanged) {
                 workingFrame.stereoSequence = nextStereoSequence++;
@@ -775,7 +927,7 @@ struct AnalysisCoordinator::State final : SharedAnalysisScheduler::JobClient,
             workingFrame.generation = captureGeneration;
             workingFrame.capturedFrameEnd = newestCapturedFrameEnd;
             workingFrame.droppedChunks = samples.telemetry().lostChunks();
-            static_cast<void>(snapshots.publish(workingFrame));
+            static_cast<void>(publishWorkingFrame());
         }
 
         lastAnalyzedCaptureRevision.store(revisionAtStart, std::memory_order_release);
@@ -789,6 +941,11 @@ struct AnalysisCoordinator::State final : SharedAnalysisScheduler::JobClient,
         result.capture = samples.telemetry();
         result.meters = meters.telemetry();
         result.scheduler = schedulerCounters;
+        result.loudness = loudness.statistics();
+        {
+            const std::lock_guard telemetryLock(loudnessMeasurementMutex);
+            result.loudnessMeasurement = loudnessMeasurementTelemetry;
+        }
         result.jobsStarted = jobsStarted.load(std::memory_order_relaxed);
         result.jobsCompleted = jobsCompleted.load(std::memory_order_relaxed);
         result.jobsStopped = jobsStopped.load(std::memory_order_relaxed);
@@ -864,6 +1021,7 @@ struct AnalysisCoordinator::State final : SharedAnalysisScheduler::JobClient,
     StereoSampleCapture samples;
     StereoMeterAccumulator meters;
     StereoFieldAnalyzer stereoField;
+    LoudnessAnalyzer loudness;
     SpectrumAnalyzer spectrum;
     SpectrogramColumnMapper spectrogramMapper;
     mutable SpectrogramColumnQueue spectrogramColumns;
@@ -877,12 +1035,18 @@ struct AnalysisCoordinator::State final : SharedAnalysisScheduler::JobClient,
     std::uint64_t nextSpectrumSequence = 1;
     std::uint64_t nextMeterSequence = 1;
     std::uint64_t nextStereoSequence = 1;
+    std::uint64_t nextLoudnessSequence = 1;
     std::uint64_t nextSpectrogramColumnSequence = 1;
     std::uint64_t observedSpectrumResetEpoch = 0;
     std::uint64_t requiredUserResetEpoch = 0;
     std::uint64_t requiredLiveClearEpoch = 0;
+    std::uint64_t appliedLoudnessResetEpoch = 0;
+    std::uint64_t mirroredLoudnessStateSequence = 0;
+    std::uint64_t mirroredLoudnessResetEpoch = 0;
     bool mappingSeedPending = false;
     bool mappingSeedWasPublished = false;
+    mutable std::mutex loudnessMeasurementMutex;
+    LoudnessMeasurement loudnessMeasurementTelemetry;
     std::atomic<std::uint64_t> currentJobGeneration { 0 };
     std::atomic<std::uint64_t> currentCaptureGeneration { 0 };
     std::atomic<std::uint64_t> captureRevision { 0 };
@@ -891,7 +1055,13 @@ struct AnalysisCoordinator::State final : SharedAnalysisScheduler::JobClient,
     std::atomic<bool> staleClearPending { false };
     std::atomic<std::uint64_t> peakRmsResetPendingEpoch { 0 };
     std::atomic<bool> spectrumClearPending { false };
+    std::atomic<std::uint64_t> loudnessResetRequestEpoch { 0 };
+    std::atomic<std::uint64_t> loudnessResetCapturedFrameEnd { 0 };
     std::atomic<std::uint64_t> staleClearRevision { 0 };
+#if defined(JUCE_UNIT_TESTS) && JUCE_UNIT_TESTS
+    std::atomic<void*> workerTestHookContext { nullptr };
+    std::atomic<AnalysisCoordinator::WorkerTestHook> workerTestHook { nullptr };
+#endif
     std::atomic<std::uint64_t> jobsStarted { 0 };
     std::atomic<std::uint64_t> jobsCompleted { 0 };
     std::atomic<std::uint64_t> jobsStopped { 0 };
@@ -1206,7 +1376,7 @@ bool AnalysisCoordinator::restartActiveGenerationLocked(const bool discardPendin
         state_->discardPendingCapture();
 
     const auto captureGeneration = nextNonzeroGeneration(captureGenerationCounter_);
-    state_->beginGeneration(captureGeneration, jobGeneration);
+    state_->beginGeneration(captureGeneration, jobGeneration, discardPendingCapture);
     const auto now
         = std::chrono::duration_cast<std::chrono::nanoseconds>(Clock::now().time_since_epoch())
               .count();
@@ -1256,10 +1426,28 @@ void AnalysisCoordinator::resetSpectrum() noexcept
     }
 }
 
+void AnalysisCoordinator::resetLoudness() noexcept
+{
+    try {
+        const std::lock_guard lifecycleLock(lifecycleMutex_);
+        if (captureGeneration_.load(std::memory_order_acquire) == 0 || client_ == nullptr)
+            return;
+
+        state_->requestLoudnessReset();
+        static_cast<void>(client_->request());
+    } catch (...) {
+        // Loudness integration is transient analysis state and never affects audio.
+    }
+}
+
 bool AnalysisCoordinator::copyLatestVisualizationFrame(
     VisualizationFrame& destination) const noexcept
 {
-    return state_->snapshots.copyLatest(destination);
+    if (!state_->snapshots.copyLatest(destination))
+        return false;
+
+    state_->suppressUnpublishedLoudnessReset(destination);
+    return true;
 }
 
 bool AnalysisCoordinator::copyNextSpectrogramColumn(SpectrogramColumn& destination) const noexcept
@@ -1287,6 +1475,15 @@ void AnalysisCoordinator::setLifecycleTestHook(
         const std::lock_guard lifecycleLock(lifecycleMutex_);
         lifecycleTestHookContext_ = context;
         lifecycleTestHook_ = hook;
+    } catch (...) {
+    }
+}
+
+void AnalysisCoordinator::setWorkerTestHook(void* const context, const WorkerTestHook hook) noexcept
+{
+    try {
+        const std::lock_guard lifecycleLock(lifecycleMutex_);
+        state_->setWorkerTestHook(context, hook);
     } catch (...) {
     }
 }

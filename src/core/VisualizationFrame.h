@@ -7,6 +7,7 @@
 #include <array>
 #include <cstddef>
 #include <cstdint>
+#include <limits>
 
 namespace audio_insight {
 inline constexpr float minimumSpectrumDecibels = -180.0F;
@@ -30,15 +31,22 @@ struct VisualizationFrame {
     std::array<float, 2> rmsDecibels { minimumDisplayDecibels, minimumDisplayDecibels };
     std::array<float, 2> heldPeakDecibels { minimumDisplayDecibels, minimumDisplayDecibels };
     std::array<bool, 2> over { false, false };
+    double loudnessMomentaryLufs = -std::numeric_limits<double>::infinity();
+    double loudnessShortTermLufs = -std::numeric_limits<double>::infinity();
+    double loudnessIntegratedLufs = -std::numeric_limits<double>::infinity();
 
     std::uint64_t generation = 0;
     std::uint64_t fftGeneration = 0;
     std::uint64_t spectrumSequence = 0;
     std::uint64_t meterSequence = 0;
     std::uint64_t stereoSequence = 0;
+    std::uint64_t loudnessSequence = 0;
+    std::uint64_t loudnessAppliedResetEpoch = 0;
     std::uint64_t capturedFrameEnd = 0;
     std::uint64_t spectrumCapturedFrameEnd = 0;
     std::uint64_t stereoCapturedFrameEnd = 0;
+    std::uint64_t loudnessMeasurementCapturedFrameEnd = 0;
+    std::uint64_t loudnessIntegratedCapturedFrameEnd = 0;
     std::uint64_t droppedChunks = 0;
     std::uint32_t spectrumFftSize = 0;
     std::uint32_t spectrumBinCount = 0;
@@ -53,5 +61,8 @@ struct VisualizationFrame {
     bool stereoFieldValid = false;
     bool stereoCorrelationValid = false;
     bool stereoMono = false;
+    bool loudnessMomentaryValid = false;
+    bool loudnessShortTermValid = false;
+    bool loudnessIntegratedValid = false;
 };
 } // namespace audio_insight

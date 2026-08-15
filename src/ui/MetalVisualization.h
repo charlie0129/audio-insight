@@ -186,6 +186,8 @@ inline constexpr std::size_t cachedDecibelTickCount
 
 inline constexpr float peakRmsMinimumDecibels = -60.0F;
 inline constexpr float peakRmsMaximumDecibels = 3.0F;
+inline constexpr float loudnessMinimumLufs = -60.0F;
+inline constexpr float loudnessMaximumLufs = 0.0F;
 inline constexpr std::array<int, 8> peakRmsMajorDecibelTicks {
     -60,
     -48,
@@ -199,6 +201,9 @@ inline constexpr std::array<int, 8> peakRmsMajorDecibelTicks {
 inline constexpr std::size_t maximumPeakRmsReadoutGlyphs = 6;
 // 20 * log10(maximum finite float) rounds to approximately +770.6 dB.
 inline constexpr int maximumFiniteFloatPeakRmsReadoutTenths = 7'706;
+inline constexpr std::size_t maximumLoudnessReadoutGlyphs = 6;
+inline constexpr int minimumCachedLoudnessReadoutTenths = -9'999;
+inline constexpr int maximumCachedLoudnessReadoutTenths = 9'999;
 
 inline constexpr float stereoFieldHistorySeconds = 0.250F;
 inline constexpr float stereoCorrelationNeutralThreshold = 0.05F;
@@ -259,6 +264,28 @@ struct PeakRmsPanelLayout final {
     std::size_t channelCount = 0;
     bool showTickLabels = false;
     bool showReadouts = false;
+};
+
+struct LoudnessReadout final {
+    enum class Kind : std::uint8_t {
+        emDash,
+        minusInfinity,
+        lufsTenths,
+    };
+
+    Kind kind = Kind::emDash;
+    int lufsTenths = 0;
+};
+
+struct LoudnessPanelLayout final {
+    PeakRmsLogicalRect trackBounds;
+    PeakRmsLogicalRect resetVisualBounds;
+    PeakRmsLogicalRect resetHitBounds;
+    PeakRmsLogicalRect momentaryTextBounds;
+    PeakRmsLogicalRect shortTermTextBounds;
+    PeakRmsLogicalRect integratedTextBounds;
+    bool showMomentaryText = false;
+    bool showSecondaryText = false;
 };
 
 struct SpectrumClearLayout final {
@@ -396,6 +423,25 @@ struct SpectrumDecibelTicks final {
     float headerHeight, std::uint32_t channelCount, float textHeight, float maximumTickLabelWidth,
     float maximumReadoutWidth) noexcept;
 
+/** Maps the accepted fixed Loudness scale to [0, 1] for bar geometry only. */
+[[nodiscard]] float mapLoudnessLufsToUnit(float lufs) noexcept;
+
+/** Separates readiness and completed silence from bounded one-decimal presentation. */
+[[nodiscard]] LoudnessReadout classifyLoudnessReadout(double lufs, bool valid) noexcept;
+
+/** Formats one classified Loudness reading for native accessibility clients. */
+[[nodiscard]] juce::String formatLoudnessAccessibilityReading(double lufs, bool valid);
+
+/**
+    Computes one responsive, bottom-left-origin Loudness tile in logical points.
+
+    The same RESET bounds drive drawing and hit testing on regular-density and
+    Retina displays. Optional readout rows disappear before the slim meter is
+    collapsed.
+*/
+[[nodiscard]] LoudnessPanelLayout calculateLoudnessPanelLayout(float panelWidth, float panelHeight,
+    float headerHeight, float textHeight, float maximumReadoutWidth) noexcept;
+
 /** Computes the shared Spectrum CLEAR drawing and pointer bounds in logical points. */
 [[nodiscard]] SpectrumClearLayout calculateSpectrumClearLayout(
     float panelWidth, float panelHeight, float headerHeight) noexcept;
@@ -439,24 +485,31 @@ struct MetalVisualizationGeometryLimits final {
     // track/fill/marker geometry.
     // Point sprites live in a separate fixed-capacity instance buffer.
     static constexpr std::size_t maximumStereoVertices = (6 + 5 + 3) * 6;
-    static constexpr std::size_t maximumFixedTextGlyphs = 80;
+    // Track plus border, Momentary fill, Short-term marker, reference line,
+    // and the five-quad RESET target.
+    static constexpr std::size_t maximumLoudnessVertices = (5 + 1 + 1 + 1 + 5) * 6;
+    static constexpr std::size_t maximumFixedTextGlyphs = 61;
     static constexpr std::size_t maximumDecibelLabelGlyphs = 7;
     // CLEAR, two channel labels, two OVER labels, two six-glyph readouts,
     // and every fixed scale label.
     static constexpr std::size_t maximumPeakRmsTextGlyphs = 5 + 2 + 8 + 12 + 20;
     static constexpr std::size_t maximumSpectrumControlTextGlyphs = 5;
     static constexpr std::size_t maximumStereoTextGlyphs = maximumStereoCorrelationReadoutGlyphs;
+    // RESET, M/S/I labels, and three six-glyph one-decimal readings.
+    static constexpr std::size_t maximumLoudnessTextGlyphs
+        = 5 + 3 + (3 * maximumLoudnessReadoutGlyphs);
     static constexpr std::size_t maximumNumericAxisTextGlyphs
         = (2 * maximumFrequencyAxisTickCount * maximumFrequencyAxisLabelGlyphs)
         + (cachedDecibelTickCount * maximumDecibelLabelGlyphs);
     static constexpr std::size_t maximumTextVertices
         = (maximumFixedTextGlyphs + maximumNumericAxisTextGlyphs + maximumPeakRmsTextGlyphs
-              + maximumSpectrumControlTextGlyphs + maximumStereoTextGlyphs)
+              + maximumSpectrumControlTextGlyphs + maximumStereoTextGlyphs
+              + maximumLoudnessTextGlyphs)
         * 6;
     static constexpr std::size_t maximumGeneratedVertices = maximumShellVertices
         + maximumDashboardSplitterVertices + maximumGridVertices + maximumSpectrumVertices
         + maximumSpectrogramVertices + maximumMeterVertices + maximumStereoVertices
-        + maximumTextVertices;
+        + maximumLoudnessVertices + maximumTextVertices;
 };
 } // namespace detail
 
@@ -517,6 +570,9 @@ struct MetalRenderTelemetry {
     std::uint64_t lastStereoSequence = 0;
     std::uint64_t stereoPointInstancesPrepared = 0;
     std::uint64_t stereoPointDrawCalls = 0;
+    std::uint64_t lastLoudnessSequence = 0;
+    std::uint64_t loudnessMeasurementCapturedFrameEnd = 0;
+    std::uint64_t loudnessIntegratedCapturedFrameEnd = 0;
 
     std::uint64_t lastCpuEncodeNanoseconds = 0;
     std::uint64_t maximumCpuEncodeNanoseconds = 0;
@@ -560,6 +616,10 @@ struct MetalRenderTelemetry {
     std::uint32_t stereoLastPointCount = 0;
     double backingScale = 1.0;
     double stereoCorrelation = 0.0;
+    double loudnessMomentaryLufs = 0.0;
+    double loudnessShortTermLufs = 0.0;
+    double loudnessIntegratedLufs = 0.0;
+    double loudnessReferenceLufs = -23.0;
 
     bool metalAvailable = false;
     bool renderingRequested = false;
@@ -567,6 +627,9 @@ struct MetalRenderTelemetry {
     bool resetPending = false;
     bool stereoCorrelationValid = false;
     bool stereoMono = false;
+    bool loudnessMomentaryValid = false;
+    bool loudnessShortTermValid = false;
+    bool loudnessIntegratedValid = false;
 };
 
 /** Coherently packed, presentation-only Spectrum settings. */
@@ -588,6 +651,11 @@ struct SpectrogramRenderSettings {
     int historyDurationSeconds = 10;
     detail::SpectrogramRenderHistoryMode historyMode = detail::SpectrogramRenderHistoryMode::scroll;
     int requestedSliceRateHz = 60;
+};
+
+/** Coherently packed presentation-only Loudness settings. */
+struct LoudnessRenderSettings {
+    float referenceLufs = -23.0F;
 };
 
 /**
@@ -633,6 +701,10 @@ public:
     /** Updates Spectrogram presentation/history settings as one coherent snapshot. */
     void setSpectrogramSettings(SpectrogramRenderSettings settings) noexcept;
     [[nodiscard]] SpectrogramRenderSettings getSpectrogramSettings() const noexcept;
+
+    /** Updates the presentation-only Loudness reference as one coherent snapshot. */
+    void setLoudnessSettings(LoudnessRenderSettings settings) noexcept;
+    [[nodiscard]] LoudnessRenderSettings getLoudnessSettings() const noexcept;
 
     /**
         Publishes the four validated dashboard split indices. Invalid input is

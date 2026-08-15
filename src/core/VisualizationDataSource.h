@@ -25,6 +25,11 @@ public:
     // latches while preserving the current live measurements.
     virtual void resetPeakRms() noexcept = 0;
 
+    // Called only from non-real-time UI code. Starts a fresh Integrated
+    // Loudness measurement while preserving the rolling Momentary and
+    // Short-term windows.
+    virtual void resetLoudness() noexcept = 0;
+
     // Copies the most recent complete immutable frame without waiting.
     [[nodiscard]] virtual bool copyLatestVisualizationFrame(
         VisualizationFrame& destination) const noexcept = 0;

@@ -64,6 +64,7 @@ public:
     void setVisualizationActive(bool shouldBeActive) noexcept override;
     void resetSpectrum() noexcept override;
     void resetPeakRms() noexcept override;
+    void resetLoudness() noexcept override;
     [[nodiscard]] bool copyLatestVisualizationFrame(
         VisualizationFrame& destination) const noexcept override;
     [[nodiscard]] bool copyNextSpectrogramColumn(

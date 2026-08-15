@@ -476,19 +476,21 @@ public:
         stereoStatus_.setMinimumHorizontalScale(0.8F);
         addAndMakeVisible(stereoStatus_);
 
-        configureLabel(loudnessStatus_, "Not yet implemented", false);
-        loudnessStatus_.setComponentID("settingsLoudnessUnavailable");
+        configureLabel(
+            loudnessStatus_, "Live BS.1770-5 / EBU R128 measurement; reference is display-only.");
+        loudnessStatus_.setComponentID("settingsLoudnessStatus");
+        loudnessStatus_.setMinimumHorizontalScale(0.8F);
         addAndMakeVisible(loudnessStatus_);
 
         configureSlider(loudnessReference_, "Loudness reference",
-            "Presentation reference for the future loudness meter", " LUFS");
+            "Presentation-only reference line for the Loudness meter", " LUFS");
         loudnessReference_.setComponentID("settingsLoudnessReference");
         loudnessReference_.setRange(
             LoudnessSettings::minimumReferenceLufs, LoudnessSettings::maximumReferenceLufs, 0.5);
         loudnessReference_.setValue(
             LoudnessSettings::defaultReferenceLufs, juce::dontSendNotification);
+        loudnessReference_.addListener(this);
         addAndMakeVisible(loudnessReference_);
-        configureUnavailableControl(loudnessReference_, "Loudness is not yet implemented");
 
         const std::array<juce::Component*, 7> rowControls { &fftSize_, &window_, &fftRate_,
             &frequencySpacing_, &palette_, &historyDuration_, &loudnessReference_ };
@@ -543,7 +545,9 @@ public:
             "Stereo uses a fixed vectorscope and correlation design with no settings to reset");
         resetButtons_[stereoSection].setDescription(
             "Stereo is live with a fixed design and has no adjustable settings to reset");
-        resetButtons_[loudnessSection].setEnabled(false);
+        resetButtons_[loudnessSection].setComponentID("settingsLoudnessReset");
+        resetButtons_[loudnessSection].setExplicitFocusOrder(23);
+        loudnessReference_.setExplicitFocusOrder(24);
 
         setConfiguration(initialConfiguration);
     }
@@ -570,6 +574,7 @@ public:
         colorResponse_.removeListener(this);
         colorFloor_.removeListener(this);
         colorCeiling_.removeListener(this);
+        loudnessReference_.removeListener(this);
         for (auto& reset : resetButtons_)
             reset.onClick = nullptr;
     }
@@ -684,6 +689,8 @@ private:
             configuration_.spectrogram.colorFloorDb = colorFloor_.getValue();
         else if (slider == &colorCeiling_)
             configuration_.spectrogram.colorCeilingDb = colorCeiling_.getValue();
+        else if (slider == &loudnessReference_)
+            configuration_.loudness.referenceLufs = loudnessReference_.getValue();
         else
             return;
 
@@ -703,6 +710,9 @@ private:
             publishSanitizedConfiguration();
         } else if (section == spectrogramSection) {
             configuration_.spectrogram = AnalyzerConfigurationCodec::defaults().spectrogram;
+            publishSanitizedConfiguration();
+        } else if (section == loudnessSection) {
+            configuration_.loudness = AnalyzerConfigurationCodec::defaults().loudness;
             publishSanitizedConfiguration();
         }
     }

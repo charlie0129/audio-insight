@@ -498,6 +498,7 @@ void PluginEditor::updateAnalyzerRenderSettings(const AnalyzerConfiguration& con
         spectrogramRenderHistoryMode(sanitized.spectrogram.historyMode),
         sanitized.sharedAnalysis.requestedFftSliceRateHz,
     });
+    visualization.setLoudnessSettings({ static_cast<float>(sanitized.loudness.referenceLufs) });
 }
 
 void PluginEditor::updateRenderingState()

@@ -2,6 +2,7 @@
 
 #pragma once
 
+#include "LoudnessAnalyzer.h"
 #include "SharedAnalysisScheduler.h"
 #include "StereoMeterAccumulator.h"
 #include "StereoSampleCapture.h"
@@ -21,6 +22,8 @@ struct AnalysisTelemetry {
     StereoSampleCapture::Telemetry capture;
     StereoMeterAccumulator::Telemetry meters;
     SharedAnalysisScheduler::Counters scheduler;
+    LoudnessAnalyzer::Statistics loudness;
+    LoudnessMeasurement loudnessMeasurement;
 
     std::uint64_t jobsStarted = 0;
     std::uint64_t jobsCompleted = 0;
@@ -126,6 +129,7 @@ public:
     void setVisualizationActive(bool shouldBeActive) noexcept override;
     void resetSpectrum() noexcept override;
     void resetPeakRms() noexcept override;
+    void resetLoudness() noexcept override;
     [[nodiscard]] bool copyLatestVisualizationFrame(
         VisualizationFrame& destination) const noexcept override;
     [[nodiscard]] bool copyNextSpectrogramColumn(
@@ -137,10 +141,20 @@ public:
 #if defined(JUCE_UNIT_TESTS) && JUCE_UNIT_TESTS
     enum class LifecycleTestOperation { request, activate, deactivate };
 
+    enum class WorkerTestOperation {
+        beforeMeterConsumption,
+        beforeFramePublication,
+        afterFramePublication,
+    };
+
     using LifecycleTestHook = void (*)(void*, LifecycleTestOperation) noexcept;
+    using WorkerTestHook = void (*)(void*, WorkerTestOperation) noexcept;
 
     /** Installs a synchronous test seam invoked while the non-real-time gate is held. */
     void setLifecycleTestHook(void* context, LifecycleTestHook hook) noexcept;
+
+    /** Installs a bounded worker test seam; never used in production builds. */
+    void setWorkerTestHook(void* context, WorkerTestHook hook) noexcept;
 
     /** Simulates one lost meter endpoint without disturbing the raw-sample capture sequence. */
     void skipNextMeterEndpointSequenceForTesting() noexcept;

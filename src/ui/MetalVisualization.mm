@@ -59,6 +59,7 @@ class MetalRenderBackend;
 - (BOOL)hasDisplayLink;
 - (BOOL)performSpectrumClearAccessibilityAction;
 - (BOOL)performPeakRmsClearAccessibilityAction;
+- (BOOL)performLoudnessResetAccessibilityAction;
 - (void)dashboardLayoutEditingStateChanged;
 - (void)dashboardLayoutGeometryChanged;
 - (void)dashboardSplitterFocusChangedFromIndex:(NSUInteger)previousIndex
@@ -536,6 +537,138 @@ PeakRmsPanelLayout calculatePeakRmsPanelLayout(const float panelWidth, const flo
     return result;
 }
 
+float mapLoudnessLufsToUnit(const float lufs) noexcept
+{
+    const auto value = std::isfinite(lufs) ? lufs : loudnessMinimumLufs;
+    return (std::clamp(value, loudnessMinimumLufs, loudnessMaximumLufs) - loudnessMinimumLufs)
+        / (loudnessMaximumLufs - loudnessMinimumLufs);
+}
+
+LoudnessReadout classifyLoudnessReadout(const double lufs, const bool valid) noexcept
+{
+    LoudnessReadout result;
+    if (!valid || std::isnan(lufs) || (std::isinf(lufs) && !std::signbit(lufs)))
+        return result;
+
+    if (std::isinf(lufs) && std::signbit(lufs)) {
+        result.kind = LoudnessReadout::Kind::minusInfinity;
+        return result;
+    }
+
+    if (!std::isfinite(lufs))
+        return result;
+
+    const auto bounded
+        = std::clamp(lufs, static_cast<double>(minimumCachedLoudnessReadoutTenths) * 0.1,
+            static_cast<double>(maximumCachedLoudnessReadoutTenths) * 0.1);
+    result.kind = LoudnessReadout::Kind::lufsTenths;
+    result.lufsTenths = std::clamp(static_cast<int>(std::lround(bounded * 10.0)),
+        minimumCachedLoudnessReadoutTenths, maximumCachedLoudnessReadoutTenths);
+    return result;
+}
+
+juce::String formatLoudnessAccessibilityReading(const double lufs, const bool valid)
+{
+    const auto readout = classifyLoudnessReadout(lufs, valid);
+    switch (readout.kind) {
+    case LoudnessReadout::Kind::emDash:
+        return "not ready";
+    case LoudnessReadout::Kind::minusInfinity:
+        return "minus infinity";
+    case LoudnessReadout::Kind::lufsTenths: {
+        const auto absoluteTenths = std::abs(readout.lufsTenths);
+        auto result = readout.lufsTenths < 0 ? juce::String("-")
+            : readout.lufsTenths > 0         ? juce::String("+")
+                                             : juce::String();
+        result += juce::String(absoluteTenths / 10) + "." + juce::String(absoluteTenths % 10)
+            + " LUFS";
+        return result;
+    }
+    }
+
+    return "not ready";
+}
+
+LoudnessPanelLayout calculateLoudnessPanelLayout(const float panelWidth, const float panelHeight,
+    const float requestedHeaderHeight, const float requestedTextHeight,
+    const float requestedMaximumReadoutWidth) noexcept
+{
+    LoudnessPanelLayout result;
+    if (!std::isfinite(panelWidth) || !std::isfinite(panelHeight) || panelWidth <= 0.0F
+        || panelHeight <= 0.0F) {
+        return result;
+    }
+
+    const auto headerHeight = std::clamp(
+        std::isfinite(requestedHeaderHeight) ? requestedHeaderHeight : 0.0F, 0.0F, panelHeight);
+    const auto textHeight
+        = std::clamp(std::isfinite(requestedTextHeight) ? requestedTextHeight : 10.0F, 6.0F, 24.0F);
+    const auto maximumReadoutWidth = std::max(
+        0.0F, std::isfinite(requestedMaximumReadoutWidth) ? requestedMaximumReadoutWidth : 0.0F);
+
+    if (panelWidth >= 68.0F && headerHeight >= 14.0F) {
+        constexpr auto visualWidth = 45.0F;
+        const auto visualBottom = panelHeight - headerHeight + 3.0F;
+        result.resetVisualBounds = { std::max(4.0F, panelWidth - visualWidth - 5.0F), visualBottom,
+            panelWidth - 5.0F, panelHeight - 3.0F };
+        const auto hitHeight = std::min(panelHeight, std::max(24.0F, headerHeight));
+        result.resetHitBounds = { std::max(0.0F, result.resetVisualBounds.left - 7.0F),
+            panelHeight - hitHeight, panelWidth, panelHeight };
+    }
+
+    constexpr auto contentInset = 6.0F;
+    const auto contentLeft = std::min(contentInset, panelWidth * 0.5F);
+    const auto contentRight = std::max(contentLeft, panelWidth - contentInset);
+    const auto contentBottom = std::min(contentInset, panelHeight);
+    const auto contentTop = std::max(contentBottom, panelHeight - headerHeight - contentInset);
+    const auto contentWidth = contentRight - contentLeft;
+    const auto contentHeight = contentTop - contentBottom;
+    if (contentWidth <= 0.0F || contentHeight <= 0.0F)
+        return result;
+
+    constexpr auto minimumTrackHeight = 24.0F;
+    constexpr auto rowGap = 2.0F;
+    constexpr auto trackGap = 4.0F;
+    const auto textFitsHorizontally = contentWidth >= maximumReadoutWidth + 10.0F;
+    result.showMomentaryText
+        = textFitsHorizontally && contentHeight >= minimumTrackHeight + textHeight + trackGap;
+    result.showSecondaryText = result.showMomentaryText
+        && contentHeight
+            >= minimumTrackHeight + (3.0F * textHeight) + (2.0F * rowGap) + (2.0F * trackGap);
+
+    auto trackBottom = contentBottom;
+    auto trackTop = contentTop;
+    if (result.showMomentaryText) {
+        result.momentaryTextBounds
+            = { contentLeft, contentTop - textHeight, contentRight, contentTop };
+        trackTop = result.momentaryTextBounds.bottom - trackGap;
+    }
+
+    if (result.showSecondaryText) {
+        result.integratedTextBounds
+            = { contentLeft, contentBottom, contentRight, contentBottom + textHeight };
+        result.shortTermTextBounds = { contentLeft, result.integratedTextBounds.top + rowGap,
+            contentRight, result.integratedTextBounds.top + rowGap + textHeight };
+        trackBottom = result.shortTermTextBounds.top + trackGap;
+    }
+
+    if (trackTop <= trackBottom) {
+        result.showMomentaryText = false;
+        result.showSecondaryText = false;
+        result.momentaryTextBounds = { };
+        result.shortTermTextBounds = { };
+        result.integratedTextBounds = { };
+        trackBottom = contentBottom;
+        trackTop = contentTop;
+    }
+
+    const auto desiredTrackWidth = std::clamp(contentWidth * 0.14F, 8.0F, 16.0F);
+    const auto trackWidth = std::min(contentWidth, desiredTrackWidth);
+    const auto trackLeft = contentLeft + ((contentWidth - trackWidth) * 0.5F);
+    result.trackBounds = { trackLeft, trackBottom, trackLeft + trackWidth, trackTop };
+    return result;
+}
+
 StereoFieldPanelLayout calculateStereoFieldPanelLayout(const float panelWidth,
     const float panelHeight, const float requestedHeaderHeight,
     const float requestedTextHeight) noexcept
@@ -975,11 +1108,11 @@ constexpr std::size_t glyphAtlasColumns = 16;
 constexpr std::size_t glyphAtlasRows
     = (glyphAtlasGlyphCount + glyphAtlasColumns - 1) / glyphAtlasColumns;
 constexpr std::size_t maximumCachedTextGlyphs = 24;
-constexpr std::size_t cachedFixedTextRunCount = 12;
+constexpr std::size_t cachedFixedTextRunCount = 14;
 
 constexpr std::array<std::string_view, cachedFixedTextRunCount> cachedFixedTextStrings { "Spectrum",
-    "Peak / RMS", "Spectrogram", "Stereo / Correlation", "Loudness", "Not yet implemented", "CLEAR",
-    "L", "R", "M", "OVER", "MONO" };
+    "Peak / RMS", "Spectrogram", "Stereo / Correlation", "Loudness", "CLEAR", "L", "R", "M", "OVER",
+    "MONO", "RESET", "S", "I" };
 
 constexpr std::array<std::string_view, frequencyAxisTickCandidateCount>
     cachedFrequencyAxisTextStrings { "20 Hz", "50 Hz", "100 Hz", "200 Hz", "500 Hz", "1 kHz",
@@ -989,17 +1122,21 @@ constexpr std::array<std::string_view, peakRmsMajorDecibelTicks.size()>
     cachedPeakRmsTickTextStrings { "-60", "-48", "-36", "-24", "-12", "-6", "0", "+3" };
 
 constexpr std::array<std::size_t, dashboardPanelCount> panelTitleTextRunIndices { 0, 1, 2, 3, 4 };
-constexpr std::size_t placeholderTextRunIndex = 5;
-constexpr std::size_t clearTextRunIndex = 6;
-constexpr std::size_t leftChannelTextRunIndex = 7;
-constexpr std::size_t rightChannelTextRunIndex = 8;
-constexpr std::size_t monoChannelTextRunIndex = 9;
-constexpr std::size_t overTextRunIndex = 10;
-constexpr std::size_t monoStateTextRunIndex = 11;
+constexpr std::size_t clearTextRunIndex = 5;
+constexpr std::size_t leftChannelTextRunIndex = 6;
+constexpr std::size_t rightChannelTextRunIndex = 7;
+constexpr std::size_t monoChannelTextRunIndex = 8;
+constexpr std::size_t overTextRunIndex = 9;
+constexpr std::size_t monoStateTextRunIndex = 10;
+constexpr std::size_t loudnessResetTextRunIndex = 11;
+constexpr std::size_t shortTermTextRunIndex = 12;
+constexpr std::size_t integratedTextRunIndex = 13;
 constexpr int minimumPeakRmsReadoutTenths = -1'199;
 constexpr int maximumPeakRmsReadoutTenths = maximumFiniteFloatPeakRmsReadoutTenths;
 constexpr std::size_t cachedPeakRmsReadoutCount
     = static_cast<std::size_t>(maximumPeakRmsReadoutTenths - minimumPeakRmsReadoutTenths + 1);
+constexpr std::size_t cachedLoudnessReadoutCount = static_cast<std::size_t>(
+    maximumCachedLoudnessReadoutTenths - minimumCachedLoudnessReadoutTenths + 1);
 
 // The fixed capacity covers five filled/bordered/header-divided tiles, both
 // numeric frequency axes, every possible decibel tick, all maximum-size FFT
@@ -1011,10 +1148,7 @@ constexpr std::size_t fixedTextGlyphCount = [] {
     for (const auto titleIndex : panelTitleTextRunIndices)
         glyphCount += cachedFixedTextStrings[titleIndex].size();
 
-    constexpr auto placeholderPanelCount = dashboardPanelCount - 4;
-    return glyphCount
-        + (placeholderPanelCount * cachedFixedTextStrings[placeholderTextRunIndex].size())
-        + cachedFixedTextStrings[monoStateTextRunIndex].size();
+    return glyphCount + cachedFixedTextStrings[monoStateTextRunIndex].size();
 }();
 constexpr std::size_t peakRmsTextGlyphCount = [] {
     std::size_t glyphCount = cachedFixedTextStrings[clearTextRunIndex].size();
@@ -1027,8 +1161,15 @@ constexpr std::size_t peakRmsTextGlyphCount = [] {
 
     return glyphCount;
 }();
+constexpr std::size_t loudnessTextGlyphCount
+    = cachedFixedTextStrings[loudnessResetTextRunIndex].size()
+    + cachedFixedTextStrings[monoChannelTextRunIndex].size()
+    + cachedFixedTextStrings[shortTermTextRunIndex].size()
+    + cachedFixedTextStrings[integratedTextRunIndex].size() + (3 * maximumLoudnessReadoutGlyphs);
 static_assert(fixedTextGlyphCount == MetalVisualizationGeometryLimits::maximumFixedTextGlyphs);
 static_assert(peakRmsTextGlyphCount == MetalVisualizationGeometryLimits::maximumPeakRmsTextGlyphs);
+static_assert(
+    loudnessTextGlyphCount == MetalVisualizationGeometryLimits::maximumLoudnessTextGlyphs);
 static_assert(cachedFixedTextStrings[clearTextRunIndex].size()
     == MetalVisualizationGeometryLimits::maximumSpectrumControlTextGlyphs);
 static_assert(MetalVisualizationGeometryLimits::maximumGeneratedVertices <= maximumVertexCount);
@@ -1058,6 +1199,9 @@ constexpr float maximumAllowedSpectrumFloor = -36.0F;
 constexpr float minimumAllowedSpectrumCeiling = -24.0F;
 constexpr float maximumAllowedSpectrumCeiling = 12.0F;
 constexpr float minimumSpectrumRange = 24.0F;
+constexpr float minimumLoudnessReferenceLufs = -36.0F;
+constexpr float maximumLoudnessReferenceLufs = -9.0F;
+constexpr float loudnessReferenceStepLufs = 0.5F;
 constexpr std::size_t noDashboardSplitterIndex = dashboardSplitterCount;
 
 DashboardSplitter dashboardSplitterAtIndex(const std::size_t index) noexcept
@@ -1192,6 +1336,51 @@ cachedPeakRmsReadoutTextRuns() noexcept
     return runs;
 }
 
+const std::array<CachedMonospacedTextRun, cachedLoudnessReadoutCount>&
+cachedLoudnessReadoutTextRuns() noexcept
+{
+    // Loudness values preserve finite readings beyond the visual -60..0 LUFS
+    // scale. This bounded table avoids callback-time formatting while covering
+    // analyzer values through its defensive +800 LUFS integration cap.
+    static const auto runs = [] {
+        std::array<CachedMonospacedTextRun, cachedLoudnessReadoutCount> result { };
+
+        for (std::size_t index = 0; index < result.size(); ++index) {
+            const auto tenths = minimumCachedLoudnessReadoutTenths + static_cast<int>(index);
+            const auto absoluteTenths = std::abs(tenths);
+            std::array<char, maximumLoudnessReadoutGlyphs> text { };
+            auto* cursor = text.data();
+            auto* const end = text.data() + text.size();
+
+            if (tenths < 0)
+                *cursor++ = '-';
+            else if (tenths > 0)
+                *cursor++ = '+';
+
+            const auto conversion = std::to_chars(cursor, end, absoluteTenths / 10);
+            jassert(conversion.ec == std::errc { });
+            if (conversion.ec != std::errc { })
+                continue;
+
+            cursor = conversion.ptr;
+            jassert(end - cursor >= 2);
+            if (end - cursor < 2)
+                continue;
+
+            *cursor++ = '.';
+            *cursor++ = static_cast<char>('0' + (absoluteTenths % 10));
+            auto& run = result[index];
+            run.glyphCount = static_cast<std::uint8_t>(cursor - text.data());
+            for (std::size_t glyph = 0; glyph < run.glyphCount; ++glyph)
+                run.atlasIndices[glyph] = atlasIndexForAscii(text[glyph]);
+        }
+
+        return result;
+    }();
+
+    return runs;
+}
+
 const CachedMonospacedTextRun& cachedMinusInfinityTextRun() noexcept
 {
     static const auto run = [] {
@@ -1299,6 +1488,9 @@ struct AtomicRenderTelemetry {
     std::atomic<std::uint64_t> lastStereoSequence { 0 };
     std::atomic<std::uint64_t> stereoPointInstancesPrepared { 0 };
     std::atomic<std::uint64_t> stereoPointDrawCalls { 0 };
+    std::atomic<std::uint64_t> lastLoudnessSequence { 0 };
+    std::atomic<std::uint64_t> loudnessMeasurementCapturedFrameEnd { 0 };
+    std::atomic<std::uint64_t> loudnessIntegratedCapturedFrameEnd { 0 };
 
     std::atomic<std::uint64_t> lastCpuEncodeNanoseconds { 0 };
     std::atomic<std::uint64_t> maximumCpuEncodeNanoseconds { 0 };
@@ -1338,12 +1530,19 @@ struct AtomicRenderTelemetry {
     std::atomic<std::uint32_t> stereoLastPointCount { 0 };
     std::atomic<double> backingScale { 1.0 };
     std::atomic<double> stereoCorrelation { 0.0 };
+    std::atomic<double> loudnessMomentaryLufs { 0.0 };
+    std::atomic<double> loudnessShortTermLufs { 0.0 };
+    std::atomic<double> loudnessIntegratedLufs { 0.0 };
+    std::atomic<double> loudnessReferenceLufs { -23.0 };
 
     std::atomic<bool> metalAvailable { false };
     std::atomic<bool> renderingRequested { false };
     std::atomic<bool> effectivelyRendering { false };
     std::atomic<bool> stereoCorrelationValid { false };
     std::atomic<bool> stereoMono { false };
+    std::atomic<bool> loudnessMomentaryValid { false };
+    std::atomic<bool> loudnessShortTermValid { false };
+    std::atomic<bool> loudnessIntegratedValid { false };
 };
 
 template <typename Integer>
@@ -1451,6 +1650,7 @@ struct VertexBatches {
     VertexRange spectrogramAxis;
     VertexRange peakRms;
     VertexRange stereoGuides;
+    VertexRange loudness;
     VertexRange dashboardSplitters;
     std::array<VertexRange, dashboardPanelCount> text;
 };
@@ -1681,6 +1881,35 @@ SpectrogramRenderSettings unpackSpectrogramSettings(const std::uint32_t packed) 
     return sanitiseSpectrogramSettings({ palette, response, floor, ceiling,
         supportedDurations[std::min(duration, supportedDurations.size() - 1)], mode,
         supportedRates[std::min(rate, supportedRates.size() - 1)] });
+}
+
+LoudnessRenderSettings sanitiseLoudnessSettings(LoudnessRenderSettings settings) noexcept
+{
+    if (!std::isfinite(settings.referenceLufs))
+        settings.referenceLufs = LoudnessRenderSettings { }.referenceLufs;
+
+    settings.referenceLufs = std::clamp(
+        settings.referenceLufs, minimumLoudnessReferenceLufs, maximumLoudnessReferenceLufs);
+    const auto step = std::lround(
+        (settings.referenceLufs - minimumLoudnessReferenceLufs) / loudnessReferenceStepLufs);
+    settings.referenceLufs
+        = minimumLoudnessReferenceLufs + (static_cast<float>(step) * loudnessReferenceStepLufs);
+    return settings;
+}
+
+std::uint32_t packLoudnessSettings(const LoudnessRenderSettings settings) noexcept
+{
+    const auto sanitized = sanitiseLoudnessSettings(settings);
+    return static_cast<std::uint32_t>(std::lround(
+        (sanitized.referenceLufs - minimumLoudnessReferenceLufs) / loudnessReferenceStepLufs));
+}
+
+LoudnessRenderSettings unpackLoudnessSettings(const std::uint32_t packed) noexcept
+{
+    constexpr auto maximumStep = static_cast<std::uint32_t>(
+        (maximumLoudnessReferenceLufs - minimumLoudnessReferenceLufs) / loudnessReferenceStepLufs);
+    return { minimumLoudnessReferenceLufs
+        + (static_cast<float>(std::min(packed, maximumStep)) * loudnessReferenceStepLufs) };
 }
 
 std::uint32_t packDashboardLayoutSplits(DashboardLayoutSplits splits) noexcept
@@ -2095,6 +2324,7 @@ public:
             &publishedTelemetry, callbackTelemetry, std::memory_order_release);
         setSpectrumSettings({ });
         setSpectrogramSettings({ });
+        setLoudnessSettings({ });
         setDashboardLayoutSplits(DashboardLayout::defaultSplits);
         initialiseMetal();
         callbackTelemetry->metalAvailable.store(metalReady, std::memory_order_relaxed);
@@ -2254,6 +2484,19 @@ public:
     [[nodiscard]] SpectrogramRenderSettings getSpectrogramSettings() const noexcept
     {
         return unpackSpectrogramSettings(packedSpectrogramSettings.load(std::memory_order_acquire));
+    }
+
+    void setLoudnessSettings(const LoudnessRenderSettings settings) noexcept
+    {
+        const auto sanitized = sanitiseLoudnessSettings(settings);
+        packedLoudnessSettings.store(packLoudnessSettings(sanitized), std::memory_order_release);
+        loadPublishedTelemetry()->loudnessReferenceLufs.store(
+            sanitized.referenceLufs, std::memory_order_relaxed);
+    }
+
+    [[nodiscard]] LoudnessRenderSettings getLoudnessSettings() const noexcept
+    {
+        return unpackLoudnessSettings(packedLoudnessSettings.load(std::memory_order_acquire));
     }
 
     void setDashboardLayoutSplits(DashboardLayoutSplits splits) noexcept
@@ -2503,6 +2746,24 @@ public:
         return true;
     }
 
+    [[nodiscard]] juce::String loudnessAccessibilityValue() const
+    {
+        const auto telemetry = loadPublishedTelemetry();
+        juce::String result { "Momentary: " };
+        result += formatLoudnessAccessibilityReading(
+            telemetry->loudnessMomentaryLufs.load(std::memory_order_relaxed),
+            telemetry->loudnessMomentaryValid.load(std::memory_order_relaxed));
+        result += "; Short-term: ";
+        result += formatLoudnessAccessibilityReading(
+            telemetry->loudnessShortTermLufs.load(std::memory_order_relaxed),
+            telemetry->loudnessShortTermValid.load(std::memory_order_relaxed));
+        result += "; Integrated: ";
+        result += formatLoudnessAccessibilityReading(
+            telemetry->loudnessIntegratedLufs.load(std::memory_order_relaxed),
+            telemetry->loudnessIntegratedValid.load(std::memory_order_relaxed));
+        return result;
+    }
+
     [[nodiscard]] MetalRenderTelemetry getTelemetry() const noexcept
     {
         const auto telemetry = loadPublishedTelemetry();
@@ -2568,6 +2829,12 @@ public:
             = telemetry->stereoPointInstancesPrepared.load(std::memory_order_relaxed);
         result.stereoPointDrawCalls
             = telemetry->stereoPointDrawCalls.load(std::memory_order_relaxed);
+        result.lastLoudnessSequence
+            = telemetry->lastLoudnessSequence.load(std::memory_order_relaxed);
+        result.loudnessMeasurementCapturedFrameEnd
+            = telemetry->loudnessMeasurementCapturedFrameEnd.load(std::memory_order_relaxed);
+        result.loudnessIntegratedCapturedFrameEnd
+            = telemetry->loudnessIntegratedCapturedFrameEnd.load(std::memory_order_relaxed);
         result.lastCpuEncodeNanoseconds
             = telemetry->lastCpuEncodeNanoseconds.load(std::memory_order_relaxed);
         result.maximumCpuEncodeNanoseconds
@@ -2607,6 +2874,14 @@ public:
             = telemetry->stereoLastPointCount.load(std::memory_order_relaxed);
         result.backingScale = telemetry->backingScale.load(std::memory_order_relaxed);
         result.stereoCorrelation = telemetry->stereoCorrelation.load(std::memory_order_relaxed);
+        result.loudnessMomentaryLufs
+            = telemetry->loudnessMomentaryLufs.load(std::memory_order_relaxed);
+        result.loudnessShortTermLufs
+            = telemetry->loudnessShortTermLufs.load(std::memory_order_relaxed);
+        result.loudnessIntegratedLufs
+            = telemetry->loudnessIntegratedLufs.load(std::memory_order_relaxed);
+        result.loudnessReferenceLufs
+            = telemetry->loudnessReferenceLufs.load(std::memory_order_relaxed);
         result.metalAvailable = telemetry->metalAvailable.load(std::memory_order_relaxed);
         result.renderingRequested = telemetry->renderingRequested.load(std::memory_order_relaxed);
         result.effectivelyRendering
@@ -2614,6 +2889,12 @@ public:
         result.stereoCorrelationValid
             = telemetry->stereoCorrelationValid.load(std::memory_order_relaxed);
         result.stereoMono = telemetry->stereoMono.load(std::memory_order_relaxed);
+        result.loudnessMomentaryValid
+            = telemetry->loudnessMomentaryValid.load(std::memory_order_relaxed);
+        result.loudnessShortTermValid
+            = telemetry->loudnessShortTermValid.load(std::memory_order_relaxed);
+        result.loudnessIntegratedValid
+            = telemetry->loudnessIntegratedValid.load(std::memory_order_relaxed);
         result.resetPending
             = requestedTelemetryEpoch.load(std::memory_order_acquire) != result.epoch;
         return result;
@@ -2724,6 +3005,53 @@ public:
             return false;
 
         source.resetPeakRms();
+        return true;
+    }
+
+    bool tryResetLoudnessAt(const NSPoint point) noexcept
+    {
+        assertMessageThread();
+
+        if (view == nil || isDashboardLayoutEditing() || !std::isfinite(point.x)
+            || !std::isfinite(point.y)) {
+            return false;
+        }
+
+        const auto boundsSize = view.bounds.size;
+        const auto dashboardLayout = DashboardLayout::calculateTileLayout(
+            { 0.0, 0.0, static_cast<double>(boundsSize.width),
+                static_cast<double>(boundsSize.height) },
+            getDashboardLayoutSplits());
+        const auto panel = toRenderRect(
+            dashboardLayout[DashboardPanel::loudness], static_cast<float>(boundsSize.height));
+        const auto panelHeaderHeight
+            = std::min(panel.height(), std::clamp(panel.height() * 0.13F, 18.0F, 26.0F));
+        constexpr auto textScale = 0.78F;
+        const auto readoutWidth
+            = (((static_cast<float>(maximumLoudnessReadoutGlyphs) - 1.0F) * cachedGlyphAdvance)
+                  + cachedGlyphCellWidth)
+            * textScale;
+        const auto layout = calculateLoudnessPanelLayout(panel.width(), panel.height(),
+            panelHeaderHeight, cachedGlyphCellHeight * textScale, readoutWidth);
+        const auto localX = static_cast<float>(point.x) - panel.left;
+        const auto localY = static_cast<float>(point.y) - panel.bottom;
+        if (!layout.resetHitBounds.contains(localX, localY))
+            return false;
+
+        invalidateIntegratedLoudnessForReset();
+        source.resetLoudness();
+        return true;
+    }
+
+    bool performLoudnessResetAction() noexcept
+    {
+        assertMessageThread();
+
+        if (isDashboardLayoutEditing())
+            return false;
+
+        invalidateIntegratedLoudnessForReset();
+        source.resetLoudness();
         return true;
     }
 
@@ -2898,6 +3226,9 @@ public:
 
         const auto spectrumSettings = getSpectrumSettings();
         const auto spectrogramSettings = getSpectrogramSettings();
+        const auto loudnessSettings = getLoudnessSettings();
+        telemetry->loudnessReferenceLufs.store(
+            loudnessSettings.referenceLufs, std::memory_order_relaxed);
         const auto preparedSpectrogramUploads
             = prepareSpectrogramUploads(slot, spectrogramSettings, *telemetry);
         updateInterpolatedDisplayValues(callbackTime);
@@ -2911,8 +3242,8 @@ public:
             slot, boundsSize, dashboardLayout, callbackTime, *telemetry);
 
         auto* vertices = static_cast<MetalVertex*>(slot.vertexBuffer.contents);
-        const auto batches = populateVertices(
-            vertices, boundsSize, dashboardLayout, spectrumSettings, spectrogramSettings);
+        const auto batches = populateVertices(vertices, boundsSize, dashboardLayout,
+            spectrumSettings, spectrogramSettings, loudnessSettings);
 
         auto* descriptor = [MTLRenderPassDescriptor renderPassDescriptor];
         auto* colourAttachment = descriptor.colorAttachments[0];
@@ -3058,6 +3389,16 @@ public:
                 [encoder setRenderPipelineState:pipelineState];
                 [encoder setVertexBuffer:slot.vertexBuffer offset:0 atIndex:0];
             }
+        }
+
+        const auto loudnessScissor = makeScissorRect(dashboardLayout[DashboardPanel::loudness],
+            boundsSize, drawable.texture.width, drawable.texture.height);
+        if (loudnessScissor.width != 0 && loudnessScissor.height != 0
+            && batches.loudness.count != 0) {
+            [encoder setScissorRect:loudnessScissor];
+            [encoder drawPrimitives:MTLPrimitiveTypeTriangle
+                        vertexStart:batches.loudness.start
+                        vertexCount:batches.loudness.count];
         }
 
         if (batches.dashboardSplitters.count != 0) {
@@ -3208,6 +3549,16 @@ public:
     }
 
 private:
+    void invalidateIntegratedLoudnessForReset() noexcept
+    {
+        assertMessageThread();
+        targetFrame.loudnessIntegratedValid = false;
+        loadPublishedTelemetry()->loudnessIntegratedValid.store(false, std::memory_order_relaxed);
+
+        if (view != nil)
+            NSAccessibilityPostNotification(view, NSAccessibilityValueChangedNotification);
+    }
+
     VisualizationDataSource& source;
     AIAudioInsightMetalView* view = nil;
     std::shared_ptr<SharedRenderState> sharedState;
@@ -3240,6 +3591,7 @@ private:
     bool metalReady = false;
     std::atomic<std::uint64_t> packedSpectrumSettings { 0 };
     std::atomic<std::uint32_t> packedSpectrogramSettings { 0 };
+    std::atomic<std::uint32_t> packedLoudnessSettings { 0 };
     std::atomic<bool> spectrogramConfigurationClearPending { false };
     std::atomic<std::uint32_t> packedDashboardLayoutSplits { 0 };
     std::atomic<bool> dashboardLayoutEditing { false };
@@ -3263,6 +3615,7 @@ private:
     std::uint64_t lastSpectrumSequence = 0;
     std::uint64_t lastMeterSequence = 0;
     std::uint64_t lastStereoSequence = 0;
+    std::uint64_t lastLoudnessSequence = 0;
     std::uint64_t lastGeneration = 0;
     std::uint64_t lastFftGeneration = 0;
     bool hasDisplayFrame = false;
@@ -3800,8 +4153,8 @@ private:
         // and meter-readout tables here. Later display callbacks only index
         // already-formatted runs.
         juce::ignoreUnused(cachedFrequencyEndpointTextRuns());
-        juce::ignoreUnused(cachedPeakRmsReadoutTextRuns(), cachedMinusInfinityTextRun(),
-            cachedStereoCorrelationTextRuns(), cachedEmDashTextRun());
+        juce::ignoreUnused(cachedPeakRmsReadoutTextRuns(), cachedLoudnessReadoutTextRuns(),
+            cachedMinusInfinityTextRun(), cachedStereoCorrelationTextRuns(), cachedEmDashTextRun());
 
         [glyphAtlasTexture release];
         glyphAtlasTexture = newTexture;
@@ -3882,6 +4235,24 @@ private:
         destination.stereoCorrelation.store(
             sourceTelemetry.stereoCorrelation.load(std::memory_order_relaxed),
             std::memory_order_relaxed);
+        destination.loudnessMeasurementCapturedFrameEnd.store(
+            sourceTelemetry.loudnessMeasurementCapturedFrameEnd.load(std::memory_order_relaxed),
+            std::memory_order_relaxed);
+        destination.loudnessIntegratedCapturedFrameEnd.store(
+            sourceTelemetry.loudnessIntegratedCapturedFrameEnd.load(std::memory_order_relaxed),
+            std::memory_order_relaxed);
+        destination.loudnessMomentaryLufs.store(
+            sourceTelemetry.loudnessMomentaryLufs.load(std::memory_order_relaxed),
+            std::memory_order_relaxed);
+        destination.loudnessShortTermLufs.store(
+            sourceTelemetry.loudnessShortTermLufs.load(std::memory_order_relaxed),
+            std::memory_order_relaxed);
+        destination.loudnessIntegratedLufs.store(
+            sourceTelemetry.loudnessIntegratedLufs.load(std::memory_order_relaxed),
+            std::memory_order_relaxed);
+        destination.loudnessReferenceLufs.store(
+            sourceTelemetry.loudnessReferenceLufs.load(std::memory_order_relaxed),
+            std::memory_order_relaxed);
         destination.metalAvailable.store(
             sourceTelemetry.metalAvailable.load(std::memory_order_relaxed),
             std::memory_order_relaxed);
@@ -3896,6 +4267,15 @@ private:
             std::memory_order_relaxed);
         destination.stereoMono.store(
             sourceTelemetry.stereoMono.load(std::memory_order_relaxed), std::memory_order_relaxed);
+        destination.loudnessMomentaryValid.store(
+            sourceTelemetry.loudnessMomentaryValid.load(std::memory_order_relaxed),
+            std::memory_order_relaxed);
+        destination.loudnessShortTermValid.store(
+            sourceTelemetry.loudnessShortTermValid.load(std::memory_order_relaxed),
+            std::memory_order_relaxed);
+        destination.loudnessIntegratedValid.store(
+            sourceTelemetry.loudnessIntegratedValid.load(std::memory_order_relaxed),
+            std::memory_order_relaxed);
     }
 
     void resetTelemetryTimingAtCallbackBoundary() noexcept
@@ -4118,6 +4498,7 @@ private:
         lastSpectrumSequence = 0;
         lastMeterSequence = 0;
         lastStereoSequence = 0;
+        lastLoudnessSequence = 0;
         hasDisplayFrame = false;
         stereoSnapshotAcceptedTime = { };
         clearSpectrogramHistory(callbackTelemetry.get());
@@ -4313,9 +4694,11 @@ private:
         const auto fftGenerationChanged = incoming.fftGeneration != lastFftGeneration;
         const auto stereoChanged = !hasDisplayFrame || generationChanged
             || incoming.stereoSequence != lastStereoSequence;
+        const auto loudnessChanged = !hasDisplayFrame || generationChanged
+            || incoming.loudnessSequence != lastLoudnessSequence;
         const auto isNew = !hasDisplayFrame || generationChanged || fftGenerationChanged
             || incoming.spectrumSequence != lastSpectrumSequence
-            || incoming.meterSequence != lastMeterSequence || stereoChanged;
+            || incoming.meterSequence != lastMeterSequence || stereoChanged || loudnessChanged;
 
         if (!isNew)
             return;
@@ -4326,11 +4709,31 @@ private:
         lastSpectrumSequence = incoming.spectrumSequence;
         lastMeterSequence = incoming.meterSequence;
         lastStereoSequence = incoming.stereoSequence;
+        lastLoudnessSequence = incoming.loudnessSequence;
         if (stereoChanged)
             stereoSnapshotAcceptedTime = acceptedTime;
         telemetry.framesWithNewSnapshot.fetch_add(1, std::memory_order_relaxed);
         telemetry.lastSpectrumSequence.store(lastSpectrumSequence, std::memory_order_relaxed);
         telemetry.lastStereoSequence.store(lastStereoSequence, std::memory_order_relaxed);
+        telemetry.lastLoudnessSequence.store(lastLoudnessSequence, std::memory_order_relaxed);
+        if (loudnessChanged) {
+            telemetry.loudnessMeasurementCapturedFrameEnd.store(
+                incoming.loudnessMeasurementCapturedFrameEnd, std::memory_order_relaxed);
+            telemetry.loudnessIntegratedCapturedFrameEnd.store(
+                incoming.loudnessIntegratedCapturedFrameEnd, std::memory_order_relaxed);
+            telemetry.loudnessMomentaryLufs.store(
+                incoming.loudnessMomentaryLufs, std::memory_order_relaxed);
+            telemetry.loudnessShortTermLufs.store(
+                incoming.loudnessShortTermLufs, std::memory_order_relaxed);
+            telemetry.loudnessIntegratedLufs.store(
+                incoming.loudnessIntegratedLufs, std::memory_order_relaxed);
+            telemetry.loudnessMomentaryValid.store(
+                incoming.loudnessMomentaryValid, std::memory_order_relaxed);
+            telemetry.loudnessShortTermValid.store(
+                incoming.loudnessShortTermValid, std::memory_order_relaxed);
+            telemetry.loudnessIntegratedValid.store(
+                incoming.loudnessIntegratedValid, std::memory_order_relaxed);
+        }
 
         if (!hasDisplayFrame || generationChanged || fftGenerationChanged) {
             displayedSpectrum.fill(minimumSpectrumDecibels);
@@ -4382,7 +4785,8 @@ private:
 
     VertexBatches populateVertices(MetalVertex* vertices, CGSize logicalSize,
         const DashboardTileLayout& dashboardLayout, SpectrumRenderSettings settings,
-        const SpectrogramRenderSettings& spectrogramSettings) const noexcept
+        const SpectrogramRenderSettings& spectrogramSettings,
+        const LoudnessRenderSettings& loudnessSettings) const noexcept
     {
         VertexBatches batches;
 
@@ -4593,7 +4997,7 @@ private:
             auto fillColour = placeholderPanelColour;
 
             if (panel == DashboardPanel::spectrum || panel == DashboardPanel::peakRms
-                || panel == DashboardPanel::stereoField)
+                || panel == DashboardPanel::stereoField || panel == DashboardPanel::loudness)
                 fillColour = livePanelColour;
             else if (panel == DashboardPanel::spectrogram)
                 fillColour = spectrogramPanelColour;
@@ -5016,6 +5420,78 @@ private:
         }
 
         batches.stereoGuides.count = cursor - batches.stereoGuides.start;
+        batches.loudness.start = cursor;
+
+        const auto loudnessPanel = toRenderRect(dashboardLayout[DashboardPanel::loudness], height);
+        constexpr auto loudnessTextScale = 0.78F;
+        const auto loudnessTextHeight = cachedGlyphCellHeight * loudnessTextScale;
+        const auto maximumLoudnessReadoutWidth
+            = (((static_cast<float>(maximumLoudnessReadoutGlyphs) - 1.0F) * cachedGlyphAdvance)
+                  + cachedGlyphCellWidth)
+            * loudnessTextScale;
+        const auto loudnessLayout
+            = calculateLoudnessPanelLayout(loudnessPanel.width(), loudnessPanel.height(),
+                headerHeight(loudnessPanel), loudnessTextHeight, maximumLoudnessReadoutWidth);
+        const auto toLoudnessPanelRect = [&](const PeakRmsLogicalRect& bounds) noexcept {
+            return RenderRect { loudnessPanel.left + bounds.left,
+                loudnessPanel.bottom + bounds.bottom, loudnessPanel.left + bounds.right,
+                loudnessPanel.bottom + bounds.top };
+        };
+        const auto loudnessTrack = toLoudnessPanelRect(loudnessLayout.trackBounds);
+        const auto physicalPixelWidth = spectrogramLogicalPixelWidth(density);
+        const auto pixelAlignedHorizontalLine = [&](const float centreY) noexcept {
+            return std::round((centreY - (physicalPixelWidth * 0.5F)) * density) / density;
+        };
+        constexpr auto loudnessTrackColour = simd_float4 { 0.055F, 0.075F, 0.105F, 1.0F };
+        constexpr auto loudnessTrackBorderColour = simd_float4 { 0.20F, 0.27F, 0.36F, 0.90F };
+        constexpr auto loudnessMomentaryColour = simd_float4 { 0.10F, 0.48F, 0.62F, 0.88F };
+        constexpr auto loudnessShortTermColour = simd_float4 { 0.24F, 0.88F, 0.86F, 1.0F };
+        constexpr auto loudnessReferenceColour = simd_float4 { 1.0F, 0.62F, 0.16F, 0.96F };
+        constexpr auto loudnessResetColour = simd_float4 { 0.055F, 0.075F, 0.105F, 1.0F };
+        constexpr auto loudnessResetBorderColour = simd_float4 { 0.20F, 0.27F, 0.36F, 0.90F };
+
+        if (loudnessTrack.width() > 0.0F && loudnessTrack.height() > 0.0F) {
+            appendQuad(loudnessTrack.left, loudnessTrack.bottom, loudnessTrack.right,
+                loudnessTrack.top, loudnessTrackColour);
+            appendBorder(loudnessTrack, 1.0F, loudnessTrackBorderColour);
+
+            const auto momentaryReadout = classifyLoudnessReadout(targetFrame.loudnessMomentaryLufs,
+                hasDisplayFrame && targetFrame.loudnessMomentaryValid);
+            if (momentaryReadout.kind == LoudnessReadout::Kind::lufsTenths
+                && targetFrame.loudnessMomentaryLufs > loudnessMinimumLufs) {
+                const auto fillTop = loudnessTrack.bottom
+                    + (mapLoudnessLufsToUnit(static_cast<float>(targetFrame.loudnessMomentaryLufs))
+                        * loudnessTrack.height());
+                appendQuad(loudnessTrack.left + 1.0F, loudnessTrack.bottom + 1.0F,
+                    loudnessTrack.right - 1.0F, fillTop, loudnessMomentaryColour);
+            }
+
+            const auto shortTermReadout = classifyLoudnessReadout(targetFrame.loudnessShortTermLufs,
+                hasDisplayFrame && targetFrame.loudnessShortTermValid);
+            if (shortTermReadout.kind == LoudnessReadout::Kind::lufsTenths) {
+                const auto centreY = loudnessTrack.bottom
+                    + (mapLoudnessLufsToUnit(static_cast<float>(targetFrame.loudnessShortTermLufs))
+                        * loudnessTrack.height());
+                const auto lineBottom = pixelAlignedHorizontalLine(centreY);
+                appendQuad(loudnessTrack.left - 2.0F, lineBottom, loudnessTrack.right + 2.0F,
+                    lineBottom + physicalPixelWidth, loudnessShortTermColour);
+            }
+
+            const auto referenceY = loudnessTrack.bottom
+                + (mapLoudnessLufsToUnit(loudnessSettings.referenceLufs) * loudnessTrack.height());
+            const auto referenceBottom = pixelAlignedHorizontalLine(referenceY);
+            appendQuad(loudnessTrack.left - 3.0F, referenceBottom, loudnessTrack.right + 3.0F,
+                referenceBottom + physicalPixelWidth, loudnessReferenceColour);
+        }
+
+        if (loudnessLayout.resetVisualBounds.width() > 0.0F) {
+            const auto resetBounds = toLoudnessPanelRect(loudnessLayout.resetVisualBounds);
+            appendQuad(resetBounds.left, resetBounds.bottom, resetBounds.right, resetBounds.top,
+                loudnessResetColour);
+            appendBorder(resetBounds, 1.0F, loudnessResetBorderColour);
+        }
+
+        batches.loudness.count = cursor - batches.loudness.start;
         batches.dashboardSplitters.start = cursor;
 
         if (dashboardLayoutEditing.load(std::memory_order_acquire)) {
@@ -5045,7 +5521,6 @@ private:
 
         constexpr auto titleColour = simd_float4 { 0.72F, 0.79F, 0.88F, 0.94F };
         constexpr auto axisTextColour = simd_float4 { 0.54F, 0.62F, 0.72F, 0.90F };
-        constexpr auto placeholderTextColour = simd_float4 { 0.39F, 0.46F, 0.55F, 0.72F };
 
         for (std::size_t index = 0; index < dashboardPanelCount; ++index) {
             const auto panel = static_cast<DashboardPanel>(index);
@@ -5058,6 +5533,9 @@ private:
             } else if (panel == DashboardPanel::spectrum
                 && spectrumClearLayout.visualBounds.width() > 0.0F) {
                 titleAvailableWidth = std::max(0.0F, spectrumClearLayout.visualBounds.left - 12.0F);
+            } else if (panel == DashboardPanel::loudness
+                && loudnessLayout.resetVisualBounds.width() > 0.0F) {
+                titleAvailableWidth = std::max(0.0F, loudnessLayout.resetVisualBounds.left - 12.0F);
             }
             const auto titleScale = titleRun.width > 0.0F
                 ? std::min(1.0F, titleAvailableWidth / titleRun.width)
@@ -5263,28 +5741,87 @@ private:
                         std::max(stereoScope.bottom + 2.0F, stereoScope.top - monoHeight - 2.0F),
                         monoScale, monoTextColour);
                 }
-            }
+            } else if (panel == DashboardPanel::loudness) {
+                constexpr auto resetTextColour = simd_float4 { 0.58F, 0.69F, 0.80F, 0.96F };
+                constexpr auto momentaryTextColour = simd_float4 { 0.24F, 0.88F, 0.86F, 0.98F };
+                constexpr auto secondaryTextColour = simd_float4 { 0.67F, 0.75F, 0.84F, 0.94F };
 
-            if (panel == DashboardPanel::loudness) {
-                const auto& placeholderRun = cachedFixedTextRuns[placeholderTextRunIndex];
-                const auto placeholderBounds = RenderRect { bounds.left, bounds.bottom,
-                    bounds.right, bounds.top - panelHeaderHeight };
-                const auto availableWidth = std::max(0.0F, placeholderBounds.width() - 12.0F);
-                const auto availableHeight = std::max(0.0F, placeholderBounds.height() - 12.0F);
-                const auto horizontalScale
-                    = placeholderRun.width > 0.0F ? availableWidth / placeholderRun.width : 1.0F;
-                const auto verticalScale
-                    = placeholderRun.height > 0.0F ? availableHeight / placeholderRun.height : 1.0F;
-                const auto placeholderScale
-                    = std::max(0.0F, std::min({ 1.0F, horizontalScale, verticalScale }));
-                const auto placeholderX = placeholderBounds.left
-                    + (placeholderBounds.width() - (placeholderRun.width * placeholderScale))
-                        * 0.5F;
-                const auto placeholderY = placeholderBounds.bottom
-                    + (placeholderBounds.height() - (placeholderRun.height * placeholderScale))
-                        * 0.5F;
-                appendTextRun(placeholderRun, placeholderX, placeholderY, placeholderScale,
-                    placeholderTextColour);
+                if (loudnessLayout.resetVisualBounds.width() > 0.0F) {
+                    const auto resetBounds = toLoudnessPanelRect(loudnessLayout.resetVisualBounds);
+                    const auto& resetRun = cachedFixedTextRuns[loudnessResetTextRunIndex];
+                    const auto resetScale = std::min(0.78F,
+                        std::min(resetBounds.width() / resetRun.width,
+                            resetBounds.height() / resetRun.height));
+                    appendTextRun(resetRun,
+                        resetBounds.left
+                            + ((resetBounds.width() - (resetRun.width * resetScale)) * 0.5F),
+                        resetBounds.bottom
+                            + ((resetBounds.height() - (resetRun.height * resetScale)) * 0.5F),
+                        resetScale, resetTextColour);
+                }
+
+                const auto loudnessReadoutRun =
+                    [](const LoudnessReadout& readout) noexcept -> const CachedMonospacedTextRun& {
+                    switch (readout.kind) {
+                    case LoudnessReadout::Kind::minusInfinity:
+                        return cachedMinusInfinityTextRun();
+                    case LoudnessReadout::Kind::lufsTenths:
+                        return cachedLoudnessReadoutTextRuns()[static_cast<std::size_t>(
+                            readout.lufsTenths - minimumCachedLoudnessReadoutTenths)];
+                    case LoudnessReadout::Kind::emDash:
+                        return cachedEmDashTextRun();
+                    }
+
+                    return cachedEmDashTextRun();
+                };
+                const auto appendLoudnessReadout = [&](const std::size_t labelIndex,
+                                                       const LoudnessReadout& readout,
+                                                       const PeakRmsLogicalRect& localBounds,
+                                                       const simd_float4 colour) noexcept {
+                    if (localBounds.width() <= 0.0F || localBounds.height() <= 0.0F)
+                        return;
+
+                    const auto row = toLoudnessPanelRect(localBounds);
+                    const auto& labelRun = cachedFixedTextRuns[labelIndex];
+                    const auto& valueRun = loudnessReadoutRun(readout);
+                    const auto valueUnscaledWidth = monospacedTextRunWidth(valueRun);
+                    constexpr auto unscaledGap = 4.0F / loudnessTextScale;
+                    const auto unscaledWidth = labelRun.width + unscaledGap + valueUnscaledWidth;
+                    const auto rowScale = std::min(loudnessTextScale,
+                        unscaledWidth > 0.0F ? row.width() / unscaledWidth : 0.0F);
+                    if (rowScale <= 0.0F)
+                        return;
+
+                    const auto gap = unscaledGap * rowScale;
+                    const auto labelWidth = labelRun.width * rowScale;
+                    const auto valueWidth = valueUnscaledWidth * rowScale;
+                    const auto groupWidth = labelWidth + gap + valueWidth;
+                    const auto originX = row.left + ((row.width() - groupWidth) * 0.5F);
+                    const auto textHeight = cachedGlyphCellHeight * rowScale;
+                    const auto originY
+                        = row.bottom + std::max(0.0F, (row.height() - textHeight) * 0.5F);
+                    appendTextRun(labelRun, originX, originY, rowScale, colour);
+                    appendMonospacedTextRun(
+                        valueRun, originX + labelWidth + gap, originY, rowScale, colour);
+                };
+
+                if (loudnessLayout.showMomentaryText) {
+                    appendLoudnessReadout(monoChannelTextRunIndex,
+                        classifyLoudnessReadout(targetFrame.loudnessMomentaryLufs,
+                            hasDisplayFrame && targetFrame.loudnessMomentaryValid),
+                        loudnessLayout.momentaryTextBounds, momentaryTextColour);
+                }
+
+                if (loudnessLayout.showSecondaryText) {
+                    appendLoudnessReadout(shortTermTextRunIndex,
+                        classifyLoudnessReadout(targetFrame.loudnessShortTermLufs,
+                            hasDisplayFrame && targetFrame.loudnessShortTermValid),
+                        loudnessLayout.shortTermTextBounds, secondaryTextColour);
+                    appendLoudnessReadout(integratedTextRunIndex,
+                        classifyLoudnessReadout(targetFrame.loudnessIntegratedLufs,
+                            hasDisplayFrame && targetFrame.loudnessIntegratedValid),
+                        loudnessLayout.integratedTextBounds, secondaryTextColour);
+                }
             }
 
             batches.text[index].count = cursor - batches.text[index].start;
@@ -5304,6 +5841,11 @@ NSString* makeDashboardAccessibilityString(const std::string_view value)
     return [[[NSString alloc] initWithBytes:value.data()
                                      length:value.size()
                                    encoding:NSUTF8StringEncoding] autorelease];
+}
+
+NSString* makeDashboardAccessibilityString(const juce::String& value)
+{
+    return value.isEmpty() ? @"" : [NSString stringWithUTF8String:value.toRawUTF8()];
 }
 } // namespace
 
@@ -5455,7 +5997,8 @@ NSString* makeDashboardAccessibilityString(const std::string_view value)
     self.accessibilityRole = NSAccessibilityGroupRole;
     self.accessibilityLabel = @"Audio Insight analyzer dashboard";
     self.accessibilityHelp = @"Contains Spectrum, Peak/RMS, Spectrogram, and Stereo field with "
-                             @"correlation visualizations, plus an unfinished Loudness panel.";
+                             @"correlation visualizations, plus live Momentary, Short-term, and "
+                             @"Integrated Loudness.";
     auto* clearAction = [[NSAccessibilityCustomAction alloc]
         initWithName:@"Clear Peak/RMS holds and OVER"
               target:self
@@ -5464,7 +6007,12 @@ NSString* makeDashboardAccessibilityString(const std::string_view value)
         initWithName:@"Clear Spectrum averaging and peak holds"
               target:self
             selector:@selector(performSpectrumClearAccessibilityAction)];
-    self.accessibilityCustomActions = @[ spectrumClearAction, clearAction ];
+    auto* loudnessResetAction = [[NSAccessibilityCustomAction alloc]
+        initWithName:@"Reset loudness integration"
+              target:self
+            selector:@selector(performLoudnessResetAccessibilityAction)];
+    self.accessibilityCustomActions = @[ spectrumClearAction, clearAction, loudnessResetAction ];
+    [loudnessResetAction release];
     [spectrumClearAction release];
     [clearAction release];
 
@@ -5537,8 +6085,10 @@ NSString* makeDashboardAccessibilityString(const std::string_view value)
             return;
         }
 
-        if (renderBackend->tryClearSpectrumAt(point) || renderBackend->tryClearPeakRmsAt(point))
+        if (renderBackend->tryClearSpectrumAt(point) || renderBackend->tryClearPeakRmsAt(point)
+            || renderBackend->tryResetLoudnessAt(point)) {
             return;
+        }
     }
 
     [super mouseDown:event];
@@ -5597,6 +6147,13 @@ NSString* makeDashboardAccessibilityString(const std::string_view value)
 - (NSArray*)accessibilityChildren
 {
     return [self isDashboardLayoutEditing] ? dashboardSplitterAccessibilityElements : @[];
+}
+
+- (id)accessibilityValue
+{
+    return renderBackend != nullptr
+        ? makeDashboardAccessibilityString(renderBackend->loudnessAccessibilityValue())
+        : nil;
 }
 
 - (NSArray*)accessibilityVisibleChildren
@@ -5781,6 +6338,11 @@ NSString* makeDashboardAccessibilityString(const std::string_view value)
 - (BOOL)performSpectrumClearAccessibilityAction
 {
     return renderBackend != nullptr && renderBackend->performSpectrumClearAction();
+}
+
+- (BOOL)performLoudnessResetAccessibilityAction
+{
+    return renderBackend != nullptr && renderBackend->performLoudnessResetAction();
 }
 
 - (void)setDisplayLinkPaused:(BOOL)shouldBePaused
@@ -5968,6 +6530,16 @@ void MetalVisualization::setSpectrogramSettings(SpectrogramRenderSettings settin
 SpectrogramRenderSettings MetalVisualization::getSpectrogramSettings() const noexcept
 {
     return impl->backend->getSpectrogramSettings();
+}
+
+void MetalVisualization::setLoudnessSettings(LoudnessRenderSettings settings) noexcept
+{
+    impl->backend->setLoudnessSettings(settings);
+}
+
+LoudnessRenderSettings MetalVisualization::getLoudnessSettings() const noexcept
+{
+    return impl->backend->getLoudnessSettings();
 }
 
 void MetalVisualization::setDashboardLayoutSplits(DashboardLayoutSplits splits) noexcept
