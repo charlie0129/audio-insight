@@ -42,6 +42,10 @@ endif()
 
 add_subdirectory("${AUDIO_INSIGHT_JUCE_SOURCE_DIR}" "${CMAKE_BINARY_DIR}/JUCE")
 
+find_library(AUDIO_INSIGHT_METAL_FRAMEWORK Metal REQUIRED)
+find_library(AUDIO_INSIGHT_METALKIT_FRAMEWORK MetalKit REQUIRED)
+find_library(AUDIO_INSIGHT_QUARTZCORE_FRAMEWORK QuartzCore REQUIRED)
+
 juce_add_plugin(AudioInsight
     VERSION "${PROJECT_VERSION}"
     COMPANY_NAME "charlie0129"
@@ -80,6 +84,8 @@ target_sources(AudioInsight
         src/core/VisualizationFrame.h
         src/plugin/PluginProcessor.cpp
         src/plugin/PluginProcessor.h
+        src/ui/MetalVisualization.h
+        src/ui/MetalVisualization.mm
 )
 
 target_include_directories(AudioInsight PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/src")
@@ -96,9 +102,11 @@ target_compile_definitions(AudioInsight
 target_link_libraries(AudioInsight
     PRIVATE
         juce::juce_audio_processors
-        juce::juce_audio_utils
         juce::juce_dsp
         juce::juce_gui_extra
+        ${AUDIO_INSIGHT_METAL_FRAMEWORK}
+        ${AUDIO_INSIGHT_METALKIT_FRAMEWORK}
+        ${AUDIO_INSIGHT_QUARTZCORE_FRAMEWORK}
     PUBLIC
         juce::juce_recommended_config_flags
         juce::juce_recommended_lto_flags
@@ -120,6 +128,8 @@ source_group(TREE "${CMAKE_CURRENT_SOURCE_DIR}" FILES
     src/core/VisualizationFrame.h
     src/plugin/PluginProcessor.cpp
     src/plugin/PluginProcessor.h
+    src/ui/MetalVisualization.h
+    src/ui/MetalVisualization.mm
 )
 
 if(BUILD_TESTING)
@@ -145,6 +155,8 @@ if(BUILD_TESTING)
             src/core/VisualizationFrame.h
             src/plugin/PluginProcessor.cpp
             src/plugin/PluginProcessor.h
+            src/ui/MetalVisualization.h
+            src/ui/MetalVisualization.mm
             tests/AnalysisCoordinatorTests.cpp
             tests/AnalysisCoreTests.cpp
             tests/PluginProcessorTests.cpp
@@ -168,9 +180,11 @@ if(BUILD_TESTING)
     target_link_libraries(AudioInsightTests
         PRIVATE
             juce::juce_audio_processors
-            juce::juce_audio_utils
             juce::juce_dsp
             juce::juce_gui_extra
+            ${AUDIO_INSIGHT_METAL_FRAMEWORK}
+            ${AUDIO_INSIGHT_METALKIT_FRAMEWORK}
+            ${AUDIO_INSIGHT_QUARTZCORE_FRAMEWORK}
         PUBLIC
             juce::juce_recommended_config_flags
             juce::juce_recommended_warning_flags
@@ -193,6 +207,8 @@ if(BUILD_TESTING)
         src/core/VisualizationFrame.h
         src/plugin/PluginProcessor.cpp
         src/plugin/PluginProcessor.h
+        src/ui/MetalVisualization.h
+        src/ui/MetalVisualization.mm
         tests/AnalysisCoordinatorTests.cpp
         tests/AnalysisCoreTests.cpp
         tests/PluginProcessorTests.cpp

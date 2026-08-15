@@ -31,13 +31,13 @@ an incidental result of analysis.
 | Build system | Use CMake and generate an Xcode project for initial macOS development. Normal configuration does not download dependencies implicitly. |
 | License | License project-owned code as AGPL-3.0-or-later and use JUCE under its upstream AGPLv3 option. Preserve all third-party notices. |
 | Dependencies | Pin JUCE as a Git submodule rather than vendoring its source in this repository or downloading it implicitly during CMake configure. |
-| Graphics | Use a native Metal renderer, hosted in a MetalKit view inside the JUCE editor. Do not base the main visualization surface on JUCE timer-driven repainting or deprecated macOS OpenGL. |
+| Graphics | Use a native Metal renderer, hosted in a MetalKit view inside the JUCE editor. On the initial macOS baseline, drive its Metal layer with `CAMetalDisplayLink` rather than JUCE repaint timers or MetalKit's internal timer. Do not use deprecated macOS OpenGL. |
 | Signal analysis | Initially use CPU analysis and Apple's Accelerate/vDSP where useful. GPU compute is deferred until profiling demonstrates a benefit. |
 | Real-time handoff | The audio callback writes only to bounded, non-blocking data structures. Analysis and rendering never make the audio thread wait. |
 | Overflow policy | Prefer current visual data: coalesce or discard the oldest unclaimed analysis input, detect discontinuities by sequence number, and reset temporal analysis state across a gap. Never overwrite a slot being read or delay audio. |
 | Analysis scheduling | Do not create one thread per visualization. Each instance has a logical coordinator, not a dedicated thread, and submits fairly to a process-wide pool initially bounded to two workers. |
 | Render handoff | Renderers consume stable, immutable snapshots rather than mutable analysis working memory. |
-| Display timing | Pace frames from the active display's refresh cycle, with smooth 60 Hz and 120 Hz/ProMotion behavior where the host and display permit it. |
+| Display timing | Pace frames from the active display's refresh cycle, with smooth 60 Hz and 120 Hz/ProMotion behavior where the host and display permit it. Measure the cadence and deadlines actually granted by the display-link update rather than inferring them from the screen's advertised maximum refresh rate. |
 | DPI support | Treat layout units and render pixels separately and support both regular-density and Retina displays, including live movement between them. |
 | Editor lifecycle | Stop sample capture, analysis, history, display-link activity, and Metal submission when the editor is closed, hidden, or occluded beyond a short debounce. Reopening starts with fresh analysis state. |
 | First usable release | Show a large real-time FFT spectrum with compact stereo sample-peak/RMS meters in one resizable layout. Defer history-based and stereo-field views. |
@@ -206,8 +206,16 @@ release does not attempt to reconstruct the missing interval.
 ### Metal rendering
 
 The primary editor surface will be a custom Metal renderer embedded through a
-native MetalKit view. The rendering toolbox should favor simple,
-predictable GPU operations:
+native MetalKit view. On the macOS 15 development baseline, the MetalKit view's
+internal drawing loop stays paused and a `CAMetalDisplayLink` attached to its
+`CAMetalLayer` supplies each drawable plus its target and target-presentation
+timestamps. This makes callback delay, CPU commit misses, GPU deadline misses,
+and actual presentation separate measurements instead of guessing from
+`NSScreen.maximumFramesPerSecond`. Because `CAMetalDisplayLink` requires macOS
+14, lowering the deployment target below macOS 14 will require a separately
+validated display-link fallback.
+
+The rendering toolbox should favor simple, predictable GPU operations:
 
 - line or triangle geometry for plots and scopes;
 - instanced geometry for repeated meter elements;
@@ -440,7 +448,8 @@ order of visualizations.
   reference machine, while preserving a path to older macOS and `x86_64` later.
 - Chose AUv2 and VST3 initially; deferred AUv3 because of its container/signing
   complexity and uncertain SoundSource support.
-- Chose native Metal rendering with display-synchronized frame pacing.
+- Chose native Metal rendering with `CAMetalDisplayLink` frame pacing and actual
+  presentation-deadline telemetry on the initial macOS baseline.
 - Required regular-density, Retina, and live cross-display scale handling.
 - Chose CPU/vDSP analysis initially and GPU rendering, with rates decoupled.
 - Rejected per-visualization threads; chose per-instance logical coordinators on
