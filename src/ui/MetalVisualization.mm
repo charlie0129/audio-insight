@@ -14,6 +14,7 @@
 #include <algorithm>
 #include <array>
 #include <atomic>
+#include <charconv>
 #include <chrono>
 #include <cmath>
 #include <cstddef>
@@ -44,11 +45,277 @@ class MetalRenderBackend;
 @end
 
 namespace audio_insight::detail {
+float mapFrequencyToUnit(const FrequencyAxisMapping& mapping, const float frequencyHz) noexcept
+{
+    if (!std::isfinite(mapping.minimumFrequencyHz) || !std::isfinite(mapping.maximumFrequencyHz)
+        || mapping.minimumFrequencyHz <= 0.0F
+        || mapping.maximumFrequencyHz <= mapping.minimumFrequencyHz) {
+        return 0.0F;
+    }
+
+    const auto frequency
+        = std::clamp(std::isfinite(frequencyHz) ? frequencyHz : mapping.minimumFrequencyHz,
+            mapping.minimumFrequencyHz, mapping.maximumFrequencyHz);
+    const auto spacing
+        = std::clamp(std::isfinite(mapping.spacing) ? mapping.spacing : 1.0F, 0.0F, 1.0F);
+    const auto linear = (frequency - mapping.minimumFrequencyHz)
+        / (mapping.maximumFrequencyHz - mapping.minimumFrequencyHz);
+    const auto logarithmic = std::log(frequency / mapping.minimumFrequencyHz)
+        / std::log(mapping.maximumFrequencyHz / mapping.minimumFrequencyHz);
+    return std::clamp(((1.0F - spacing) * linear) + (spacing * logarithmic), 0.0F, 1.0F);
+}
+
+std::size_t formatFrequencyAxisLabel(
+    const float frequencyHz, std::array<char, frequencyAxisLabelStorage>& destination) noexcept
+{
+    destination.fill('\0');
+
+    if (!std::isfinite(frequencyHz) || frequencyHz < 0.0F
+        || frequencyHz > frequencyAxisTickCandidates.back()) {
+        return 0;
+    }
+
+    const auto roundedFrequency = static_cast<int>(
+        std::lround(std::clamp(frequencyHz, 0.0F, frequencyAxisTickCandidates.back())));
+    auto* cursor = destination.data();
+    auto* const end = destination.data() + maximumFrequencyAxisLabelGlyphs;
+    const auto appendCharacter = [&](const char character) noexcept {
+        if (cursor >= end)
+            return false;
+
+        *cursor++ = character;
+        return true;
+    };
+    const auto appendLiteral = [&](const std::string_view literal) noexcept {
+        for (const auto character : literal) {
+            if (!appendCharacter(character))
+                return false;
+        }
+
+        return true;
+    };
+
+    if (roundedFrequency < 1'000) {
+        const auto conversion = std::to_chars(cursor, end, roundedFrequency);
+        if (conversion.ec != std::errc { })
+            return 0;
+
+        cursor = conversion.ptr;
+        if (!appendLiteral(" Hz"))
+            return 0;
+    } else {
+        const auto kilohertz = roundedFrequency / 1'000;
+        auto remainder = roundedFrequency % 1'000;
+        const auto conversion = std::to_chars(cursor, end, kilohertz);
+        if (conversion.ec != std::errc { })
+            return 0;
+
+        cursor = conversion.ptr;
+        if (remainder != 0) {
+            if (!appendCharacter('.'))
+                return 0;
+
+            const std::array<char, 3> fractionalDigits {
+                static_cast<char>('0' + (remainder / 100)),
+                static_cast<char>('0' + ((remainder / 10) % 10)),
+                static_cast<char>('0' + (remainder % 10)),
+            };
+            auto fractionalCount = fractionalDigits.size();
+            while (fractionalCount > 0 && fractionalDigits[fractionalCount - 1] == '0')
+                --fractionalCount;
+
+            for (std::size_t index = 0; index < fractionalCount; ++index) {
+                if (!appendCharacter(fractionalDigits[index]))
+                    return 0;
+            }
+        }
+
+        if (!appendLiteral(" kHz"))
+            return 0;
+    }
+
+    *cursor = '\0';
+    return static_cast<std::size_t>(cursor - destination.data());
+}
+
+FrequencyAxisTickSelection selectFrequencyAxisTicks(const FrequencyAxisMapping& mapping,
+    const float axisLength, const std::array<float, frequencyAxisTickCandidateCount>& labelExtents,
+    const float upperEndpointLabelExtent, const float minimumGap) noexcept
+{
+    FrequencyAxisTickSelection result;
+
+    if (!std::isfinite(axisLength) || axisLength <= 0.0F
+        || !std::isfinite(mapping.minimumFrequencyHz) || !std::isfinite(mapping.maximumFrequencyHz)
+        || mapping.maximumFrequencyHz <= mapping.minimumFrequencyHz) {
+        return result;
+    }
+
+    const auto safeGap = std::max(0.0F, std::isfinite(minimumGap) ? minimumGap : 0.0F);
+    struct Candidate final {
+        float frequencyHz = 0.0F;
+        float intervalStart = 0.0F;
+        float intervalEnd = 0.0F;
+        std::size_t candidateIndex = frequencyAxisTickCandidateCount;
+        bool usesUpperEndpointLabel = false;
+        bool selected = false;
+    };
+    std::array<Candidate, maximumFrequencyAxisTickCount> candidates { };
+    std::size_t candidateCount = 0;
+
+    const auto appendCandidate
+        = [&](const float frequency, const float extent, const std::size_t candidateIndex,
+              const bool usesUpperEndpointLabel) noexcept {
+              if (candidateCount >= candidates.size() || !std::isfinite(extent) || extent <= 0.0F
+                  || extent > axisLength) {
+                  return;
+              }
+
+              const auto centre = mapFrequencyToUnit(mapping, frequency) * axisLength;
+              const auto start = std::clamp(centre - (extent * 0.5F), 0.0F, axisLength - extent);
+              candidates[candidateCount++] = {
+                  frequency,
+                  start,
+                  start + extent,
+                  candidateIndex,
+                  usesUpperEndpointLabel,
+                  false,
+              };
+          };
+
+    for (std::size_t index = 0; index < frequencyAxisTickCandidates.size(); ++index) {
+        const auto frequency = frequencyAxisTickCandidates[index];
+        if (frequency < mapping.minimumFrequencyHz || frequency > mapping.maximumFrequencyHz)
+            continue;
+
+        appendCandidate(frequency, labelExtents[index], index, false);
+    }
+
+    const auto lastCandidateMatchesEndpoint = candidateCount != 0
+        && std::abs(candidates[candidateCount - 1].frequencyHz - mapping.maximumFrequencyHz)
+            <= std::max(0.01F, mapping.maximumFrequencyHz * 0.000001F);
+    if (!lastCandidateMatchesEndpoint) {
+        appendCandidate(mapping.maximumFrequencyHz, upperEndpointLabelExtent,
+            frequencyAxisTickCandidateCount, true);
+    }
+
+    const auto trySelect = [&](const std::size_t candidate) noexcept {
+        if (candidate >= candidateCount || candidates[candidate].selected)
+            return;
+
+        for (std::size_t selected = 0; selected < candidateCount; ++selected) {
+            if (!candidates[selected].selected)
+                continue;
+
+            const auto separated
+                = candidates[candidate].intervalEnd + safeGap <= candidates[selected].intervalStart
+                || candidates[selected].intervalEnd + safeGap
+                    <= candidates[candidate].intervalStart;
+            if (!separated)
+                return;
+        }
+
+        candidates[candidate].selected = true;
+    };
+
+    if (candidateCount == 0)
+        return result;
+
+    trySelect(0);
+    trySelect(candidateCount - 1);
+
+    // Prefer decade labels before the remaining 2x and 5x multiples. Endpoints
+    // above were already reserved, so narrow panels retain useful anchors at
+    // both ends rather than allowing a low-frequency greedy pass to crowd out
+    // the upper scale.
+    constexpr std::array<std::size_t, frequencyAxisTickCandidateCount> priority {
+        2,
+        5,
+        8,
+        3,
+        6,
+        9,
+        0,
+        1,
+        4,
+        7,
+    };
+    for (const auto candidateIndex : priority) {
+        for (std::size_t candidate = 0; candidate < candidateCount; ++candidate) {
+            if (candidates[candidate].candidateIndex == candidateIndex)
+                trySelect(candidate);
+        }
+    }
+
+    for (std::size_t candidate = 0; candidate < candidateCount; ++candidate) {
+        if (!candidates[candidate].selected)
+            continue;
+
+        result.ticks[result.count++] = { candidates[candidate].frequencyHz,
+            candidates[candidate].candidateIndex, candidates[candidate].usesUpperEndpointLabel };
+    }
+
+    return result;
+}
+
+int chooseSpectrumDecibelTickStep(
+    const float floorDecibels, const float ceilingDecibels, const float axisLength) noexcept
+{
+    if (!std::isfinite(floorDecibels) || !std::isfinite(ceilingDecibels)
+        || ceilingDecibels <= floorDecibels || !std::isfinite(axisLength) || axisLength <= 0.0F) {
+        return spectrumDecibelTickSteps.back();
+    }
+
+    const auto span = ceilingDecibels - floorDecibels;
+    for (const auto step : spectrumDecibelTickSteps) {
+        if ((axisLength * static_cast<float>(step) / span) >= minimumSpectrumDecibelLabelSpacing) {
+            return step;
+        }
+    }
+
+    return spectrumDecibelTickSteps.back();
+}
+
+SpectrumDecibelTicks makeSpectrumDecibelTicks(
+    const float floorDecibels, const float ceilingDecibels, const float axisLength) noexcept
+{
+    SpectrumDecibelTicks result;
+
+    if (!std::isfinite(floorDecibels) || !std::isfinite(ceilingDecibels)
+        || !std::isfinite(axisLength) || axisLength <= 0.0F) {
+        return result;
+    }
+
+    const auto floor = std::clamp(floorDecibels, static_cast<float>(minimumCachedDecibelTick),
+        static_cast<float>(maximumCachedDecibelTick));
+    const auto ceiling = std::clamp(ceilingDecibels, static_cast<float>(minimumCachedDecibelTick),
+        static_cast<float>(maximumCachedDecibelTick));
+
+    if (ceiling <= floor)
+        return result;
+
+    result.candidateStep = chooseSpectrumDecibelTickStep(floor, ceiling, axisLength);
+    const auto rawSpacing
+        = axisLength * static_cast<float>(result.candidateStep) / (ceiling - floor);
+    const auto labelStride = rawSpacing > 0.0F
+        ? std::max(1, static_cast<int>(std::ceil(minimumSpectrumDecibelLabelSpacing / rawSpacing)))
+        : 1;
+    result.displayedStep = result.candidateStep * labelStride;
+    auto decibels = static_cast<int>(std::ceil(floor / static_cast<float>(result.displayedStep)))
+        * result.displayedStep;
+
+    while (decibels <= ceiling && result.count < result.values.size()) {
+        result.values[result.count++] = decibels;
+        decibels += result.displayedStep;
+    }
+
+    return result;
+}
+
 namespace {
 using Clock = std::chrono::steady_clock;
 
 constexpr std::size_t renderBufferCount = 3;
-constexpr std::size_t maximumVertexCount = 8'192;
+constexpr std::size_t maximumVertexCount = MetalVisualizationGeometryLimits::vertexCapacity;
 constexpr std::size_t printableAsciiFirst = 32;
 constexpr std::size_t printableAsciiLast = 126;
 constexpr std::size_t printableAsciiCount = printableAsciiLast - printableAsciiFirst + 1;
@@ -56,37 +323,41 @@ constexpr std::size_t glyphAtlasColumns = 16;
 constexpr std::size_t glyphAtlasRows
     = (printableAsciiCount + glyphAtlasColumns - 1) / glyphAtlasColumns;
 constexpr std::size_t maximumCachedTextGlyphs = 24;
-constexpr std::size_t cachedTextRunCount = 6;
+constexpr std::size_t cachedFixedTextRunCount = 6;
 
-constexpr std::array<std::string_view, cachedTextRunCount> cachedTextStrings { "Spectrum",
+constexpr std::array<std::string_view, cachedFixedTextRunCount> cachedFixedTextStrings { "Spectrum",
     "Peak / RMS", "Spectrogram", "Stereo / Correlation", "Loudness", "Not yet implemented" };
+
+constexpr std::array<std::string_view, frequencyAxisTickCandidateCount>
+    cachedFrequencyAxisTextStrings { "20 Hz", "50 Hz", "100 Hz", "200 Hz", "500 Hz", "1 kHz",
+        "2 kHz", "5 kHz", "10 kHz", "20 kHz" };
 
 constexpr std::array<std::size_t, dashboardPanelCount> panelTitleTextRunIndices { 0, 1, 2, 3, 4 };
 constexpr std::size_t placeholderTextRunIndex = 5;
 
-// The fixed capacity covers five filled/bordered/header-divided tiles, every
-// accepted grid line, the maximum FFT trace, both live meter channels, and all
-// cached tile labels. Keep this proof beside the allocation so a future geometry
-// builder cannot quietly rely on the bounds checks to truncate a frame.
-constexpr std::size_t maximumShellVertices = dashboardPanelCount * 36;
-constexpr std::size_t maximumGridVertices = (10 + 16) * 6;
-constexpr std::size_t maximumSpectrumVertices = 2 * spectrumBinCount;
-constexpr std::size_t maximumMeterVertices = 2 * 3 * 6;
-constexpr std::size_t maximumTextGlyphs = [] {
+// The fixed capacity covers five filled/bordered/header-divided tiles, both
+// numeric frequency axes, every possible decibel tick, the maximum FFT trace,
+// both live meter channels, and every cached text run. Keep this proof beside
+// the allocation so a future builder cannot silently truncate a frame.
+constexpr std::size_t fixedTextGlyphCount = [] {
     std::size_t glyphCount = 0;
 
     for (const auto titleIndex : panelTitleTextRunIndices)
-        glyphCount += cachedTextStrings[titleIndex].size();
+        glyphCount += cachedFixedTextStrings[titleIndex].size();
 
     constexpr auto placeholderPanelCount = dashboardPanelCount - 2;
-    return glyphCount + (placeholderPanelCount * cachedTextStrings[placeholderTextRunIndex].size());
+    return glyphCount
+        + (placeholderPanelCount * cachedFixedTextStrings[placeholderTextRunIndex].size());
 }();
-constexpr std::size_t maximumTextVertices = maximumTextGlyphs * 6;
-static_assert(maximumShellVertices + maximumGridVertices + maximumSpectrumVertices
-        + maximumMeterVertices + maximumTextVertices
-    <= maximumVertexCount);
+static_assert(fixedTextGlyphCount == MetalVisualizationGeometryLimits::maximumFixedTextGlyphs);
+static_assert(MetalVisualizationGeometryLimits::maximumGeneratedVertices <= maximumVertexCount);
 static_assert([] {
-    for (const auto text : cachedTextStrings) {
+    for (const auto text : cachedFixedTextStrings) {
+        if (text.size() > maximumCachedTextGlyphs)
+            return false;
+    }
+
+    for (const auto text : cachedFrequencyAxisTextStrings) {
         if (text.size() > maximumCachedTextGlyphs)
             return false;
     }
@@ -98,9 +369,11 @@ constexpr float minimumSpectrumFrequency = 20.0F;
 constexpr float maximumSpectrumFrequency = 20'000.0F;
 constexpr float minimumMeterDecibels = -60.0F;
 constexpr float maximumMeterDecibels = 3.0F;
-constexpr float minimumAllowedSpectrumFloor = -160.0F;
-constexpr float maximumAllowedSpectrumCeiling = 24.0F;
-constexpr float minimumSpectrumRange = 6.0F;
+constexpr float minimumAllowedSpectrumFloor = -180.0F;
+constexpr float maximumAllowedSpectrumFloor = -36.0F;
+constexpr float minimumAllowedSpectrumCeiling = -24.0F;
+constexpr float maximumAllowedSpectrumCeiling = 12.0F;
+constexpr float minimumSpectrumRange = 24.0F;
 
 struct MetalVertex {
     simd_float2 position;
@@ -134,6 +407,41 @@ struct CachedTextRun {
     float width = 0.0F;
     float height = 0.0F;
 };
+
+struct CachedMonospacedTextRun {
+    std::array<std::uint8_t, maximumFrequencyAxisLabelGlyphs> atlasIndices { };
+    std::uint8_t glyphCount = 0;
+};
+
+const std::array<CachedMonospacedTextRun, 20'001>& cachedFrequencyEndpointTextRuns() noexcept
+{
+    // This density-independent table is built once during the first glyph-atlas
+    // initialization, never lazily from a display callback. It makes every
+    // integer-Hz upper endpoint through 20 kHz available without per-instance
+    // strings or callback-time formatting.
+    static const auto runs = [] {
+        std::array<CachedMonospacedTextRun, 20'001> result { };
+
+        for (std::size_t frequency = 0; frequency < result.size(); ++frequency) {
+            std::array<char, frequencyAxisLabelStorage> label { };
+            const auto labelLength = formatFrequencyAxisLabel(static_cast<float>(frequency), label);
+            auto& run = result[frequency];
+            run.glyphCount = static_cast<std::uint8_t>(labelLength);
+
+            for (std::size_t index = 0; index < labelLength; ++index) {
+                const auto character = static_cast<unsigned char>(label[index]);
+                run.atlasIndices[index] = static_cast<std::uint8_t>(
+                    character >= printableAsciiFirst && character <= printableAsciiLast
+                        ? character - printableAsciiFirst
+                        : static_cast<unsigned char>('?' - printableAsciiFirst));
+            }
+        }
+
+        return result;
+    }();
+
+    return runs;
+}
 
 static_assert(std::atomic<std::uint64_t>::is_always_lock_free);
 static_assert(std::atomic<std::uint32_t>::is_always_lock_free);
@@ -301,6 +609,7 @@ struct VertexBatches {
     VertexRange shell;
     VertexRange spectrumGrid;
     VertexRange spectrum;
+    VertexRange spectrogramAxis;
     VertexRange peakRms;
     std::array<VertexRange, dashboardPanelCount> text;
 };
@@ -338,11 +647,17 @@ SpectrumRenderSettings sanitiseSpectrumSettings(SpectrumRenderSettings settings)
     if (!std::isfinite(settings.smoothing))
         settings.smoothing = SpectrumRenderSettings { }.smoothing;
 
-    settings.floorDecibels = std::clamp(settings.floorDecibels, minimumAllowedSpectrumFloor,
-        maximumAllowedSpectrumCeiling - minimumSpectrumRange);
-    settings.ceilingDecibels = std::clamp(settings.ceilingDecibels,
-        settings.floorDecibels + minimumSpectrumRange, maximumAllowedSpectrumCeiling);
+    if (!std::isfinite(settings.frequencySpacing))
+        settings.frequencySpacing = SpectrumRenderSettings { }.frequencySpacing;
+
+    settings.floorDecibels = std::clamp(
+        settings.floorDecibels, minimumAllowedSpectrumFloor, maximumAllowedSpectrumFloor);
+    settings.ceilingDecibels = std::clamp(
+        settings.ceilingDecibels, minimumAllowedSpectrumCeiling, maximumAllowedSpectrumCeiling);
+    if (settings.ceilingDecibels - settings.floorDecibels < minimumSpectrumRange)
+        settings.floorDecibels = settings.ceilingDecibels - minimumSpectrumRange;
     settings.smoothing = std::clamp(settings.smoothing, 0.0F, 1.0F);
+    settings.frequencySpacing = std::clamp(settings.frequencySpacing, 0.0F, 1.0F);
     return settings;
 }
 
@@ -355,10 +670,13 @@ std::uint64_t packSpectrumSettings(SpectrumRenderSettings settings) noexcept
         std::lround((settings.ceilingDecibels - minimumAllowedSpectrumFloor) * 100.0F));
     const auto smoothingValue
         = static_cast<std::uint16_t>(std::lround(settings.smoothing * 65'535.0F));
+    const auto frequencySpacingValue
+        = static_cast<std::uint16_t>(std::lround(settings.frequencySpacing * 65'535.0F));
 
     return static_cast<std::uint64_t>(floorValue)
         | (static_cast<std::uint64_t>(ceilingValue) << 16U)
-        | (static_cast<std::uint64_t>(smoothingValue) << 32U);
+        | (static_cast<std::uint64_t>(smoothingValue) << 32U)
+        | (static_cast<std::uint64_t>(frequencySpacingValue) << 48U);
 }
 
 SpectrumRenderSettings unpackSpectrumSettings(std::uint64_t packed) noexcept
@@ -366,10 +684,12 @@ SpectrumRenderSettings unpackSpectrumSettings(std::uint64_t packed) noexcept
     const auto floorValue = static_cast<std::uint16_t>(packed & 0xffffU);
     const auto ceilingValue = static_cast<std::uint16_t>((packed >> 16U) & 0xffffU);
     const auto smoothingValue = static_cast<std::uint16_t>((packed >> 32U) & 0xffffU);
+    const auto frequencySpacingValue = static_cast<std::uint16_t>((packed >> 48U) & 0xffffU);
 
     return { minimumAllowedSpectrumFloor + (static_cast<float>(floorValue) * 0.01F),
         minimumAllowedSpectrumFloor + (static_cast<float>(ceilingValue) * 0.01F),
-        static_cast<float>(smoothingValue) / 65'535.0F };
+        static_cast<float>(smoothingValue) / 65'535.0F,
+        static_cast<float>(frequencySpacingValue) / 65'535.0F };
 }
 
 std::uint32_t packDashboardLayoutSplits(DashboardLayoutSplits splits) noexcept
@@ -402,6 +722,19 @@ RenderRect insetRenderRect(
     const auto insetBottom = std::min(bottom, bounds.height());
     const auto insetTop = std::min(top, std::max(0.0F, bounds.height() - insetBottom));
     return { bounds.left + insetX, bounds.bottom + insetBottom, bounds.right - insetX,
+        bounds.top - insetTop };
+}
+
+RenderRect insetRenderRect(const RenderRect& bounds, const float left, const float bottom,
+    const float right, const float top) noexcept
+{
+    const auto insetLeft = std::min(std::max(0.0F, left), bounds.width());
+    const auto insetRight
+        = std::min(std::max(0.0F, right), std::max(0.0F, bounds.width() - insetLeft));
+    const auto insetBottom = std::min(std::max(0.0F, bottom), bounds.height());
+    const auto insetTop
+        = std::min(std::max(0.0F, top), std::max(0.0F, bounds.height() - insetBottom));
+    return { bounds.left + insetLeft, bounds.bottom + insetBottom, bounds.right - insetRight,
         bounds.top - insetTop };
 }
 
@@ -1033,6 +1366,18 @@ public:
                             vertexCount:batches.spectrum.count];
         }
 
+        const auto spectrogramScissor
+            = makeScissorRect(dashboardLayout[DashboardPanel::spectrogram], boundsSize,
+                drawable.texture.width, drawable.texture.height);
+
+        if (spectrogramScissor.width != 0 && spectrogramScissor.height != 0
+            && batches.spectrogramAxis.count != 0) {
+            [encoder setScissorRect:spectrogramScissor];
+            [encoder drawPrimitives:MTLPrimitiveTypeTriangle
+                        vertexStart:batches.spectrogramAxis.start
+                        vertexCount:batches.spectrogramAxis.count];
+        }
+
         const auto meterScissor = makeScissorRect(dashboardLayout[DashboardPanel::peakRms],
             boundsSize, drawable.texture.width, drawable.texture.height);
 
@@ -1181,7 +1526,14 @@ private:
     id<MTLRenderPipelineState> textPipelineState = nil;
     id<MTLSamplerState> glyphSamplerState = nil;
     id<MTLTexture> glyphAtlasTexture = nil;
-    std::array<CachedTextRun, cachedTextRunCount> cachedTextRuns { };
+    std::array<CachedTextRun, cachedFixedTextRunCount> cachedFixedTextRuns { };
+    std::array<CachedTextRun, frequencyAxisTickCandidateCount> cachedFrequencyAxisTextRuns { };
+    std::array<CachedTextRun, cachedDecibelTickCount> cachedDecibelTextRuns { };
+    std::array<GlyphAtlasEntry, printableAsciiCount> cachedGlyphAtlasEntries { };
+    float cachedGlyphAdvance = 0.0F;
+    float cachedGlyphCellWidth = 0.0F;
+    float cachedGlyphCellHeight = 0.0F;
+    float maximumCachedDecibelTextWidth = 0.0F;
     double glyphAtlasBackingScale = 0.0;
     juce::String initializationError;
     bool metalReady = false;
@@ -1456,11 +1808,8 @@ private:
         const auto advancePoints = static_cast<float>(advancePixels / backingScale);
         const auto cellWidthPoints = static_cast<float>(cellWidth / backingScale);
         const auto cellHeightPoints = static_cast<float>(cellHeight / backingScale);
-        std::array<CachedTextRun, cachedTextRunCount> newCachedTextRuns { };
-
-        for (std::size_t runIndex = 0; runIndex < cachedTextStrings.size(); ++runIndex) {
-            const auto text = cachedTextStrings[runIndex];
-            auto& run = newCachedTextRuns[runIndex];
+        const auto makeCachedTextRun = [&](const std::string_view text) noexcept {
+            CachedTextRun run;
             run.glyphCount = text.size();
             run.height = cellHeightPoints;
 
@@ -1477,11 +1826,61 @@ private:
 
             if (!text.empty())
                 run.width = (static_cast<float>(text.size() - 1) * advancePoints) + cellWidthPoints;
+
+            return run;
+        };
+        std::array<CachedTextRun, cachedFixedTextRunCount> newCachedFixedTextRuns { };
+        for (std::size_t index = 0; index < cachedFixedTextStrings.size(); ++index)
+            newCachedFixedTextRuns[index] = makeCachedTextRun(cachedFixedTextStrings[index]);
+
+        std::array<CachedTextRun, frequencyAxisTickCandidateCount>
+            newCachedFrequencyAxisTextRuns { };
+        for (std::size_t index = 0; index < cachedFrequencyAxisTextStrings.size(); ++index) {
+            newCachedFrequencyAxisTextRuns[index]
+                = makeCachedTextRun(cachedFrequencyAxisTextStrings[index]);
         }
+
+        std::array<CachedTextRun, cachedDecibelTickCount> newCachedDecibelTextRuns { };
+        auto newMaximumCachedDecibelTextWidth = 0.0F;
+        for (std::size_t index = 0; index < newCachedDecibelTextRuns.size(); ++index) {
+            const auto decibels
+                = minimumCachedDecibelTick + (static_cast<int>(index) * cachedDecibelTickInterval);
+            std::array<char, maximumCachedTextGlyphs> text { };
+            auto* cursor = text.data();
+            auto* const end = text.data() + text.size();
+            const auto conversion = std::to_chars(cursor, end, decibels);
+
+            if (conversion.ec != std::errc { }
+                || static_cast<std::size_t>(end - conversion.ptr) < 3) {
+                [newTexture release];
+                return false;
+            }
+
+            cursor = conversion.ptr;
+            *cursor++ = ' ';
+            *cursor++ = 'd';
+            *cursor++ = 'B';
+            auto& run = newCachedDecibelTextRuns[index];
+            run = makeCachedTextRun(
+                std::string_view(text.data(), static_cast<std::size_t>(cursor - text.data())));
+            newMaximumCachedDecibelTextWidth
+                = std::max(newMaximumCachedDecibelTextWidth, run.width);
+        }
+
+        // Force construction of the immutable, density-independent endpoint
+        // table here. Later display callbacks only index already-formatted runs.
+        juce::ignoreUnused(cachedFrequencyEndpointTextRuns());
 
         [glyphAtlasTexture release];
         glyphAtlasTexture = newTexture;
-        cachedTextRuns = newCachedTextRuns;
+        cachedFixedTextRuns = newCachedFixedTextRuns;
+        cachedFrequencyAxisTextRuns = newCachedFrequencyAxisTextRuns;
+        cachedDecibelTextRuns = newCachedDecibelTextRuns;
+        cachedGlyphAtlasEntries = atlasEntries;
+        cachedGlyphAdvance = advancePoints;
+        cachedGlyphCellWidth = cellWidthPoints;
+        cachedGlyphCellHeight = cellHeightPoints;
+        maximumCachedDecibelTextWidth = newMaximumCachedDecibelTextWidth;
         glyphAtlasBackingScale = backingScale;
         return true;
     }
@@ -1914,6 +2313,53 @@ private:
                       vertices[cursor++] = { topRight, colour, topRightTexture };
                   }
               };
+        const auto monospacedTextRunWidth = [&](const CachedMonospacedTextRun& run) noexcept {
+            return run.glyphCount == 0
+                ? 0.0F
+                : (static_cast<float>(run.glyphCount - 1) * cachedGlyphAdvance)
+                    + cachedGlyphCellWidth;
+        };
+        const auto appendMonospacedTextRun = [&](const CachedMonospacedTextRun& run,
+                                                 const float originX, const float originY,
+                                                 const float textScale,
+                                                 const simd_float4 colour) noexcept {
+            if (run.glyphCount == 0 || textScale <= 0.0F)
+                return;
+
+            jassert(cursor + (static_cast<std::size_t>(run.glyphCount) * 6) <= maximumVertexCount);
+
+            if (cursor + (static_cast<std::size_t>(run.glyphCount) * 6) > maximumVertexCount) {
+                return;
+            }
+
+            for (std::size_t index = 0; index < run.glyphCount; ++index) {
+                const auto left = snapToPixel(
+                    originX + (static_cast<float>(index) * cachedGlyphAdvance * textScale));
+                const auto bottom = snapToPixel(originY);
+                const auto right = snapToPixel(left + (cachedGlyphCellWidth * textScale));
+                const auto top = snapToPixel(originY + (cachedGlyphCellHeight * textScale));
+                const auto bottomLeft = pointToClip(left, bottom);
+                const auto bottomRight = pointToClip(right, bottom);
+                const auto topLeft = pointToClip(left, top);
+                const auto topRight = pointToClip(right, top);
+                const auto& atlas = cachedGlyphAtlasEntries[run.atlasIndices[index]];
+                const auto bottomLeftTexture
+                    = simd_make_float2(atlas.leftTextureCoordinate, atlas.bottomTextureCoordinate);
+                const auto bottomRightTexture
+                    = simd_make_float2(atlas.rightTextureCoordinate, atlas.bottomTextureCoordinate);
+                const auto topLeftTexture
+                    = simd_make_float2(atlas.leftTextureCoordinate, atlas.topTextureCoordinate);
+                const auto topRightTexture
+                    = simd_make_float2(atlas.rightTextureCoordinate, atlas.topTextureCoordinate);
+
+                vertices[cursor++] = { bottomLeft, colour, bottomLeftTexture };
+                vertices[cursor++] = { bottomRight, colour, bottomRightTexture };
+                vertices[cursor++] = { topLeft, colour, topLeftTexture };
+                vertices[cursor++] = { topLeft, colour, topLeftTexture };
+                vertices[cursor++] = { bottomRight, colour, bottomRightTexture };
+                vertices[cursor++] = { topRight, colour, topRightTexture };
+            }
+        };
 
         const auto appendBorder = [&](const RenderRect& bounds, float thickness,
                                       simd_float4 colour) noexcept {
@@ -1962,18 +2408,45 @@ private:
 
         batches.shell.count = cursor - batches.shell.start;
 
+        constexpr auto axisTextScale = 0.80F;
+        const auto axisTextHeight = cachedGlyphCellHeight * axisTextScale;
+        const auto nyquist = targetFrame.sampleRate > 0.0
+            ? static_cast<float>(targetFrame.sampleRate * 0.5)
+            : maximumSpectrumFrequency;
+        const auto maximumFrequency
+            = std::clamp(nyquist, minimumSpectrumFrequency + 1.0F, maximumSpectrumFrequency);
+        const FrequencyAxisMapping frequencyMapping {
+            minimumSpectrumFrequency,
+            maximumFrequency,
+            settings.frequencySpacing,
+        };
+        const auto upperEndpointFrequency = static_cast<std::size_t>(std::lround(maximumFrequency));
+        const auto& upperEndpointTextRun = cachedFrequencyEndpointTextRuns()[std::min<std::size_t>(
+            upperEndpointFrequency, cachedFrequencyEndpointTextRuns().size() - 1)];
+        const auto upperEndpointTextWidth
+            = monospacedTextRunWidth(upperEndpointTextRun) * axisTextScale;
+        std::array<float, frequencyAxisTickCandidateCount> frequencyLabelWidths { };
+        std::array<float, frequencyAxisTickCandidateCount> frequencyLabelHeights { };
+        auto maximumFrequencyLabelWidth = upperEndpointTextWidth;
+        for (std::size_t index = 0; index < cachedFrequencyAxisTextRuns.size(); ++index) {
+            frequencyLabelWidths[index] = cachedFrequencyAxisTextRuns[index].width * axisTextScale;
+            frequencyLabelHeights[index]
+                = cachedFrequencyAxisTextRuns[index].height * axisTextScale;
+            maximumFrequencyLabelWidth
+                = std::max(maximumFrequencyLabelWidth, frequencyLabelWidths[index]);
+        }
+
         const auto spectrumPanel = toRenderRect(dashboardLayout[DashboardPanel::spectrum], height);
         const auto spectrumPlot
-            = insetRenderRect(spectrumPanel, 10.0F, 10.0F, headerHeight(spectrumPanel) + 8.0F);
+            = insetRenderRect(spectrumPanel, (maximumCachedDecibelTextWidth * axisTextScale) + 8.0F,
+                axisTextHeight + 7.0F, 8.0F, headerHeight(spectrumPanel) + 7.0F);
         const auto plotLeft = spectrumPlot.left;
         const auto plotRight = spectrumPlot.right;
         const auto plotBottom = spectrumPlot.bottom;
         const auto plotTop = spectrumPlot.top;
-
-        const auto frequencyToX = [&](float frequency, float maximumFrequency) noexcept {
-            const auto ratio = std::log(frequency / minimumSpectrumFrequency)
-                / std::log(maximumFrequency / minimumSpectrumFrequency);
-            return plotLeft + std::clamp(ratio, 0.0F, 1.0F) * (plotRight - plotLeft);
+        const auto frequencyToX = [&](const float frequency) noexcept {
+            return plotLeft
+                + (mapFrequencyToUnit(frequencyMapping, frequency) * spectrumPlot.width());
         };
 
         const auto decibelsToY = [&](float decibels, float minimum, float maximum) noexcept {
@@ -1982,32 +2455,23 @@ private:
             return plotBottom + normalised * (plotTop - plotBottom);
         };
 
-        const auto nyquist = targetFrame.sampleRate > 0.0
-            ? static_cast<float>(targetFrame.sampleRate * 0.5)
-            : maximumSpectrumFrequency;
-        const auto maximumFrequency
-            = std::clamp(nyquist, minimumSpectrumFrequency + 1.0F, maximumSpectrumFrequency);
         constexpr auto gridColour = simd_float4 { 0.16F, 0.20F, 0.27F, 0.62F };
-        constexpr std::array<float, 10> frequencyGrid { 20.0F, 50.0F, 100.0F, 200.0F, 500.0F,
-            1'000.0F, 2'000.0F, 5'000.0F, 10'000.0F, 20'000.0F };
+        const auto spectrumFrequencyTicks = selectFrequencyAxisTicks(
+            frequencyMapping, spectrumPlot.width(), frequencyLabelWidths, upperEndpointTextWidth);
+        const auto spectrumDecibelTicks = makeSpectrumDecibelTicks(
+            settings.floorDecibels, settings.ceilingDecibels, spectrumPlot.height());
 
         batches.spectrumGrid.start = cursor;
 
         if (spectrumPlot.width() > 0.0F && spectrumPlot.height() > 0.0F) {
-            for (const auto frequency : frequencyGrid) {
-                if (frequency > maximumFrequency)
-                    continue;
-
-                const auto x = frequencyToX(frequency, maximumFrequency);
+            for (std::size_t index = 0; index < spectrumFrequencyTicks.count; ++index) {
+                const auto x = frequencyToX(spectrumFrequencyTicks.ticks[index].frequencyHz);
                 appendQuad(x - 0.5F, plotBottom, x + 0.5F, plotTop, gridColour);
             }
 
-            auto decibels = static_cast<float>(std::ceil(settings.floorDecibels / 20.0F) * 20.0F);
-
-            for (std::size_t line = 0; line < 16 && decibels <= settings.ceilingDecibels;
-                ++line, decibels += 20.0F) {
-                const auto y
-                    = decibelsToY(decibels, settings.floorDecibels, settings.ceilingDecibels);
+            for (std::size_t index = 0; index < spectrumDecibelTicks.count; ++index) {
+                const auto y = decibelsToY(static_cast<float>(spectrumDecibelTicks.values[index]),
+                    settings.floorDecibels, settings.ceilingDecibels);
                 appendQuad(plotLeft, y - 0.5F, plotRight, y + 0.5F, gridColour);
             }
         }
@@ -2032,10 +2496,9 @@ private:
                 ++bin) {
                 const auto frequency
                     = std::max(minimumSpectrumFrequency, static_cast<float>(bin) * binFrequency);
-                spectrumPoints[pointCount++]
-                    = simd_make_float2(frequencyToX(frequency, maximumFrequency),
-                        decibelsToY(displayedSpectrum[bin], settings.floorDecibels,
-                            settings.ceilingDecibels));
+                spectrumPoints[pointCount++] = simd_make_float2(frequencyToX(frequency),
+                    decibelsToY(
+                        displayedSpectrum[bin], settings.floorDecibels, settings.ceilingDecibels));
             }
 
             for (std::size_t index = 0; index < pointCount; ++index) {
@@ -2056,6 +2519,26 @@ private:
         }
 
         batches.spectrum.count = cursor - batches.spectrum.start;
+        const auto spectrogramPanel
+            = toRenderRect(dashboardLayout[DashboardPanel::spectrogram], height);
+        const auto spectrogramPlot = insetRenderRect(spectrogramPanel,
+            maximumFrequencyLabelWidth + 8.0F, 8.0F, 8.0F, headerHeight(spectrogramPanel) + 7.0F);
+        const auto spectrogramFrequencyTicks = selectFrequencyAxisTicks(
+            frequencyMapping, spectrogramPlot.height(), frequencyLabelHeights, axisTextHeight);
+        constexpr auto spectrogramTickColour = simd_float4 { 0.19F, 0.25F, 0.33F, 0.78F };
+        batches.spectrogramAxis.start = cursor;
+
+        if (spectrogramPlot.width() > 0.0F && spectrogramPlot.height() > 0.0F) {
+            for (std::size_t index = 0; index < spectrogramFrequencyTicks.count; ++index) {
+                const auto unit = mapFrequencyToUnit(
+                    frequencyMapping, spectrogramFrequencyTicks.ticks[index].frequencyHz);
+                const auto y = spectrogramPlot.bottom + (unit * spectrogramPlot.height());
+                appendQuad(spectrogramPlot.left - 4.0F, y - 0.5F, spectrogramPlot.left + 2.0F,
+                    y + 0.5F, spectrogramTickColour);
+            }
+        }
+
+        batches.spectrogramAxis.count = cursor - batches.spectrogramAxis.start;
         batches.peakRms.start = cursor;
 
         const auto meterPanel = toRenderRect(dashboardLayout[DashboardPanel::peakRms], height);
@@ -2110,13 +2593,14 @@ private:
         batches.peakRms.count = cursor - batches.peakRms.start;
 
         constexpr auto titleColour = simd_float4 { 0.72F, 0.79F, 0.88F, 0.94F };
+        constexpr auto axisTextColour = simd_float4 { 0.54F, 0.62F, 0.72F, 0.90F };
         constexpr auto placeholderTextColour = simd_float4 { 0.39F, 0.46F, 0.55F, 0.72F };
 
         for (std::size_t index = 0; index < dashboardPanelCount; ++index) {
             const auto panel = static_cast<DashboardPanel>(index);
             const auto bounds = toRenderRect(dashboardLayout[panel], height);
             const auto panelHeaderHeight = headerHeight(bounds);
-            const auto& titleRun = cachedTextRuns[panelTitleTextRunIndices[index]];
+            const auto& titleRun = cachedFixedTextRuns[panelTitleTextRunIndices[index]];
             const auto titleAvailableWidth = std::max(0.0F, bounds.width() - 14.0F);
             const auto titleScale = titleRun.width > 0.0F
                 ? std::min(1.0F, titleAvailableWidth / titleRun.width)
@@ -2128,22 +2612,98 @@ private:
             batches.text[index].start = cursor;
             appendTextRun(titleRun, titleX, titleY, titleScale, titleColour);
 
+            if (panel == DashboardPanel::spectrum) {
+                for (std::size_t tickIndex = 0; tickIndex < spectrumFrequencyTicks.count;
+                    ++tickIndex) {
+                    const auto& tick = spectrumFrequencyTicks.ticks[tickIndex];
+                    const auto centreX = frequencyToX(tick.frequencyHz);
+
+                    if (tick.usesUpperEndpointLabel) {
+                        const auto labelX = std::clamp(centreX - (upperEndpointTextWidth * 0.5F),
+                            spectrumPlot.left,
+                            std::max(
+                                spectrumPlot.left, spectrumPlot.right - upperEndpointTextWidth));
+                        appendMonospacedTextRun(upperEndpointTextRun, labelX,
+                            spectrumPlot.bottom - axisTextHeight - 4.0F, axisTextScale,
+                            axisTextColour);
+                    } else if (tick.candidateIndex < cachedFrequencyAxisTextRuns.size()) {
+                        const auto& run = cachedFrequencyAxisTextRuns[tick.candidateIndex];
+                        const auto labelWidth = run.width * axisTextScale;
+                        const auto labelX
+                            = std::clamp(centreX - (labelWidth * 0.5F), spectrumPlot.left,
+                                std::max(spectrumPlot.left, spectrumPlot.right - labelWidth));
+                        appendTextRun(run, labelX, spectrumPlot.bottom - axisTextHeight - 4.0F,
+                            axisTextScale, axisTextColour);
+                    }
+                }
+
+                for (std::size_t tickIndex = 0; tickIndex < spectrumDecibelTicks.count;
+                    ++tickIndex) {
+                    const auto decibels = spectrumDecibelTicks.values[tickIndex];
+                    const auto runIndex = static_cast<std::size_t>(
+                        (decibels - minimumCachedDecibelTick) / cachedDecibelTickInterval);
+
+                    if (runIndex >= cachedDecibelTextRuns.size())
+                        continue;
+
+                    const auto& run = cachedDecibelTextRuns[runIndex];
+                    const auto labelWidth = run.width * axisTextScale;
+                    const auto labelHeight = run.height * axisTextScale;
+                    const auto centreY = decibelsToY(static_cast<float>(decibels),
+                        settings.floorDecibels, settings.ceilingDecibels);
+                    const auto labelY
+                        = std::clamp(centreY - (labelHeight * 0.5F), spectrumPlot.bottom,
+                            std::max(spectrumPlot.bottom, spectrumPlot.top - labelHeight));
+                    appendTextRun(run, spectrumPlot.left - labelWidth - 5.0F, labelY, axisTextScale,
+                        axisTextColour);
+                }
+            } else if (panel == DashboardPanel::spectrogram) {
+                for (std::size_t tickIndex = 0; tickIndex < spectrogramFrequencyTicks.count;
+                    ++tickIndex) {
+                    const auto& tick = spectrogramFrequencyTicks.ticks[tickIndex];
+                    const auto unit = mapFrequencyToUnit(frequencyMapping, tick.frequencyHz);
+                    const auto centreY = spectrogramPlot.bottom + (unit * spectrogramPlot.height());
+
+                    if (tick.usesUpperEndpointLabel) {
+                        const auto labelY = std::clamp(centreY - (axisTextHeight * 0.5F),
+                            spectrogramPlot.bottom,
+                            std::max(spectrogramPlot.bottom, spectrogramPlot.top - axisTextHeight));
+                        appendMonospacedTextRun(upperEndpointTextRun,
+                            spectrogramPlot.left - upperEndpointTextWidth - 5.0F, labelY,
+                            axisTextScale, axisTextColour);
+                    } else if (tick.candidateIndex < cachedFrequencyAxisTextRuns.size()) {
+                        const auto& run = cachedFrequencyAxisTextRuns[tick.candidateIndex];
+                        const auto labelWidth = run.width * axisTextScale;
+                        const auto labelHeight = run.height * axisTextScale;
+                        const auto labelY = std::clamp(centreY - (labelHeight * 0.5F),
+                            spectrogramPlot.bottom,
+                            std::max(spectrogramPlot.bottom, spectrogramPlot.top - labelHeight));
+                        appendTextRun(run, spectrogramPlot.left - labelWidth - 5.0F, labelY,
+                            axisTextScale, axisTextColour);
+                    }
+                }
+            }
+
             if (panel != DashboardPanel::spectrum && panel != DashboardPanel::peakRms) {
-                const auto& placeholderRun = cachedTextRuns[placeholderTextRunIndex];
-                const auto bodyTop = bounds.top - panelHeaderHeight;
-                const auto bodyHeight = std::max(0.0F, bodyTop - bounds.bottom);
-                const auto availableWidth = std::max(0.0F, bounds.width() - 12.0F);
-                const auto availableHeight = std::max(0.0F, bodyHeight - 12.0F);
+                const auto& placeholderRun = cachedFixedTextRuns[placeholderTextRunIndex];
+                const auto placeholderBounds = panel == DashboardPanel::spectrogram
+                    ? spectrogramPlot
+                    : RenderRect { bounds.left, bounds.bottom, bounds.right,
+                          bounds.top - panelHeaderHeight };
+                const auto availableWidth = std::max(0.0F, placeholderBounds.width() - 12.0F);
+                const auto availableHeight = std::max(0.0F, placeholderBounds.height() - 12.0F);
                 const auto horizontalScale
                     = placeholderRun.width > 0.0F ? availableWidth / placeholderRun.width : 1.0F;
                 const auto verticalScale
                     = placeholderRun.height > 0.0F ? availableHeight / placeholderRun.height : 1.0F;
                 const auto placeholderScale
                     = std::max(0.0F, std::min({ 1.0F, horizontalScale, verticalScale }));
-                const auto placeholderX = bounds.left
-                    + (bounds.width() - (placeholderRun.width * placeholderScale)) * 0.5F;
-                const auto placeholderY = bounds.bottom
-                    + (bodyHeight - (placeholderRun.height * placeholderScale)) * 0.5F;
+                const auto placeholderX = placeholderBounds.left
+                    + (placeholderBounds.width() - (placeholderRun.width * placeholderScale))
+                        * 0.5F;
+                const auto placeholderY = placeholderBounds.bottom
+                    + (placeholderBounds.height() - (placeholderRun.height * placeholderScale))
+                        * 0.5F;
                 appendTextRun(placeholderRun, placeholderX, placeholderY, placeholderScale,
                     placeholderTextColour);
             }
