@@ -454,8 +454,12 @@ Loudness observability exposes worker input/completion counts, exact-gate block
 counts, classified resets, readiness and completed-silence values, capture
 endpoints, the 24-hour block capacity, capacity overflow, and renderer-accepted
 state. Only cumulative counters receive derived rates. Exact Integrated gating
-scans its retained energies twice per 100 ms update; analysis-job timing keeps
-the resulting long-duration cost visible rather than hiding it.
+stores each finite block energy strictly above the fixed absolute gate once in a
+preallocated, high-occupancy B+ tree. The first gate uses a cumulative exact
+sum/count; the strict relative-gate query visits one boundary leaf plus bounded
+subtree aggregates instead of rescanning the retained history. Metrics exposes
+the index's reserved bytes, topology, query count, and last/maximum node,
+aggregate, and boundary-value reads so its long-session cost remains visible.
 
 ### Preliminary reference workload and budgets
 
@@ -737,5 +741,10 @@ authorize fake values, background work, or speculative resource allocation.
 - Bounded exact Integrated retention at 864,000 blocks (24 hours). The first
   excess block invalidates I and reports capacity overflow instead of rolling or
   approximating the gate.
+- Replaced twice-per-update linear Integrated Loudness rescans with a
+  preallocated exact ordered index. The reference arm64 build reserves
+  7,606,712 bytes (about 7.25 MiB) of owned index storage at full capacity,
+  remains below the accepted 8 MiB arena budget, and performs no processing-time
+  allocation.
 - Kept Loudness RESET boundary-aware across queued capture data, made stale input
   clear only M/S, and preserved Loudness across FFT-only configuration changes.

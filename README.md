@@ -127,8 +127,10 @@ windows show `-∞`; readings that are not ready show an em dash.
 
 Loudness uses BS.1770-5 K-weighting and EBU R128 M/S/I semantics with literal
 400 ms and 3 second windows and strict exact Integrated gates. Exact block
-energies are retained for at most 24 hours (`864,000` blocks, about 6.6 MiB per
-active analyzer). At the first excess block, Integrated becomes unavailable and
+history is retained for at most 24 hours (`864,000` blocks). Its preallocated
+ordered index uses about 7.25 MiB per active analyzer in the reference arm64
+build, performs no processing-time allocation, and avoids a full-history rescan
+on each update. At the first excess block, Integrated becomes unavailable and
 Metrics reports the overflow until RESET or a full analyzer lifecycle reset;
 the implementation never silently rolls or quantizes the gate. This scope does
 not claim complete “EBU Mode compliance,” LRA, or true peak.

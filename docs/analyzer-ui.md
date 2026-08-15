@@ -582,15 +582,24 @@ sample-rate/channel-layout change, capture discontinuity, or editor
 reactivation. Do not reset merely on host play, stop, seek, or loop, and do not
 serialize integrated state.
 
-Retain exact Integrated block energies for at most 24 hours (`864,000` 100 ms
-blocks, approximately 6.6 MiB per active analyzer). Reserve that storage away
-from the audio callback and perform no allocation while processing a captured
-chunk. If the first excess block arrives, invalidate Integrated, expose the
-capacity-exceeded state and overflow count in Metrics, and require RESET or a
-full lifecycle reset before integration can resume. Do not silently roll the
-window or substitute quantized/approximate gating. Exact gate reduction is
-bounded but scans retained blocks, so long-duration cost remains observable in
-the existing analysis-job timing metrics.
+Retain exact Integrated history for at most 24 hours (`864,000` 100 ms blocks).
+Count every completed block against that limit. Because the absolute gate is
+fixed, retain one exact copy only of each finite energy strictly above it, plus
+the exact cumulative sum/count needed by the first gate; omitting energies that
+can never pass the absolute gate is lossless. Store the retained values in a
+preallocated high-occupancy ordered index. The complete index owns 7,606,712
+bytes (about 7.25 MiB) in the reference arm64 build and must remain below an
+8 MiB arena budget, excluding allocator bookkeeping outside the owned object and
+arena storage.
+
+Reserve that storage away from the audio callback and perform no allocation
+while processing a captured chunk. A strict relative-gate query visits one
+boundary leaf plus a bounded number of subtree aggregates instead of rescanning
+the history. Expose reserved storage, topology, and last/maximum query work in
+Metrics. If the first excess total block arrives, invalidate Integrated, expose
+the capacity-exceeded state and overflow count, and require RESET or a full
+lifecycle reset before integration can resume. Do not silently roll the window
+or substitute quantized/approximate gating.
 
 Carry the actual host channel layout into Loudness analysis. A mono sample is
 summed once with the BS.1770 mono channel weight; never pass duplicated mono as
