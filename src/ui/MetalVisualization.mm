@@ -536,6 +536,102 @@ PeakRmsPanelLayout calculatePeakRmsPanelLayout(const float panelWidth, const flo
     return result;
 }
 
+StereoFieldPanelLayout calculateStereoFieldPanelLayout(const float panelWidth,
+    const float panelHeight, const float requestedHeaderHeight,
+    const float requestedTextHeight) noexcept
+{
+    StereoFieldPanelLayout result;
+    if (!std::isfinite(panelWidth) || !std::isfinite(panelHeight) || panelWidth <= 0.0F
+        || panelHeight <= 0.0F) {
+        return result;
+    }
+
+    const auto headerHeight = std::clamp(
+        std::isfinite(requestedHeaderHeight) ? requestedHeaderHeight : 0.0F, 0.0F, panelHeight);
+    const auto textHeight
+        = std::clamp(std::isfinite(requestedTextHeight) ? requestedTextHeight : 10.0F, 6.0F, 24.0F);
+    constexpr auto contentInset = 7.0F;
+    constexpr auto correlationTrackHeight = 5.0F;
+    constexpr auto correlationTextGap = 3.0F;
+    constexpr auto scopeGap = 6.0F;
+    const auto contentLeft = std::min(contentInset, panelWidth * 0.5F);
+    const auto contentRight = std::max(contentLeft, panelWidth - contentInset);
+    const auto contentBottom = std::min(contentInset, panelHeight);
+    const auto contentTop = std::max(contentBottom, panelHeight - headerHeight - contentInset);
+    const auto contentWidth = contentRight - contentLeft;
+    const auto contentHeight = contentTop - contentBottom;
+    if (contentWidth <= 0.0F || contentHeight < correlationTrackHeight)
+        return result;
+
+    result.correlationTrackBounds
+        = { contentLeft, contentBottom, contentRight, contentBottom + correlationTrackHeight };
+    result.showCorrelationReadout = contentWidth >= 44.0F
+        && contentHeight
+            >= correlationTrackHeight + correlationTextGap + textHeight + scopeGap + 20.0F;
+    result.correlationReadoutBottom = result.correlationTrackBounds.top + correlationTextGap;
+    const auto scopeAreaBottom = result.showCorrelationReadout
+        ? result.correlationReadoutBottom + textHeight + scopeGap
+        : result.correlationTrackBounds.top + scopeGap;
+    const auto scopeAreaHeight = std::max(0.0F, contentTop - scopeAreaBottom);
+    const auto scopeSide = std::min(contentWidth, scopeAreaHeight);
+    if (scopeSide <= 0.0F)
+        return result;
+
+    const auto scopeLeft = contentLeft + ((contentWidth - scopeSide) * 0.5F);
+    const auto scopeBottom = scopeAreaBottom + ((scopeAreaHeight - scopeSide) * 0.5F);
+    result.scopeBounds = { scopeLeft, scopeBottom, scopeLeft + scopeSide, scopeBottom + scopeSide };
+    return result;
+}
+
+float mapStereoFieldCoordinate(
+    const float coordinate, const float minimumPosition, const float maximumPosition) noexcept
+{
+    if (!std::isfinite(minimumPosition) || !std::isfinite(maximumPosition)
+        || maximumPosition <= minimumPosition) {
+        return 0.0F;
+    }
+
+    const auto value = std::isfinite(coordinate) ? coordinate : 0.0F;
+    return minimumPosition + ((value + 1.0F) * 0.5F * (maximumPosition - minimumPosition));
+}
+
+float mapStereoCorrelationToUnit(const float correlation) noexcept
+{
+    const auto value = std::isfinite(correlation) ? correlation : 0.0F;
+    return (std::clamp(value, -1.0F, 1.0F) + 1.0F) * 0.5F;
+}
+
+StereoCorrelationReadout classifyStereoCorrelationReadout(
+    const float correlation, const bool valid) noexcept
+{
+    StereoCorrelationReadout result;
+    if (!valid || !std::isfinite(correlation))
+        return result;
+
+    const auto bounded = std::clamp(correlation, -1.0F, 1.0F);
+    result.hundredths = std::clamp(static_cast<int>(std::lround(bounded * 100.0F)), -100, 100);
+    result.available = true;
+    if (bounded > stereoCorrelationNeutralThreshold)
+        result.colourRange = StereoCorrelationColourRange::cyan;
+    else if (bounded < -stereoCorrelationNeutralThreshold)
+        result.colourRange = StereoCorrelationColourRange::amber;
+    return result;
+}
+
+float stereoFieldPointAgeOpacity(
+    const float normalizedAge, const double elapsedSinceSnapshotSeconds) noexcept
+{
+    if (!std::isfinite(normalizedAge))
+        return 0.0F;
+
+    const auto elapsed = std::isfinite(elapsedSinceSnapshotSeconds)
+        ? std::max(0.0, elapsedSinceSnapshotSeconds)
+        : 0.0;
+    const auto age = std::clamp(normalizedAge, 0.0F, 1.0F)
+        + static_cast<float>(elapsed / static_cast<double>(stereoFieldHistorySeconds));
+    return std::clamp(1.0F - age, 0.0F, 1.0F);
+}
+
 SpectrumClearLayout calculateSpectrumClearLayout(
     const float panelWidth, const float panelHeight, const float requestedHeaderHeight) noexcept
 {
@@ -866,22 +962,24 @@ constexpr std::size_t spectrogramStagingRowStride
 constexpr std::size_t spectrogramStagingBufferBytes
     = maximumSpectrogramColumnsDrainedPerFrame * spectrogramStagingRowStride;
 constexpr std::size_t spectrogramUniformBufferBytes = 256;
+constexpr std::size_t stereoPointUniformBufferBytes = 256;
 static_assert(sizeof(_Float16) == 2);
 static_assert(spectrogramStagingRowStride % metalTextureBufferAlignment == 0);
 constexpr std::size_t printableAsciiFirst = 32;
 constexpr std::size_t printableAsciiLast = 126;
 constexpr std::size_t printableAsciiCount = printableAsciiLast - printableAsciiFirst + 1;
 constexpr std::size_t infinityGlyphAtlasIndex = printableAsciiCount;
-constexpr std::size_t glyphAtlasGlyphCount = printableAsciiCount + 1;
+constexpr std::size_t emDashGlyphAtlasIndex = infinityGlyphAtlasIndex + 1;
+constexpr std::size_t glyphAtlasGlyphCount = printableAsciiCount + 2;
 constexpr std::size_t glyphAtlasColumns = 16;
 constexpr std::size_t glyphAtlasRows
     = (glyphAtlasGlyphCount + glyphAtlasColumns - 1) / glyphAtlasColumns;
 constexpr std::size_t maximumCachedTextGlyphs = 24;
-constexpr std::size_t cachedFixedTextRunCount = 11;
+constexpr std::size_t cachedFixedTextRunCount = 12;
 
 constexpr std::array<std::string_view, cachedFixedTextRunCount> cachedFixedTextStrings { "Spectrum",
     "Peak / RMS", "Spectrogram", "Stereo / Correlation", "Loudness", "Not yet implemented", "CLEAR",
-    "L", "R", "M", "OVER" };
+    "L", "R", "M", "OVER", "MONO" };
 
 constexpr std::array<std::string_view, frequencyAxisTickCandidateCount>
     cachedFrequencyAxisTextStrings { "20 Hz", "50 Hz", "100 Hz", "200 Hz", "500 Hz", "1 kHz",
@@ -897,6 +995,7 @@ constexpr std::size_t leftChannelTextRunIndex = 7;
 constexpr std::size_t rightChannelTextRunIndex = 8;
 constexpr std::size_t monoChannelTextRunIndex = 9;
 constexpr std::size_t overTextRunIndex = 10;
+constexpr std::size_t monoStateTextRunIndex = 11;
 constexpr int minimumPeakRmsReadoutTenths = -1'199;
 constexpr int maximumPeakRmsReadoutTenths = maximumFiniteFloatPeakRmsReadoutTenths;
 constexpr std::size_t cachedPeakRmsReadoutCount
@@ -912,9 +1011,10 @@ constexpr std::size_t fixedTextGlyphCount = [] {
     for (const auto titleIndex : panelTitleTextRunIndices)
         glyphCount += cachedFixedTextStrings[titleIndex].size();
 
-    constexpr auto placeholderPanelCount = dashboardPanelCount - 3;
+    constexpr auto placeholderPanelCount = dashboardPanelCount - 4;
     return glyphCount
-        + (placeholderPanelCount * cachedFixedTextStrings[placeholderTextRunIndex].size());
+        + (placeholderPanelCount * cachedFixedTextStrings[placeholderTextRunIndex].size())
+        + cachedFixedTextStrings[monoStateTextRunIndex].size();
 }();
 constexpr std::size_t peakRmsTextGlyphCount = [] {
     std::size_t glyphCount = cachedFixedTextStrings[clearTextRunIndex].size();
@@ -1105,6 +1205,47 @@ const CachedMonospacedTextRun& cachedMinusInfinityTextRun() noexcept
     return run;
 }
 
+const CachedMonospacedTextRun& cachedEmDashTextRun() noexcept
+{
+    static const auto run = [] {
+        CachedMonospacedTextRun result;
+        result.glyphCount = 1;
+        result.atlasIndices[0] = static_cast<std::uint8_t>(emDashGlyphAtlasIndex);
+        return result;
+    }();
+
+    return run;
+}
+
+const std::array<CachedMonospacedTextRun, 201>& cachedStereoCorrelationTextRuns() noexcept
+{
+    static const auto runs = [] {
+        std::array<CachedMonospacedTextRun, 201> result { };
+        for (auto hundredths = -100; hundredths <= 100; ++hundredths) {
+            std::array<char, maximumStereoCorrelationReadoutGlyphs> text { };
+            auto* cursor = text.data();
+            if (hundredths < 0)
+                *cursor++ = '-';
+            else if (hundredths > 0)
+                *cursor++ = '+';
+
+            const auto absolute = std::abs(hundredths);
+            *cursor++ = static_cast<char>('0' + (absolute / 100));
+            *cursor++ = '.';
+            *cursor++ = static_cast<char>('0' + ((absolute / 10) % 10));
+            *cursor++ = static_cast<char>('0' + (absolute % 10));
+
+            auto& run = result[static_cast<std::size_t>(hundredths + 100)];
+            run.glyphCount = static_cast<std::uint8_t>(cursor - text.data());
+            for (std::size_t glyph = 0; glyph < run.glyphCount; ++glyph)
+                run.atlasIndices[glyph] = atlasIndexForAscii(text[glyph]);
+        }
+        return result;
+    }();
+
+    return runs;
+}
+
 static_assert(std::atomic<std::uint64_t>::is_always_lock_free);
 static_assert(std::atomic<std::uint32_t>::is_always_lock_free);
 
@@ -1155,6 +1296,9 @@ struct AtomicRenderTelemetry {
     std::atomic<std::uint64_t> spectrogramUploadCommands { 0 };
     std::atomic<std::uint64_t> spectrogramUploadBytes { 0 };
     std::atomic<std::uint64_t> spectrogramLastColumnSequence { 0 };
+    std::atomic<std::uint64_t> lastStereoSequence { 0 };
+    std::atomic<std::uint64_t> stereoPointInstancesPrepared { 0 };
+    std::atomic<std::uint64_t> stereoPointDrawCalls { 0 };
 
     std::atomic<std::uint64_t> lastCpuEncodeNanoseconds { 0 };
     std::atomic<std::uint64_t> maximumCpuEncodeNanoseconds { 0 };
@@ -1191,11 +1335,15 @@ struct AtomicRenderTelemetry {
     std::atomic<std::uint32_t> spectrogramTextureRows { 0 };
     std::atomic<std::uint32_t> spectrogramTextureColumns { 0 };
     std::atomic<std::uint64_t> spectrogramTextureBytes { 0 };
+    std::atomic<std::uint32_t> stereoLastPointCount { 0 };
     std::atomic<double> backingScale { 1.0 };
+    std::atomic<double> stereoCorrelation { 0.0 };
 
     std::atomic<bool> metalAvailable { false };
     std::atomic<bool> renderingRequested { false };
     std::atomic<bool> effectivelyRendering { false };
+    std::atomic<bool> stereoCorrelationValid { false };
+    std::atomic<bool> stereoMono { false };
 };
 
 template <typename Integer>
@@ -1268,9 +1416,13 @@ struct RenderBufferSlot {
     id<MTLBuffer> spectrogramStagingBuffer = nil;
     id<MTLBuffer> spectrogramValidityBuffer = nil;
     id<MTLBuffer> spectrogramUniformBuffer = nil;
+    id<MTLBuffer> stereoPointInstanceBuffer = nil;
+    id<MTLBuffer> stereoPointUniformBuffer = nil;
 
     ~RenderBufferSlot()
     {
+        [stereoPointUniformBuffer release];
+        [stereoPointInstanceBuffer release];
         [spectrogramUniformBuffer release];
         [spectrogramValidityBuffer release];
         [spectrogramStagingBuffer release];
@@ -1298,6 +1450,7 @@ struct VertexBatches {
     VertexRange spectrogramHistory;
     VertexRange spectrogramAxis;
     VertexRange peakRms;
+    VertexRange stereoGuides;
     VertexRange dashboardSplitters;
     std::array<VertexRange, dashboardPanelCount> text;
 };
@@ -1316,6 +1469,21 @@ struct SpectrogramShaderUniforms final {
 };
 
 static_assert(sizeof(SpectrogramShaderUniforms) <= spectrogramUniformBufferBytes);
+
+struct StereoPointInstance final {
+    simd_float2 clipPosition { };
+    float opacity = 0.0F;
+    float reserved = 0.0F;
+};
+
+struct StereoPointShaderUniforms final {
+    simd_float2 clipHalfSize { };
+    simd_float2 reserved { };
+    simd_float4 colour { };
+};
+
+static_assert(sizeof(StereoPointInstance) == 16);
+static_assert(sizeof(StereoPointShaderUniforms) <= stereoPointUniformBufferBytes);
 
 struct SpectrogramUpload final {
     NSUInteger sourceOffset = 0;
@@ -1343,6 +1511,11 @@ struct RenderRect {
     {
         return std::max(0.0F, top - bottom);
     }
+};
+
+struct PreparedStereoPointInstances final {
+    RenderRect scopeBounds;
+    std::size_t count = 0;
 };
 
 struct RenderBufferAdmission {
@@ -1572,6 +1745,19 @@ MTLScissorRect makeScissorRect(const DashboardLogicalBounds& bounds, const CGSiz
         static_cast<NSUInteger>(std::max(0.0, bottom - top)) };
 }
 
+MTLScissorRect makeScissorRect(const RenderRect& bounds, const CGSize logicalSize,
+    const NSUInteger drawableWidth, const NSUInteger drawableHeight) noexcept
+{
+    if (logicalSize.height <= 0.0)
+        return { 0, 0, 0, 0 };
+
+    return makeScissorRect(
+        DashboardLogicalBounds { static_cast<double>(bounds.left),
+            static_cast<double>(logicalSize.height) - static_cast<double>(bounds.top),
+            static_cast<double>(bounds.width()), static_cast<double>(bounds.height()) },
+        logicalSize, drawableWidth, drawableHeight);
+}
+
 void releaseRenderBuffer(
     const std::shared_ptr<SharedRenderState>& state, RenderBufferAdmission admission) noexcept
 {
@@ -1774,6 +1960,27 @@ struct SpectrogramUniforms
     uint reserved;
 };
 
+struct StereoPointInstance
+{
+    float2 clipPosition;
+    float opacity;
+    float reserved;
+};
+
+struct StereoPointUniforms
+{
+    float2 clipHalfSize;
+    float2 reserved;
+    float4 colour;
+};
+
+struct StereoPointRasterVertex
+{
+    float4 position [[position]];
+    float4 colour;
+    float2 pointCoordinate;
+};
+
 vertex RasterVertex audioInsightVertex(const device Vertex* vertices [[buffer(0)]],
                                        uint vertexId [[vertex_id]])
 {
@@ -1787,6 +1994,33 @@ vertex RasterVertex audioInsightVertex(const device Vertex* vertices [[buffer(0)
 fragment half4 audioInsightFragment(RasterVertex input [[stage_in]])
 {
     return half4(input.colour);
+}
+
+vertex StereoPointRasterVertex audioInsightStereoPointVertex(
+    const device StereoPointInstance* instances [[buffer(0)]],
+    constant StereoPointUniforms& uniforms [[buffer(1)]],
+    uint vertexId [[vertex_id]], uint instanceId [[instance_id]])
+{
+    constexpr float2 corners[] = {
+        float2(-1.0f, -1.0f),
+        float2( 1.0f, -1.0f),
+        float2(-1.0f,  1.0f),
+        float2( 1.0f,  1.0f),
+    };
+    const float2 corner = corners[min(vertexId, 3u)];
+    const StereoPointInstance point = instances[instanceId];
+    StereoPointRasterVertex output;
+    output.position = float4(point.clipPosition + corner * uniforms.clipHalfSize, 0.0f, 1.0f);
+    output.colour = float4(uniforms.colour.rgb, uniforms.colour.a * point.opacity);
+    output.pointCoordinate = corner;
+    return output;
+}
+
+fragment half4 audioInsightStereoPointFragment(StereoPointRasterVertex input [[stage_in]])
+{
+    const float radius = length(input.pointCoordinate);
+    const float coverage = 1.0f - smoothstep(0.70f, 1.0f, radius);
+    return half4(half3(input.colour.rgb), half(input.colour.a * coverage));
 }
 
 fragment half4 audioInsightTextFragment(RasterVertex input [[stage_in]],
@@ -1869,6 +2103,7 @@ public:
     ~MetalRenderBackend()
     {
         shutdown();
+        [stereoPointPipelineState release];
         [spectrogramHistoryTexture release];
         [spectrogramPaletteTexture release];
         [spectrogramPaletteSamplerState release];
@@ -2328,6 +2563,11 @@ public:
             = telemetry->spectrogramUploadBytes.load(std::memory_order_relaxed);
         result.spectrogramLastColumnSequence
             = telemetry->spectrogramLastColumnSequence.load(std::memory_order_relaxed);
+        result.lastStereoSequence = telemetry->lastStereoSequence.load(std::memory_order_relaxed);
+        result.stereoPointInstancesPrepared
+            = telemetry->stereoPointInstancesPrepared.load(std::memory_order_relaxed);
+        result.stereoPointDrawCalls
+            = telemetry->stereoPointDrawCalls.load(std::memory_order_relaxed);
         result.lastCpuEncodeNanoseconds
             = telemetry->lastCpuEncodeNanoseconds.load(std::memory_order_relaxed);
         result.maximumCpuEncodeNanoseconds
@@ -2363,11 +2603,17 @@ public:
             = telemetry->spectrogramTextureColumns.load(std::memory_order_relaxed);
         result.spectrogramTextureBytes
             = telemetry->spectrogramTextureBytes.load(std::memory_order_relaxed);
+        result.stereoLastPointCount
+            = telemetry->stereoLastPointCount.load(std::memory_order_relaxed);
         result.backingScale = telemetry->backingScale.load(std::memory_order_relaxed);
+        result.stereoCorrelation = telemetry->stereoCorrelation.load(std::memory_order_relaxed);
         result.metalAvailable = telemetry->metalAvailable.load(std::memory_order_relaxed);
         result.renderingRequested = telemetry->renderingRequested.load(std::memory_order_relaxed);
         result.effectivelyRendering
             = telemetry->effectivelyRendering.load(std::memory_order_relaxed);
+        result.stereoCorrelationValid
+            = telemetry->stereoCorrelationValid.load(std::memory_order_relaxed);
+        result.stereoMono = telemetry->stereoMono.load(std::memory_order_relaxed);
         result.resetPending
             = requestedTelemetryEpoch.load(std::memory_order_acquire) != result.epoch;
         return result;
@@ -2481,6 +2727,88 @@ public:
         return true;
     }
 
+    PreparedStereoPointInstances prepareStereoPointInstances(RenderBufferSlot& slot,
+        const CGSize logicalSize, const DashboardTileLayout& dashboardLayout,
+        const Clock::time_point now, AtomicRenderTelemetry& telemetry) const noexcept
+    {
+        PreparedStereoPointInstances prepared;
+        if (logicalSize.width <= 0.0 || logicalSize.height <= 0.0
+            || slot.stereoPointInstanceBuffer == nil || slot.stereoPointUniformBuffer == nil) {
+            return prepared;
+        }
+
+        const auto logicalHeight = static_cast<float>(logicalSize.height);
+        const auto panel
+            = toRenderRect(dashboardLayout[DashboardPanel::stereoField], logicalHeight);
+        const auto panelHeaderHeight
+            = std::min(panel.height(), std::clamp(panel.height() * 0.13F, 18.0F, 26.0F));
+        constexpr auto stereoTextScale = 0.78F;
+        const auto layout = calculateStereoFieldPanelLayout(panel.width(), panel.height(),
+            panelHeaderHeight, cachedGlyphCellHeight * stereoTextScale);
+        prepared.scopeBounds
+            = { panel.left + layout.scopeBounds.left, panel.bottom + layout.scopeBounds.bottom,
+                  panel.left + layout.scopeBounds.right, panel.bottom + layout.scopeBounds.top };
+
+        const auto fieldValid = hasDisplayFrame && targetFrame.stereoFieldValid;
+        const auto isMono = hasDisplayFrame && targetFrame.stereoMono;
+        const auto correlationValid = hasDisplayFrame && !isMono
+            && targetFrame.stereoCorrelationValid && std::isfinite(targetFrame.stereoCorrelation);
+        telemetry.stereoCorrelation.store(correlationValid
+                ? static_cast<double>(std::clamp(targetFrame.stereoCorrelation, -1.0F, 1.0F))
+                : 0.0,
+            std::memory_order_relaxed);
+        telemetry.stereoCorrelationValid.store(correlationValid, std::memory_order_relaxed);
+        telemetry.stereoMono.store(isMono, std::memory_order_relaxed);
+
+        auto* const uniforms
+            = static_cast<StereoPointShaderUniforms*>(slot.stereoPointUniformBuffer.contents);
+        const auto radius = std::min(1.25F,
+            std::max(0.0F,
+                std::min(prepared.scopeBounds.width(), prepared.scopeBounds.height()) * 0.025F));
+        *uniforms = { simd_make_float2(2.0F * radius / static_cast<float>(logicalSize.width),
+                          2.0F * radius / static_cast<float>(logicalSize.height)),
+            simd_make_float2(0.0F, 0.0F), simd_make_float4(0.10F, 0.55F, 0.70F, 0.28F) };
+
+        if (!fieldValid || prepared.scopeBounds.width() <= 0.0F
+            || prepared.scopeBounds.height() <= 0.0F) {
+            telemetry.stereoLastPointCount.store(0, std::memory_order_relaxed);
+            return prepared;
+        }
+
+        const auto elapsed = stereoSnapshotAcceptedTime != Clock::time_point { }
+            ? std::chrono::duration<double>(now - stereoSnapshotAcceptedTime).count()
+            : 0.0;
+        const auto sourceCount = std::min<std::size_t>(
+            targetFrame.stereoFieldPointCount, maximumStereoFieldPointCount);
+        auto* const instances
+            = static_cast<StereoPointInstance*>(slot.stereoPointInstanceBuffer.contents);
+        const auto pointToClip = [logicalSize](const float x, const float y) noexcept {
+            return simd_make_float2((2.0F * x / static_cast<float>(logicalSize.width)) - 1.0F,
+                (2.0F * y / static_cast<float>(logicalSize.height)) - 1.0F);
+        };
+
+        for (std::size_t index = 0; index < sourceCount; ++index) {
+            const auto& point = targetFrame.stereoFieldPoints[index];
+            if (!std::isfinite(point.horizontal) || !std::isfinite(point.vertical))
+                continue;
+
+            const auto opacity = stereoFieldPointAgeOpacity(point.normalizedAge, elapsed);
+            if (opacity <= 0.0F)
+                continue;
+
+            const auto x = mapStereoFieldCoordinate(
+                point.horizontal, prepared.scopeBounds.left, prepared.scopeBounds.right);
+            const auto y = mapStereoFieldCoordinate(
+                point.vertical, prepared.scopeBounds.bottom, prepared.scopeBounds.top);
+            instances[prepared.count++] = { pointToClip(x, y), opacity, 0.0F };
+        }
+
+        telemetry.stereoLastPointCount.store(
+            static_cast<std::uint32_t>(prepared.count), std::memory_order_relaxed);
+        telemetry.stereoPointInstancesPrepared.fetch_add(prepared.count, std::memory_order_relaxed);
+        return prepared;
+    }
+
     void displayLinkUpdate(CAMetalDisplayLinkUpdate* update)
     {
         assertMessageThread();
@@ -2565,7 +2893,7 @@ public:
 
         if (source.copyLatestVisualizationFrame(incomingFrame)) {
             telemetry->snapshotReads.fetch_add(1, std::memory_order_relaxed);
-            acceptSnapshot(incomingFrame, *telemetry);
+            acceptSnapshot(incomingFrame, callbackTime, *telemetry);
         }
 
         const auto spectrumSettings = getSpectrumSettings();
@@ -2579,6 +2907,8 @@ public:
             { 0.0, 0.0, static_cast<double>(boundsSize.width),
                 static_cast<double>(boundsSize.height) },
             getDashboardLayoutSplits());
+        const auto preparedStereoPoints = prepareStereoPointInstances(
+            slot, boundsSize, dashboardLayout, callbackTime, *telemetry);
 
         auto* vertices = static_cast<MetalVertex*>(slot.vertexBuffer.contents);
         const auto batches = populateVertices(
@@ -2699,6 +3029,35 @@ public:
             [encoder drawPrimitives:MTLPrimitiveTypeTriangle
                         vertexStart:batches.peakRms.start
                         vertexCount:batches.peakRms.count];
+        }
+
+        const auto stereoPanelScissor
+            = makeScissorRect(dashboardLayout[DashboardPanel::stereoField], boundsSize,
+                drawable.texture.width, drawable.texture.height);
+        if (stereoPanelScissor.width != 0 && stereoPanelScissor.height != 0
+            && batches.stereoGuides.count != 0) {
+            [encoder setScissorRect:stereoPanelScissor];
+            [encoder drawPrimitives:MTLPrimitiveTypeTriangle
+                        vertexStart:batches.stereoGuides.start
+                        vertexCount:batches.stereoGuides.count];
+        }
+
+        if (preparedStereoPoints.count != 0 && stereoPointPipelineState != nil) {
+            const auto stereoScopeScissor = makeScissorRect(preparedStereoPoints.scopeBounds,
+                boundsSize, drawable.texture.width, drawable.texture.height);
+            if (stereoScopeScissor.width != 0 && stereoScopeScissor.height != 0) {
+                [encoder setScissorRect:stereoScopeScissor];
+                [encoder setRenderPipelineState:stereoPointPipelineState];
+                [encoder setVertexBuffer:slot.stereoPointInstanceBuffer offset:0 atIndex:0];
+                [encoder setVertexBuffer:slot.stereoPointUniformBuffer offset:0 atIndex:1];
+                [encoder drawPrimitives:MTLPrimitiveTypeTriangleStrip
+                            vertexStart:0
+                            vertexCount:4
+                          instanceCount:preparedStereoPoints.count];
+                telemetry->stereoPointDrawCalls.fetch_add(1, std::memory_order_relaxed);
+                [encoder setRenderPipelineState:pipelineState];
+                [encoder setVertexBuffer:slot.vertexBuffer offset:0 atIndex:0];
+            }
         }
 
         if (batches.dashboardSplitters.count != 0) {
@@ -2860,6 +3219,7 @@ private:
     id<MTLRenderPipelineState> pipelineState = nil;
     id<MTLRenderPipelineState> textPipelineState = nil;
     id<MTLRenderPipelineState> spectrogramPipelineState = nil;
+    id<MTLRenderPipelineState> stereoPointPipelineState = nil;
     id<MTLSamplerState> glyphSamplerState = nil;
     id<MTLSamplerState> spectrogramPaletteSamplerState = nil;
     id<MTLTexture> glyphAtlasTexture = nil;
@@ -2902,6 +3262,7 @@ private:
     std::array<float, maximumSpectrumBinCount> displayedSpectrumPeakHold { };
     std::uint64_t lastSpectrumSequence = 0;
     std::uint64_t lastMeterSequence = 0;
+    std::uint64_t lastStereoSequence = 0;
     std::uint64_t lastGeneration = 0;
     std::uint64_t lastFftGeneration = 0;
     bool hasDisplayFrame = false;
@@ -2912,6 +3273,7 @@ private:
     std::uint32_t spectrogramTextureColumnCount = 0;
 
     Clock::time_point previousInterpolationTime;
+    Clock::time_point stereoSnapshotAcceptedTime;
     CFTimeInterval previousDisplayCallbackHostTime = 0.0;
     CFTimeInterval previousTargetTimestamp = 0.0;
     CFTimeInterval previousTargetPresentationTimestamp = 0.0;
@@ -3007,14 +3369,21 @@ private:
             [library newFunctionWithName:@"audioInsightTextFragment"];
         id<MTLFunction> spectrogramFragmentFunction =
             [library newFunctionWithName:@"audioInsightSpectrogramFragment"];
+        id<MTLFunction> stereoPointVertexFunction =
+            [library newFunctionWithName:@"audioInsightStereoPointVertex"];
+        id<MTLFunction> stereoPointFragmentFunction =
+            [library newFunctionWithName:@"audioInsightStereoPointFragment"];
 
         if (vertexFunction == nil || fragmentFunction == nil || textFragmentFunction == nil
-            || spectrogramFragmentFunction == nil) {
+            || spectrogramFragmentFunction == nil || stereoPointVertexFunction == nil
+            || stereoPointFragmentFunction == nil) {
             initializationError = "Metal could not load the visualization shader functions.";
             [vertexFunction release];
             [fragmentFunction release];
             [textFragmentFunction release];
             [spectrogramFragmentFunction release];
+            [stereoPointVertexFunction release];
+            [stereoPointFragmentFunction release];
             [library release];
             return;
         }
@@ -3050,11 +3419,25 @@ private:
             [view.device newRenderPipelineStateWithDescriptor:descriptor
                                                         error:&spectrogramPipelineError];
 
+        NSError* stereoPointPipelineError = nil;
+        descriptor.label = @"Audio Insight Stereo field point pipeline";
+        descriptor.vertexFunction = stereoPointVertexFunction;
+        descriptor.fragmentFunction = stereoPointFragmentFunction;
+        // Add each soft sprite's source-weighted colour to the field. Repeated
+        // points therefore brighten into a bounded density impression instead
+        // of repeatedly replacing the same translucent cyan.
+        colourAttachment.destinationRGBBlendFactor = MTLBlendFactorOne;
+        stereoPointPipelineState =
+            [view.device newRenderPipelineStateWithDescriptor:descriptor
+                                                        error:&stereoPointPipelineError];
+
         [descriptor release];
         [vertexFunction release];
         [fragmentFunction release];
         [textFragmentFunction release];
         [spectrogramFragmentFunction release];
+        [stereoPointVertexFunction release];
+        [stereoPointFragmentFunction release];
         [library release];
 
         if (pipelineState == nil) {
@@ -3075,6 +3458,13 @@ private:
             initializationError = spectrogramPipelineError != nil
                 ? juce::String::fromUTF8(spectrogramPipelineError.localizedDescription.UTF8String)
                 : juce::String("Metal could not create the Spectrogram pipeline.");
+            return;
+        }
+
+        if (stereoPointPipelineState == nil) {
+            initializationError = stereoPointPipelineError != nil
+                ? juce::String::fromUTF8(stereoPointPipelineError.localizedDescription.UTF8String)
+                : juce::String("Metal could not create the Stereo field point pipeline.");
             return;
         }
 
@@ -3127,9 +3517,18 @@ private:
                 [view.device newBufferWithLength:spectrogramUniformBufferBytes
                                          options:MTLResourceStorageModeShared |
                     MTLResourceCPUCacheModeWriteCombined];
+            slot.stereoPointInstanceBuffer = [view.device
+                newBufferWithLength:maximumStereoFieldPointCount * sizeof(StereoPointInstance)
+                            options:MTLResourceStorageModeShared |
+                MTLResourceCPUCacheModeWriteCombined];
+            slot.stereoPointUniformBuffer =
+                [view.device newBufferWithLength:stereoPointUniformBufferBytes
+                                         options:MTLResourceStorageModeShared |
+                    MTLResourceCPUCacheModeWriteCombined];
 
             if (slot.vertexBuffer == nil || slot.spectrogramStagingBuffer == nil
-                || slot.spectrogramValidityBuffer == nil || slot.spectrogramUniformBuffer == nil) {
+                || slot.spectrogramValidityBuffer == nil || slot.spectrogramUniformBuffer == nil
+                || slot.stereoPointInstanceBuffer == nil || slot.stereoPointUniformBuffer == nil) {
                 initializationError = "Metal could not allocate the visualization buffers.";
                 return;
             }
@@ -3286,6 +3685,8 @@ private:
             const auto cellTop = cellBottom + static_cast<CGFloat>(cellHeight);
             const unichar characterValue = index == infinityGlyphAtlasIndex
                 ? static_cast<unichar>(0x221e)
+                : index == emDashGlyphAtlasIndex
+                ? static_cast<unichar>(0x2014)
                 : static_cast<unichar>(index + printableAsciiFirst);
             auto* character = [NSString stringWithCharacters:&characterValue length:1];
             [character drawAtPoint:NSMakePoint(cellLeft + static_cast<CGFloat>(paddingPixels),
@@ -3399,7 +3800,8 @@ private:
         // and meter-readout tables here. Later display callbacks only index
         // already-formatted runs.
         juce::ignoreUnused(cachedFrequencyEndpointTextRuns());
-        juce::ignoreUnused(cachedPeakRmsReadoutTextRuns(), cachedMinusInfinityTextRun());
+        juce::ignoreUnused(cachedPeakRmsReadoutTextRuns(), cachedMinusInfinityTextRun(),
+            cachedStereoCorrelationTextRuns(), cachedEmDashTextRun());
 
         [glyphAtlasTexture release];
         glyphAtlasTexture = newTexture;
@@ -3472,7 +3874,13 @@ private:
         destination.spectrogramTextureBytes.store(
             sourceTelemetry.spectrogramTextureBytes.load(std::memory_order_relaxed),
             std::memory_order_relaxed);
+        destination.stereoLastPointCount.store(
+            sourceTelemetry.stereoLastPointCount.load(std::memory_order_relaxed),
+            std::memory_order_relaxed);
         destination.backingScale.store(sourceTelemetry.backingScale.load(std::memory_order_relaxed),
+            std::memory_order_relaxed);
+        destination.stereoCorrelation.store(
+            sourceTelemetry.stereoCorrelation.load(std::memory_order_relaxed),
             std::memory_order_relaxed);
         destination.metalAvailable.store(
             sourceTelemetry.metalAvailable.load(std::memory_order_relaxed),
@@ -3483,6 +3891,11 @@ private:
         destination.effectivelyRendering.store(
             sourceTelemetry.effectivelyRendering.load(std::memory_order_relaxed),
             std::memory_order_relaxed);
+        destination.stereoCorrelationValid.store(
+            sourceTelemetry.stereoCorrelationValid.load(std::memory_order_relaxed),
+            std::memory_order_relaxed);
+        destination.stereoMono.store(
+            sourceTelemetry.stereoMono.load(std::memory_order_relaxed), std::memory_order_relaxed);
     }
 
     void resetTelemetryTimingAtCallbackBoundary() noexcept
@@ -3704,7 +4117,9 @@ private:
         lastFftGeneration = 0;
         lastSpectrumSequence = 0;
         lastMeterSequence = 0;
+        lastStereoSequence = 0;
         hasDisplayFrame = false;
+        stereoSnapshotAcceptedTime = { };
         clearSpectrogramHistory(callbackTelemetry.get());
         spectrogramConfigurationClearPending.store(false, std::memory_order_relaxed);
         previousInterpolationTime = { };
@@ -3891,13 +4306,16 @@ private:
         return presentationSequence;
     }
 
-    void acceptSnapshot(const VisualizationFrame& incoming, AtomicRenderTelemetry& telemetry)
+    void acceptSnapshot(const VisualizationFrame& incoming, const Clock::time_point acceptedTime,
+        AtomicRenderTelemetry& telemetry)
     {
         const auto generationChanged = incoming.generation != lastGeneration;
         const auto fftGenerationChanged = incoming.fftGeneration != lastFftGeneration;
+        const auto stereoChanged = !hasDisplayFrame || generationChanged
+            || incoming.stereoSequence != lastStereoSequence;
         const auto isNew = !hasDisplayFrame || generationChanged || fftGenerationChanged
             || incoming.spectrumSequence != lastSpectrumSequence
-            || incoming.meterSequence != lastMeterSequence;
+            || incoming.meterSequence != lastMeterSequence || stereoChanged;
 
         if (!isNew)
             return;
@@ -3907,8 +4325,12 @@ private:
         lastFftGeneration = incoming.fftGeneration;
         lastSpectrumSequence = incoming.spectrumSequence;
         lastMeterSequence = incoming.meterSequence;
+        lastStereoSequence = incoming.stereoSequence;
+        if (stereoChanged)
+            stereoSnapshotAcceptedTime = acceptedTime;
         telemetry.framesWithNewSnapshot.fetch_add(1, std::memory_order_relaxed);
         telemetry.lastSpectrumSequence.store(lastSpectrumSequence, std::memory_order_relaxed);
+        telemetry.lastStereoSequence.store(lastStereoSequence, std::memory_order_relaxed);
 
         if (!hasDisplayFrame || generationChanged || fftGenerationChanged) {
             displayedSpectrum.fill(minimumSpectrumDecibels);
@@ -4133,6 +4555,25 @@ private:
             appendQuad(bounds.right - thickness, bounds.bottom + thickness, bounds.right,
                 bounds.top - thickness, colour);
         };
+        const auto appendLine
+            = [&](const float startX, const float startY, const float endX, const float endY,
+                  const float thickness, const simd_float4 colour) noexcept {
+                  const auto deltaX = endX - startX;
+                  const auto deltaY = endY - startY;
+                  const auto length = std::sqrt((deltaX * deltaX) + (deltaY * deltaY));
+                  if (length <= 0.0001F || thickness <= 0.0F)
+                      return;
+
+                  const auto halfThickness = thickness * 0.5F;
+                  const auto normalX = -deltaY * halfThickness / length;
+                  const auto normalY = deltaX * halfThickness / length;
+                  appendVertex(startX + normalX, startY + normalY, colour);
+                  appendVertex(startX - normalX, startY - normalY, colour);
+                  appendVertex(endX + normalX, endY + normalY, colour);
+                  appendVertex(endX + normalX, endY + normalY, colour);
+                  appendVertex(startX - normalX, startY - normalY, colour);
+                  appendVertex(endX - normalX, endY - normalY, colour);
+              };
 
         const auto headerHeight = [](const RenderRect& bounds) noexcept {
             return std::min(bounds.height(), std::clamp(bounds.height() * 0.13F, 18.0F, 26.0F));
@@ -4151,7 +4592,8 @@ private:
             const auto bounds = toRenderRect(dashboardLayout[panel], height);
             auto fillColour = placeholderPanelColour;
 
-            if (panel == DashboardPanel::spectrum || panel == DashboardPanel::peakRms)
+            if (panel == DashboardPanel::spectrum || panel == DashboardPanel::peakRms
+                || panel == DashboardPanel::stereoField)
                 fillColour = livePanelColour;
             else if (panel == DashboardPanel::spectrogram)
                 fillColour = spectrogramPanelColour;
@@ -4484,6 +4926,96 @@ private:
         }
 
         batches.peakRms.count = cursor - batches.peakRms.start;
+        batches.stereoGuides.start = cursor;
+
+        const auto stereoPanel = toRenderRect(dashboardLayout[DashboardPanel::stereoField], height);
+        constexpr auto stereoTextScale = 0.78F;
+        const auto stereoTextHeight = cachedGlyphCellHeight * stereoTextScale;
+        const auto stereoLayout = calculateStereoFieldPanelLayout(
+            stereoPanel.width(), stereoPanel.height(), headerHeight(stereoPanel), stereoTextHeight);
+        const auto toStereoPanelRect = [&](const PeakRmsLogicalRect& bounds) noexcept {
+            return RenderRect { stereoPanel.left + bounds.left, stereoPanel.bottom + bounds.bottom,
+                stereoPanel.left + bounds.right, stereoPanel.bottom + bounds.top };
+        };
+        const auto stereoScope = toStereoPanelRect(stereoLayout.scopeBounds);
+        const auto correlationTrack = toStereoPanelRect(stereoLayout.correlationTrackBounds);
+        const auto stereoMono = hasDisplayFrame && targetFrame.stereoMono;
+        const auto correlationReadout
+            = classifyStereoCorrelationReadout(targetFrame.stereoCorrelation,
+                hasDisplayFrame && !stereoMono && targetFrame.stereoCorrelationValid);
+        const auto correlationColour
+            = [](const StereoCorrelationColourRange range, const float alpha) noexcept {
+                  switch (range) {
+                  case StereoCorrelationColourRange::cyan:
+                      return simd_float4 { 0.18F, 0.88F, 0.86F, alpha };
+                  case StereoCorrelationColourRange::amber:
+                      return simd_float4 { 1.0F, 0.62F, 0.16F, alpha };
+                  case StereoCorrelationColourRange::neutral:
+                      return simd_float4 { 0.52F, 0.58F, 0.65F, alpha };
+                  }
+
+                  return simd_float4 { 0.52F, 0.58F, 0.65F, alpha };
+              };
+
+        if (stereoScope.width() > 0.0F && stereoScope.height() > 0.0F) {
+            constexpr auto scopeAxisColour = simd_float4 { 0.25F, 0.31F, 0.39F, 0.54F };
+            constexpr auto scopeBoundaryColour = simd_float4 { 0.30F, 0.38F, 0.47F, 0.68F };
+            const auto centreX = (stereoScope.left + stereoScope.right) * 0.5F;
+            const auto centreY = (stereoScope.bottom + stereoScope.top) * 0.5F;
+
+            appendLine(
+                stereoScope.left, centreY, stereoScope.right, centreY, 0.75F, scopeAxisColour);
+            appendLine(
+                centreX, stereoScope.bottom, centreX, stereoScope.top, 0.75F, scopeAxisColour);
+            appendLine(
+                centreX, stereoScope.top, stereoScope.right, centreY, 0.75F, scopeBoundaryColour);
+            appendLine(stereoScope.right, centreY, centreX, stereoScope.bottom, 0.75F,
+                scopeBoundaryColour);
+            appendLine(
+                centreX, stereoScope.bottom, stereoScope.left, centreY, 0.75F, scopeBoundaryColour);
+            appendLine(
+                stereoScope.left, centreY, centreX, stereoScope.top, 0.75F, scopeBoundaryColour);
+        }
+
+        if (correlationTrack.width() > 0.0F && correlationTrack.height() > 0.0F) {
+            constexpr auto correlationTrackColour = simd_float4 { 0.055F, 0.075F, 0.105F, 1.0F };
+            constexpr auto correlationTickColour = simd_float4 { 0.36F, 0.43F, 0.52F, 0.78F };
+            constexpr std::array<float, 5> correlationTicks { -1.0F, -0.5F, 0.0F, 0.5F, 1.0F };
+            appendQuad(correlationTrack.left, correlationTrack.bottom, correlationTrack.right,
+                correlationTrack.top, correlationTrackColour);
+
+            if (correlationTrack.width() >= 1.0F) {
+                for (const auto tick : correlationTicks) {
+                    const auto x = correlationTrack.left
+                        + (mapStereoCorrelationToUnit(tick) * correlationTrack.width());
+                    const auto tickLeft = std::clamp(
+                        x - 0.5F, correlationTrack.left, correlationTrack.right - 1.0F);
+                    appendQuad(tickLeft, correlationTrack.bottom,
+                        std::min(correlationTrack.right, tickLeft + 1.0F), correlationTrack.top,
+                        correlationTickColour);
+                }
+            }
+
+            if (correlationReadout.available) {
+                const auto centreX = correlationTrack.left
+                    + (mapStereoCorrelationToUnit(0.0F) * correlationTrack.width());
+                const auto valueX = correlationTrack.left
+                    + (mapStereoCorrelationToUnit(targetFrame.stereoCorrelation)
+                        * correlationTrack.width());
+                const auto fillLeft = std::min(centreX, valueX);
+                const auto fillRight = std::max(centreX, valueX);
+                appendQuad(fillLeft, correlationTrack.bottom + 1.0F, fillRight,
+                    correlationTrack.top - 1.0F,
+                    correlationColour(correlationReadout.colourRange, 0.52F));
+                const auto markerWidth = std::min(2.0F, correlationTrack.width());
+                const auto markerLeft = std::clamp(valueX - (markerWidth * 0.5F),
+                    correlationTrack.left, correlationTrack.right - markerWidth);
+                appendQuad(markerLeft, correlationTrack.bottom, markerLeft + markerWidth,
+                    correlationTrack.top, correlationColour(correlationReadout.colourRange, 1.0F));
+            }
+        }
+
+        batches.stereoGuides.count = cursor - batches.stereoGuides.start;
         batches.dashboardSplitters.start = cursor;
 
         if (dashboardLayoutEditing.load(std::memory_order_acquire)) {
@@ -4705,10 +5237,35 @@ private:
                             axisTextScale, axisTextColour);
                     }
                 }
+            } else if (panel == DashboardPanel::stereoField) {
+                constexpr auto monoTextColour = simd_float4 { 0.64F, 0.76F, 0.84F, 0.94F };
+
+                if (stereoLayout.showCorrelationReadout) {
+                    const auto& readoutRun = correlationReadout.available
+                        ? cachedStereoCorrelationTextRuns()[static_cast<std::size_t>(
+                              correlationReadout.hundredths + 100)]
+                        : cachedEmDashTextRun();
+                    const auto readoutWidth = monospacedTextRunWidth(readoutRun) * stereoTextScale;
+                    appendMonospacedTextRun(readoutRun,
+                        stereoPanel.left + ((stereoPanel.width() - readoutWidth) * 0.5F),
+                        stereoPanel.bottom + stereoLayout.correlationReadoutBottom, stereoTextScale,
+                        correlationColour(correlationReadout.colourRange, 0.96F));
+                }
+
+                if (stereoMono && stereoScope.width() > 0.0F && stereoScope.height() > 0.0F) {
+                    const auto& monoRun = cachedFixedTextRuns[monoStateTextRunIndex];
+                    const auto monoScale = std::min(
+                        0.72F, std::max(0.0F, (stereoScope.width() - 4.0F) / monoRun.width));
+                    const auto monoWidth = monoRun.width * monoScale;
+                    const auto monoHeight = monoRun.height * monoScale;
+                    appendTextRun(monoRun,
+                        stereoScope.left + ((stereoScope.width() - monoWidth) * 0.5F),
+                        std::max(stereoScope.bottom + 2.0F, stereoScope.top - monoHeight - 2.0F),
+                        monoScale, monoTextColour);
+                }
             }
 
-            if (panel != DashboardPanel::spectrum && panel != DashboardPanel::peakRms
-                && panel != DashboardPanel::spectrogram) {
+            if (panel == DashboardPanel::loudness) {
                 const auto& placeholderRun = cachedFixedTextRuns[placeholderTextRunIndex];
                 const auto placeholderBounds = RenderRect { bounds.left, bounds.bottom,
                     bounds.right, bounds.top - panelHeaderHeight };
@@ -4897,8 +5454,8 @@ NSString* makeDashboardAccessibilityString(const std::string_view value)
     self.accessibilityElement = YES;
     self.accessibilityRole = NSAccessibilityGroupRole;
     self.accessibilityLabel = @"Audio Insight analyzer dashboard";
-    self.accessibilityHelp = @"Contains Spectrum, Peak/RMS, and Spectrogram visualizations plus "
-                             @"unfinished Stereo and Loudness panels.";
+    self.accessibilityHelp = @"Contains Spectrum, Peak/RMS, Spectrogram, and Stereo field with "
+                             @"correlation visualizations, plus an unfinished Loudness panel.";
     auto* clearAction = [[NSAccessibilityCustomAction alloc]
         initWithName:@"Clear Peak/RMS holds and OVER"
               target:self

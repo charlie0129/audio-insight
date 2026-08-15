@@ -321,6 +321,22 @@ void appendRawSections(
         "History texture allocation", metal.spectrogramTextureBytes, "bytes"));
     sections.emplace_back(std::move(spectrogramRender));
 
+    PerformanceMetricGroup stereoRender { "Renderer Stereo field", { } };
+    stereoRender.rows.emplace_back(rawUnsigned(
+        "metal.lastStereoSequence", "Last accepted Stereo sequence", metal.lastStereoSequence));
+    stereoRender.rows.emplace_back(rawUnsigned("metal.stereoPointInstancesPrepared",
+        "Point instances prepared", metal.stereoPointInstancesPrepared, "instances"));
+    stereoRender.rows.emplace_back(rawUnsigned(
+        "metal.stereoPointDrawCalls", "Point draw calls", metal.stereoPointDrawCalls, "calls"));
+    stereoRender.rows.emplace_back(rawUnsigned(
+        "metal.stereoLastPointCount", "Last point count", metal.stereoLastPointCount, "points"));
+    stereoRender.rows.emplace_back(
+        rawDouble("metal.stereoCorrelation", "Correlation", metal.stereoCorrelation, { }, 3));
+    stereoRender.rows.emplace_back(rawBoolean(
+        "metal.stereoCorrelationValid", "Correlation valid", metal.stereoCorrelationValid));
+    stereoRender.rows.emplace_back(rawBoolean("metal.stereoMono", "Mono input", metal.stereoMono));
+    sections.emplace_back(std::move(stereoRender));
+
     PerformanceMetricGroup timing { "Renderer timing", { } };
     timing.rows.emplace_back(rawDuration(
         "metal.lastCpuEncodeNanoseconds", "Last CPU encode", metal.lastCpuEncodeNanoseconds));
@@ -459,6 +475,43 @@ void appendRawSections(
     spectrogramAnalysis.rows.emplace_back(rawUnsigned("analysis.spectrogramQueueReadyColumns",
         "Ready columns", analysis.spectrogramQueueReadyColumns, "columns"));
     sections.emplace_back(std::move(spectrogramAnalysis));
+
+    PerformanceMetricGroup stereoAnalysis { "Stereo analysis and correlation", { } };
+    stereoAnalysis.rows.emplace_back(rawUnsigned("analysis.stereoFieldProcessedChunks",
+        "Vectorscope chunks processed", analysis.stereoFieldProcessedChunks, "chunks"));
+    stereoAnalysis.rows.emplace_back(rawUnsigned("analysis.stereoFieldProcessedFrames",
+        "Vectorscope source frames processed", analysis.stereoFieldProcessedFrames, "frames"));
+    stereoAnalysis.rows.emplace_back(rawUnsigned("analysis.stereoFieldSelectedPoints",
+        "Vectorscope points selected", analysis.stereoFieldSelectedPoints, "points"));
+    stereoAnalysis.rows.emplace_back(rawUnsigned("analysis.stereoFieldHistoryResets",
+        "Vectorscope history resets", analysis.stereoFieldHistoryResets, "resets"));
+    stereoAnalysis.rows.emplace_back(rawUnsigned("analysis.stereoFieldInvalidChunks",
+        "Invalid vectorscope chunks", analysis.stereoFieldInvalidChunks, "chunks"));
+    stereoAnalysis.rows.emplace_back(rawUnsigned("analysis.stereoCorrelationProcessedSamples",
+        "Correlation samples processed", analysis.stereoCorrelationProcessedSamples, "samples"));
+    stereoAnalysis.rows.emplace_back(rawUnsigned("analysis.stereoCorrelationPublishedEndpoints",
+        "Correlation endpoints published", analysis.stereoCorrelationPublishedEndpoints,
+        "endpoints"));
+    stereoAnalysis.rows.emplace_back(
+        rawUnsigned("analysis.stereoCorrelationConsumedEndpoints", "Correlation endpoints consumed",
+            analysis.stereoCorrelationConsumedEndpoints, "endpoints"));
+    stereoAnalysis.rows.emplace_back(rawUnsigned("analysis.stereoCorrelationStateResets",
+        "Correlation state resets", analysis.stereoCorrelationStateResets, "resets"));
+    stereoAnalysis.rows.emplace_back(rawUnsigned("analysis.stereoCapturedFrameEnd",
+        "Stereo captured-frame endpoint", analysis.stereoCapturedFrameEnd, "frames"));
+    stereoAnalysis.rows.emplace_back(rawUnsigned(
+        "analysis.stereoSequence", "Stereo snapshot sequence", analysis.stereoSequence));
+    stereoAnalysis.rows.emplace_back(rawUnsigned("analysis.stereoFieldPointCount",
+        "Current vectorscope point count", analysis.stereoFieldPointCount, "points"));
+    stereoAnalysis.rows.emplace_back(rawUnsigned("analysis.stereoPointStrideFrames",
+        "Vectorscope point stride", analysis.stereoPointStrideFrames, "frames"));
+    stereoAnalysis.rows.emplace_back(rawBoolean(
+        "analysis.stereoFieldValid", "Vectorscope field valid", analysis.stereoFieldValid));
+    stereoAnalysis.rows.emplace_back(rawBoolean(
+        "analysis.stereoCorrelationValid", "Correlation valid", analysis.stereoCorrelationValid));
+    stereoAnalysis.rows.emplace_back(
+        rawBoolean("analysis.stereoMono", "Mono input", analysis.stereoMono));
+    sections.emplace_back(std::move(stereoAnalysis));
 
     PerformanceMetricGroup jobs { "Analysis jobs and publication", { } };
     jobs.rows.emplace_back(
@@ -672,6 +725,10 @@ void buildRates(const PerformanceMetricsSnapshot& current,
         current.metal.spectrogramUploadCommands, previous.metal.spectrogramUploadCommands);
     addMetal("metal.spectrogramUploadBytes", "Spectrogram upload throughput", "bytes/s",
         current.metal.spectrogramUploadBytes, previous.metal.spectrogramUploadBytes);
+    addMetal("metal.stereoPointInstancesPrepared", "Stereo point instances prepared", "instances/s",
+        current.metal.stereoPointInstancesPrepared, previous.metal.stereoPointInstancesPrepared);
+    addMetal("metal.stereoPointDrawCalls", "Stereo point draw calls", "calls/s",
+        current.metal.stereoPointDrawCalls, previous.metal.stereoPointDrawCalls);
 
     const auto& capture = current.analysis.capture;
     const auto& previousCapture = previous.analysis.capture;
@@ -708,6 +765,39 @@ void buildRates(const PerformanceMetricsSnapshot& current,
     appendRate(rates, "analysis.meters.consumerDiscontinuities", "Meter discontinuities",
         "events/s", meters.consumerDiscontinuities, previousMeters.consumerDiscontinuities,
         elapsedSeconds, baselineIsValid);
+
+    appendRate(rates, "analysis.stereoFieldProcessedChunks", "Vectorscope chunks processed",
+        "chunks/s", current.analysis.stereoFieldProcessedChunks,
+        previous.analysis.stereoFieldProcessedChunks, elapsedSeconds, baselineIsValid);
+    appendRate(rates, "analysis.stereoFieldProcessedFrames", "Vectorscope source frames processed",
+        "frames/s", current.analysis.stereoFieldProcessedFrames,
+        previous.analysis.stereoFieldProcessedFrames, elapsedSeconds, baselineIsValid);
+    appendRate(rates, "analysis.stereoFieldSelectedPoints", "Vectorscope points selected",
+        "points/s", current.analysis.stereoFieldSelectedPoints,
+        previous.analysis.stereoFieldSelectedPoints, elapsedSeconds, baselineIsValid);
+    appendRate(rates, "analysis.stereoFieldHistoryResets", "Vectorscope history resets", "resets/s",
+        current.analysis.stereoFieldHistoryResets, previous.analysis.stereoFieldHistoryResets,
+        elapsedSeconds, baselineIsValid);
+    appendRate(rates, "analysis.stereoFieldInvalidChunks", "Invalid vectorscope chunks", "chunks/s",
+        current.analysis.stereoFieldInvalidChunks, previous.analysis.stereoFieldInvalidChunks,
+        elapsedSeconds, baselineIsValid);
+    appendRate(rates, "analysis.stereoCorrelationProcessedSamples", "Correlation samples processed",
+        "samples/s", current.analysis.stereoCorrelationProcessedSamples,
+        previous.analysis.stereoCorrelationProcessedSamples, elapsedSeconds, baselineIsValid);
+    appendRate(rates, "analysis.stereoCorrelationPublishedEndpoints",
+        "Correlation endpoints published", "endpoints/s",
+        current.analysis.stereoCorrelationPublishedEndpoints,
+        previous.analysis.stereoCorrelationPublishedEndpoints, elapsedSeconds, baselineIsValid);
+    appendRate(rates, "analysis.stereoCorrelationConsumedEndpoints",
+        "Correlation endpoints consumed", "endpoints/s",
+        current.analysis.stereoCorrelationConsumedEndpoints,
+        previous.analysis.stereoCorrelationConsumedEndpoints, elapsedSeconds, baselineIsValid);
+    appendRate(rates, "analysis.stereoCorrelationStateResets", "Correlation state resets",
+        "resets/s", current.analysis.stereoCorrelationStateResets,
+        previous.analysis.stereoCorrelationStateResets, elapsedSeconds, baselineIsValid);
+    appendRate(rates, "analysis.stereoSequence", "Stereo snapshot updates", "updates/s",
+        current.analysis.stereoSequence, previous.analysis.stereoSequence, elapsedSeconds,
+        baselineIsValid);
 
     const auto& scheduler = current.analysis.scheduler;
     const auto& previousScheduler = previous.analysis.scheduler;

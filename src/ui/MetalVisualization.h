@@ -200,6 +200,10 @@ inline constexpr std::size_t maximumPeakRmsReadoutGlyphs = 6;
 // 20 * log10(maximum finite float) rounds to approximately +770.6 dB.
 inline constexpr int maximumFiniteFloatPeakRmsReadoutTenths = 7'706;
 
+inline constexpr float stereoFieldHistorySeconds = 0.250F;
+inline constexpr float stereoCorrelationNeutralThreshold = 0.05F;
+inline constexpr std::size_t maximumStereoCorrelationReadoutGlyphs = 5;
+
 enum class PeakRmsLevelRange : std::uint8_t {
     cyan,
     amber,
@@ -264,6 +268,25 @@ struct SpectrumClearLayout final {
 
 struct PeakRmsTickLabelSelection final {
     std::array<bool, peakRmsMajorDecibelTicks.size()> visible { };
+};
+
+enum class StereoCorrelationColourRange : std::uint8_t {
+    cyan,
+    neutral,
+    amber,
+};
+
+struct StereoCorrelationReadout final {
+    int hundredths = 0;
+    StereoCorrelationColourRange colourRange = StereoCorrelationColourRange::neutral;
+    bool available = false;
+};
+
+struct StereoFieldPanelLayout final {
+    PeakRmsLogicalRect scopeBounds;
+    PeakRmsLogicalRect correlationTrackBounds;
+    float correlationReadoutBottom = 0.0F;
+    bool showCorrelationReadout = false;
 };
 
 /** The shared Spectrum/Spectrogram frequency-coordinate transform. */
@@ -339,6 +362,30 @@ struct SpectrumDecibelTicks final {
     float axisLength, float labelHeight, float minimumGap = 2.0F) noexcept;
 
 /**
+    Computes the fixed-scale Stereo field square and integrated correlation strip.
+
+    All output is in bottom-left-origin logical points. The scope remains square,
+    and optional text is removed before either primary visualization is collapsed.
+*/
+[[nodiscard]] StereoFieldPanelLayout calculateStereoFieldPanelLayout(
+    float panelWidth, float panelHeight, float headerHeight, float textHeight) noexcept;
+
+/** Maps one fixed full-scale coordinate without per-frame normalization or clipping. */
+[[nodiscard]] float mapStereoFieldCoordinate(
+    float coordinate, float minimumPosition, float maximumPosition) noexcept;
+
+/** Maps correlation from -1..+1 to the fixed horizontal strip. */
+[[nodiscard]] float mapStereoCorrelationToUnit(float correlation) noexcept;
+
+/** Classifies and rounds the bounded two-decimal correlation readout. */
+[[nodiscard]] StereoCorrelationReadout classifyStereoCorrelationReadout(
+    float correlation, bool valid) noexcept;
+
+/** Linear 250 ms point-age fade, including display time since snapshot acceptance. */
+[[nodiscard]] float stereoFieldPointAgeOpacity(
+    float normalizedAge, double elapsedSinceSnapshotSeconds) noexcept;
+
+/**
     Computes the bounded local-point geometry for the Peak/RMS panel.
 
     The result uses a bottom-left origin and never depends on drawable pixels,
@@ -388,22 +435,28 @@ struct MetalVisualizationGeometryLimits final {
     // RMS, live sample peak, held sample peak) for each of two channels.
     static constexpr std::size_t maximumMeterVertices
         = (peakRmsMajorDecibelTicks.size() + 5 + (2 * 4)) * 6;
-    static constexpr std::size_t maximumFixedTextGlyphs = 95;
+    // Two scope axes, four diamond edges, five correlation ticks, and
+    // track/fill/marker geometry.
+    // Point sprites live in a separate fixed-capacity instance buffer.
+    static constexpr std::size_t maximumStereoVertices = (6 + 5 + 3) * 6;
+    static constexpr std::size_t maximumFixedTextGlyphs = 80;
     static constexpr std::size_t maximumDecibelLabelGlyphs = 7;
     // CLEAR, two channel labels, two OVER labels, two six-glyph readouts,
     // and every fixed scale label.
     static constexpr std::size_t maximumPeakRmsTextGlyphs = 5 + 2 + 8 + 12 + 20;
     static constexpr std::size_t maximumSpectrumControlTextGlyphs = 5;
+    static constexpr std::size_t maximumStereoTextGlyphs = maximumStereoCorrelationReadoutGlyphs;
     static constexpr std::size_t maximumNumericAxisTextGlyphs
         = (2 * maximumFrequencyAxisTickCount * maximumFrequencyAxisLabelGlyphs)
         + (cachedDecibelTickCount * maximumDecibelLabelGlyphs);
     static constexpr std::size_t maximumTextVertices
         = (maximumFixedTextGlyphs + maximumNumericAxisTextGlyphs + maximumPeakRmsTextGlyphs
-              + maximumSpectrumControlTextGlyphs)
+              + maximumSpectrumControlTextGlyphs + maximumStereoTextGlyphs)
         * 6;
     static constexpr std::size_t maximumGeneratedVertices = maximumShellVertices
         + maximumDashboardSplitterVertices + maximumGridVertices + maximumSpectrumVertices
-        + maximumSpectrogramVertices + maximumMeterVertices + maximumTextVertices;
+        + maximumSpectrogramVertices + maximumMeterVertices + maximumStereoVertices
+        + maximumTextVertices;
 };
 } // namespace detail
 
@@ -461,6 +514,9 @@ struct MetalRenderTelemetry {
     std::uint64_t spectrogramUploadCommands = 0;
     std::uint64_t spectrogramUploadBytes = 0;
     std::uint64_t spectrogramLastColumnSequence = 0;
+    std::uint64_t lastStereoSequence = 0;
+    std::uint64_t stereoPointInstancesPrepared = 0;
+    std::uint64_t stereoPointDrawCalls = 0;
 
     std::uint64_t lastCpuEncodeNanoseconds = 0;
     std::uint64_t maximumCpuEncodeNanoseconds = 0;
@@ -501,12 +557,16 @@ struct MetalRenderTelemetry {
     std::uint32_t spectrogramTextureRows = 0;
     std::uint32_t spectrogramTextureColumns = 0;
     std::uint64_t spectrogramTextureBytes = 0;
+    std::uint32_t stereoLastPointCount = 0;
     double backingScale = 1.0;
+    double stereoCorrelation = 0.0;
 
     bool metalAvailable = false;
     bool renderingRequested = false;
     bool effectivelyRendering = false;
     bool resetPending = false;
+    bool stereoCorrelationValid = false;
+    bool stereoMono = false;
 };
 
 /** Coherently packed, presentation-only Spectrum settings. */

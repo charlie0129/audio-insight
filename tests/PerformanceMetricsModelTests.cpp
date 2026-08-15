@@ -44,13 +44,13 @@ consteval std::size_t aggregateFieldCount()
 // separately because the view model expands them into individual rows.
 static_assert(aggregateFieldCount<PresentedFrameIntervalSample>() == 2);
 static_assert(aggregateFieldCount<FrameLatencySample>() == 9);
-static_assert(aggregateFieldCount<MetalRenderTelemetry>() == 79);
+static_assert(aggregateFieldCount<MetalRenderTelemetry>() == 86);
 static_assert(aggregateFieldCount<StereoSampleCapture::Telemetry>() == 9);
 static_assert(aggregateFieldCount<StereoMeterAccumulator::Telemetry>() == 7);
 static_assert(aggregateFieldCount<SharedAnalysisScheduler::Counters>() == 3);
-static_assert(aggregateFieldCount<AnalysisTelemetry>() == 43);
+static_assert(aggregateFieldCount<AnalysisTelemetry>() == 59);
 
-constexpr std::array<std::string_view, 138> expectedRawFieldNames {
+constexpr std::array<std::string_view, 161> expectedRawFieldNames {
     "metal.epoch",
     "metal.displayLinkCallbacks",
     "metal.submittedFrames",
@@ -97,6 +97,9 @@ constexpr std::array<std::string_view, 138> expectedRawFieldNames {
     "metal.spectrogramUploadCommands",
     "metal.spectrogramUploadBytes",
     "metal.spectrogramLastColumnSequence",
+    "metal.lastStereoSequence",
+    "metal.stereoPointInstancesPrepared",
+    "metal.stereoPointDrawCalls",
     "metal.lastCpuEncodeNanoseconds",
     "metal.maximumCpuEncodeNanoseconds",
     "metal.lastGpuExecutionNanoseconds",
@@ -125,11 +128,15 @@ constexpr std::array<std::string_view, 138> expectedRawFieldNames {
     "metal.spectrogramTextureRows",
     "metal.spectrogramTextureColumns",
     "metal.spectrogramTextureBytes",
+    "metal.stereoLastPointCount",
     "metal.backingScale",
+    "metal.stereoCorrelation",
     "metal.metalAvailable",
     "metal.renderingRequested",
     "metal.effectivelyRendering",
     "metal.resetPending",
+    "metal.stereoCorrelationValid",
+    "metal.stereoMono",
     "analysis.capture.attemptedChunks",
     "analysis.capture.publishedChunks",
     "analysis.capture.reclaimedReadyChunks",
@@ -146,6 +153,22 @@ constexpr std::array<std::string_view, 138> expectedRawFieldNames {
     "analysis.meters.consumerDiscontinuities",
     "analysis.meters.readyHighWaterMark",
     "analysis.meters.readySlots",
+    "analysis.stereoFieldProcessedChunks",
+    "analysis.stereoFieldProcessedFrames",
+    "analysis.stereoFieldSelectedPoints",
+    "analysis.stereoFieldHistoryResets",
+    "analysis.stereoFieldInvalidChunks",
+    "analysis.stereoCorrelationProcessedSamples",
+    "analysis.stereoCorrelationPublishedEndpoints",
+    "analysis.stereoCorrelationConsumedEndpoints",
+    "analysis.stereoCorrelationStateResets",
+    "analysis.stereoCapturedFrameEnd",
+    "analysis.stereoSequence",
+    "analysis.stereoFieldPointCount",
+    "analysis.stereoPointStrideFrames",
+    "analysis.stereoFieldValid",
+    "analysis.stereoCorrelationValid",
+    "analysis.stereoMono",
     "analysis.scheduler.submitted",
     "analysis.scheduler.executed",
     "analysis.scheduler.cancelled",
@@ -384,6 +407,128 @@ public:
                 if (commandRow != nullptr)
                     expectEquals(commandRow->label, std::string("History column copy commands"));
             });
+
+        testCase("Renderer Stereo telemetry has one group and live rates", [this] {
+            PerformanceMetricsModel model;
+            PerformanceMetricsSnapshot snapshot;
+            snapshot.metal.epoch = 8;
+            static_cast<void>(model.update(snapshot, 30.0));
+
+            snapshot.metal.lastStereoSequence = 19;
+            snapshot.metal.stereoPointInstancesPrepared = 480;
+            snapshot.metal.stereoPointDrawCalls = 240;
+            snapshot.metal.stereoLastPointCount = 2048;
+            snapshot.metal.stereoCorrelation = -0.375;
+            snapshot.metal.stereoCorrelationValid = true;
+            snapshot.metal.stereoMono = false;
+            const auto view = model.update(snapshot, 32.0);
+
+            std::size_t stereoGroupCount = 0;
+            std::set<std::string> stereoGroupFields;
+            for (const auto& section : view.sections) {
+                if (section.name != "Renderer Stereo field")
+                    continue;
+
+                ++stereoGroupCount;
+                for (const auto& row : section.rows)
+                    stereoGroupFields.emplace(row.fieldName);
+            }
+
+            const std::set<std::string> expectedStereoGroupFields {
+                "metal.lastStereoSequence",
+                "metal.stereoPointInstancesPrepared",
+                "metal.stereoPointDrawCalls",
+                "metal.stereoLastPointCount",
+                "metal.stereoCorrelation",
+                "metal.stereoCorrelationValid",
+                "metal.stereoMono",
+            };
+            expectEquals(stereoGroupCount, std::size_t { 1 });
+            expect(stereoGroupFields == expectedStereoGroupFields);
+
+            const auto* instanceRate = findRate(view, "metal.stereoPointInstancesPrepared");
+            expect(instanceRate != nullptr && instanceRate->available);
+            if (instanceRate != nullptr) {
+                expectWithinAbsoluteError(instanceRate->value, 240.0, 1.0e-12);
+                expectEquals(instanceRate->label, std::string("Stereo point instances prepared"));
+                expectEquals(instanceRate->unit, std::string("instances/s"));
+            }
+
+            const auto* drawRate = findRate(view, "metal.stereoPointDrawCalls");
+            expect(drawRate != nullptr && drawRate->available);
+            if (drawRate != nullptr) {
+                expectWithinAbsoluteError(drawRate->value, 120.0, 1.0e-12);
+                expectEquals(drawRate->label, std::string("Stereo point draw calls"));
+                expectEquals(drawRate->unit, std::string("calls/s"));
+            }
+
+            const auto* correlationRow = findRawRow(view, "metal.stereoCorrelation");
+            expect(correlationRow != nullptr);
+            if (correlationRow != nullptr) {
+                expectEquals(correlationRow->value, std::string("-0.375"));
+                expectEquals(correlationRow->rawValue, std::string("-0.375"));
+            }
+        });
+
+        testCase("Stereo analysis telemetry has one complete group and useful rates", [this] {
+            PerformanceMetricsModel model;
+            PerformanceMetricsSnapshot snapshot;
+            snapshot.metal.epoch = 9;
+            static_cast<void>(model.update(snapshot, 40.0));
+
+            snapshot.analysis.stereoFieldProcessedChunks = 12;
+            snapshot.analysis.stereoFieldProcessedFrames = 24'000;
+            snapshot.analysis.stereoFieldSelectedPoints = 8'000;
+            snapshot.analysis.stereoFieldHistoryResets = 2;
+            snapshot.analysis.stereoFieldInvalidChunks = 1;
+            snapshot.analysis.stereoCorrelationProcessedSamples = 24'000;
+            snapshot.analysis.stereoCorrelationPublishedEndpoints = 12;
+            snapshot.analysis.stereoCorrelationConsumedEndpoints = 10;
+            snapshot.analysis.stereoCorrelationStateResets = 2;
+            snapshot.analysis.stereoCapturedFrameEnd = 24'000;
+            snapshot.analysis.stereoSequence = 6;
+            snapshot.analysis.stereoFieldPointCount = 4'000;
+            snapshot.analysis.stereoPointStrideFrames = 3;
+            snapshot.analysis.stereoFieldValid = true;
+            snapshot.analysis.stereoCorrelationValid = true;
+            snapshot.analysis.stereoMono = false;
+            const auto view = model.update(snapshot, 42.0);
+
+            std::set<std::string> fields;
+            auto groupCount = std::size_t { 0 };
+            for (const auto& section : view.sections) {
+                if (section.name != "Stereo analysis and correlation")
+                    continue;
+
+                ++groupCount;
+                for (const auto& row : section.rows)
+                    fields.emplace(row.fieldName);
+            }
+
+            expectEquals(groupCount, std::size_t { 1 });
+            expectEquals(fields.size(), std::size_t { 16 });
+            expect(fields.contains("analysis.stereoFieldProcessedChunks"));
+            expect(fields.contains("analysis.stereoCorrelationProcessedSamples"));
+            expect(fields.contains("analysis.stereoSequence"));
+            expect(fields.contains("analysis.stereoCorrelationValid"));
+            expect(fields.contains("analysis.stereoMono"));
+
+            const auto* frameRate = findRate(view, "analysis.stereoFieldProcessedFrames");
+            expect(frameRate != nullptr && frameRate->available);
+            if (frameRate != nullptr)
+                expectWithinAbsoluteError(frameRate->value, 12'000.0, 1.0e-12);
+
+            const auto* correlationRate
+                = findRate(view, "analysis.stereoCorrelationProcessedSamples");
+            expect(correlationRate != nullptr && correlationRate->available);
+            if (correlationRate != nullptr)
+                expectWithinAbsoluteError(correlationRate->value, 12'000.0, 1.0e-12);
+
+            const auto* updateRate = findRate(view, "analysis.stereoSequence");
+            expect(updateRate != nullptr && updateRate->available);
+            if (updateRate != nullptr)
+                expectWithinAbsoluteError(updateRate->value, 3.0, 1.0e-12);
+        });
 
         testCase("Counter rates rebase across epochs and reject rollbacks", [this] {
             PerformanceMetricsModel model;

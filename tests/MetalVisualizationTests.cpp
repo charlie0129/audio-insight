@@ -18,6 +18,7 @@ static_assert(detail::MetalVisualizationGeometryLimits::maximumGeneratedVertices
 static_assert(detail::maximumFrequencyAxisLabelGlyphs >= 10);
 static_assert(detail::MetalVisualizationGeometryLimits::maximumDecibelLabelGlyphs >= 7);
 static_assert(detail::maximumPeakRmsReadoutGlyphs >= 6);
+static_assert(detail::maximumStereoCorrelationReadoutGlyphs >= 5);
 
 class StubVisualizationDataSource final : public VisualizationDataSource {
 public:
@@ -622,6 +623,87 @@ public:
         expectEquals(hiddenClearLayout.clearHitBounds.width(), 0.0F);
         expect(!hiddenClearLayout.clearHitBounds.contains(0.0F, 0.0F));
 
+        beginTest("Stereo field coordinates remain fixed at full scale without edge clamping");
+
+        expectWithinAbsoluteError(
+            detail::mapStereoFieldCoordinate(-1.0F, 10.0F, 110.0F), 10.0F, 0.0001F);
+        expectWithinAbsoluteError(
+            detail::mapStereoFieldCoordinate(0.0F, 10.0F, 110.0F), 60.0F, 0.0001F);
+        expectWithinAbsoluteError(
+            detail::mapStereoFieldCoordinate(1.0F, 10.0F, 110.0F), 110.0F, 0.0001F);
+        const auto quietSignalPosition = detail::mapStereoFieldCoordinate(0.05F, 10.0F, 110.0F);
+        expectWithinAbsoluteError(quietSignalPosition, 62.5F, 0.0001F);
+        expect(std::abs(quietSignalPosition - 60.0F) < 3.0F,
+            "A quiet field coordinate must remain near the fixed full-scale centre");
+        expectWithinAbsoluteError(
+            detail::mapStereoFieldCoordinate(2.0F, 10.0F, 110.0F), 160.0F, 0.0001F);
+        expectEquals(detail::mapStereoFieldCoordinate(0.5F, 4.0F, 4.0F), 0.0F);
+
+        beginTest("Stereo correlation clamps, rounds, and uses three semantic colour ranges");
+
+        expectEquals(detail::mapStereoCorrelationToUnit(-2.0F), 0.0F);
+        expectEquals(detail::mapStereoCorrelationToUnit(0.0F), 0.5F);
+        expectEquals(detail::mapStereoCorrelationToUnit(2.0F), 1.0F);
+        const auto positiveCorrelation = detail::classifyStereoCorrelationReadout(0.126F, true);
+        expect(positiveCorrelation.available);
+        expectEquals(positiveCorrelation.hundredths, 13);
+        expect(positiveCorrelation.colourRange == detail::StereoCorrelationColourRange::cyan);
+        const auto negativeCorrelation = detail::classifyStereoCorrelationReadout(-0.126F, true);
+        expectEquals(negativeCorrelation.hundredths, -13);
+        expect(negativeCorrelation.colourRange == detail::StereoCorrelationColourRange::amber);
+        expect(detail::classifyStereoCorrelationReadout(0.05F, true).colourRange
+            == detail::StereoCorrelationColourRange::neutral);
+        expect(detail::classifyStereoCorrelationReadout(-0.05F, true).colourRange
+            == detail::StereoCorrelationColourRange::neutral);
+        expectEquals(detail::classifyStereoCorrelationReadout(4.0F, true).hundredths, 100);
+        expectEquals(detail::classifyStereoCorrelationReadout(-4.0F, true).hundredths, -100);
+        expect(!detail::classifyStereoCorrelationReadout(0.5F, false).available);
+        expect(
+            !detail::classifyStereoCorrelationReadout(std::numeric_limits<float>::quiet_NaN(), true)
+                .available);
+
+        beginTest("Stereo point opacity fades across the latest 250 milliseconds");
+
+        expectWithinAbsoluteError(detail::stereoFieldPointAgeOpacity(0.0F, 0.0), 1.0F, 0.0001F);
+        expectWithinAbsoluteError(detail::stereoFieldPointAgeOpacity(0.25F, 0.0625), 0.5F, 0.0001F);
+        expectWithinAbsoluteError(detail::stereoFieldPointAgeOpacity(0.0F, 0.125), 0.5F, 0.0001F);
+        expectEquals(detail::stereoFieldPointAgeOpacity(1.0F, 0.0), 0.0F);
+        expectEquals(detail::stereoFieldPointAgeOpacity(0.5F, 0.250), 0.0F);
+        expectWithinAbsoluteError(detail::stereoFieldPointAgeOpacity(0.5F, -1.0), 0.5F, 0.0001F);
+        expectEquals(
+            detail::stereoFieldPointAgeOpacity(std::numeric_limits<float>::infinity(), 0.0), 0.0F);
+
+        beginTest("Stereo panel layout preserves a square scope and responsive correlation strip");
+
+        const auto stereoLayout
+            = detail::calculateStereoFieldPanelLayout(240.0F, 280.0F, 24.0F, 10.0F);
+        expect(stereoLayout.scopeBounds.width() > 0.0F);
+        expectWithinAbsoluteError(
+            stereoLayout.scopeBounds.width(), stereoLayout.scopeBounds.height(), 0.0001F);
+        expect(stereoLayout.scopeBounds.left >= 0.0F && stereoLayout.scopeBounds.right <= 240.0F);
+        expect(stereoLayout.scopeBounds.bottom >= 0.0F && stereoLayout.scopeBounds.top <= 280.0F);
+        expect(stereoLayout.correlationTrackBounds.width() > 0.0F);
+        expect(stereoLayout.showCorrelationReadout);
+
+        const auto compactStereoLayout
+            = detail::calculateStereoFieldPanelLayout(60.0F, 70.0F, 18.0F, 10.0F);
+        expect(compactStereoLayout.scopeBounds.width() > 0.0F);
+        expectWithinAbsoluteError(compactStereoLayout.scopeBounds.width(),
+            compactStereoLayout.scopeBounds.height(), 0.0001F);
+        expect(!compactStereoLayout.showCorrelationReadout);
+        expect(compactStereoLayout.correlationTrackBounds.left >= 0.0F);
+        expect(compactStereoLayout.correlationTrackBounds.right <= 60.0F);
+        expect(compactStereoLayout.scopeBounds.top <= 70.0F);
+
+        const auto invalidStereoLayout
+            = detail::calculateStereoFieldPanelLayout(0.0F, 280.0F, 24.0F, 10.0F);
+        expectEquals(invalidStereoLayout.scopeBounds.width(), 0.0F);
+        expectEquals(invalidStereoLayout.correlationTrackBounds.width(), 0.0F);
+        expectEquals(detail::calculateStereoFieldPanelLayout(
+                         std::numeric_limits<float>::quiet_NaN(), 280.0F, 24.0F, 10.0F)
+                         .scopeBounds.width(),
+            0.0F);
+
         beginTest("Spectrum CLEAR uses a visible control and a twenty-four-point hit target");
 
         const auto spectrumClearLayout
@@ -639,13 +721,15 @@ public:
         beginTest("Axis and meter geometry remain within the fixed Metal vertex buffer");
 
         expectEquals(detail::MetalVisualizationGeometryLimits::maximumGeneratedVertices,
-            std::size_t { 53'446 });
+            std::size_t { 53'470 });
         expect(detail::MetalVisualizationGeometryLimits::maximumGeneratedVertices
             <= detail::MetalVisualizationGeometryLimits::vertexCapacity);
         expectEquals(
             detail::MetalVisualizationGeometryLimits::vertexCapacity, std::size_t { 65'536 });
         expectEquals(detail::MetalVisualizationGeometryLimits::maximumSpectrumVertices,
             (6 * maximumSpectrumBinCount) + 30);
+        expectEquals(
+            detail::MetalVisualizationGeometryLimits::maximumStereoVertices, std::size_t { 84 });
 
         beginTest("Spectrum frame metadata accepts only supported FFT storage bounds");
 
@@ -714,6 +798,14 @@ public:
         expect(afterReset.spectrogramUploadCommands == 0);
         expect(afterReset.spectrogramUploadBytes == 0);
         expect(afterReset.spectrogramLastColumnSequence == 0);
+        expect(afterReset.lastStereoSequence == 0);
+        expect(afterReset.stereoPointInstancesPrepared == 0);
+        expect(afterReset.stereoPointDrawCalls == 0);
+        expect(afterReset.stereoLastPointCount == beforeReset.stereoLastPointCount);
+        expectWithinAbsoluteError(
+            afterReset.stereoCorrelation, beforeReset.stereoCorrelation, 0.000001);
+        expect(afterReset.stereoCorrelationValid == beforeReset.stereoCorrelationValid);
+        expect(afterReset.stereoMono == beforeReset.stereoMono);
         expect(afterReset.metalAvailable == beforeReset.metalAvailable);
         expect(afterReset.renderingRequested == beforeReset.renderingRequested);
         expect(afterReset.effectivelyRendering == beforeReset.effectivelyRendering);
