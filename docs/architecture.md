@@ -38,7 +38,7 @@ an incidental result of analysis.
 | Analysis scheduling | Do not create one thread per visualization. Each instance has a logical coordinator, not a dedicated thread, and submits fairly to a process-wide pool initially bounded to two workers. |
 | Render handoff | Renderers consume stable, immutable snapshots rather than mutable analysis working memory. |
 | Display timing | Pace frames from the active display's refresh cycle, with smooth 60 Hz and 120 Hz/ProMotion behavior where the host and display permit it. Measure the cadence and deadlines actually granted by the display-link update rather than inferring them from the screen's advertised maximum refresh rate. |
-| Performance HUD | Offer Apple's Metal Performance HUD as an opt-in, persisted editor setting that is available in Release builds and off by default. Apply it only to Audio Insight's `CAMetalLayer`; do not mutate the host process's environment. |
+| Performance observability | Offer an opt-in, persisted, per-instance metrics panel in Release builds. Show every collected renderer and analysis metric, exact presented-frame pacing history, derived rates, and copyable raw reports without mutating the host process. |
 | DPI support | Treat layout units and render pixels separately and support both regular-density and Retina displays, including live movement between them. |
 | Editor lifecycle | Stop sample capture, analysis, history, display-link activity, and Metal submission when the editor is closed, hidden, or occluded beyond a short debounce. Reopening starts with fresh analysis state. |
 | First usable release | Show a large real-time FFT spectrum with compact stereo sample-peak/RMS meters in one resizable layout. Defer history-based and stereo-field views. |
@@ -222,14 +222,31 @@ timing, so its timestamps are telemetry and deadline inputs rather than values
 for `presentAtTime` or other timed presentation APIs, which assert for these
 drawables.
 
-The editor exposes Apple's Metal Performance HUD through
-`CAMetalLayer.developerHUDProperties`. The toggle targets only Audio Insight's
-layer, remains available in optimized builds, and defaults to off because the
-HUD itself has diagnostic overhead. Formal performance captures should record
-whether it was enabled and confirm important results with it disabled. Only one
-instance in a host process should designate its layer as the HUD's main layer at
-a time; simultaneous HUD-enabled instances can make process-level metric
-attribution ambiguous.
+The editor exposes a built-in performance metrics panel rather than relying on
+Apple's Metal Performance HUD. On macOS 15, `CAMetalLayer.developerHUDProperties`
+configures a HUD only after the hosting process was launched with Apple's
+documented `MTL_HUD_ENABLED=1` environment setting before its first Metal device.
+The layer property alone cannot load the process-wide HUD runtime afterward. An
+Audio Unit or VST3 cannot safely relaunch or mutate its host to impose that launch
+state, and the API offers no reliable per-plugin availability query.
+
+The built-in panel reads immutable renderer and analysis telemetry snapshots at
+four hertz on the message thread while the renderer is effectively active.
+Presented handlers insert actual timestamps into a fixed 241-timestamp window
+under a tiny non-audio-thread lock. Sorting by timestamp makes the resulting 240
+intervals exact even if Metal invokes handlers concurrently or out of order. The
+panel exposes all raw fields, derived rates and interval statistics, and a
+copyable text report. GPU completion timing fields are copied under a short
+non-audio-thread lock so their values and validity counters describe the same
+completion group. Explicit valid, unavailable, and unclassifiable counters keep
+missing Metal timestamps distinct from measured zero lateness. Native
+effective-activity transitions stop and restart the sampling timer; retained
+values are explicitly marked paused and may be stale. The full report is
+assembled lazily when the user presses Copy, and the exact 240-entry history is
+not serialized during live polling. It sits beside the native Metal view because
+an overlapping JUCE component cannot reliably appear above an `NSViewComponent`.
+The panel defaults to off because formatting and painting diagnostics has
+measurable overhead; important results should also be confirmed with it hidden.
 
 The rendering toolbox should favor simple, predictable GPU operations:
 
@@ -494,5 +511,5 @@ order of visualizations.
   remains open.
 - Added explicit user review checkpoints for visual and DAW behavior that cannot
   be assessed confidently in the development environment.
-- Added an opt-in, per-layer Metal Performance HUD setting for user-assisted
-  frame-pacing diagnostics in Release builds.
+- Replaced the host-dependent Metal Performance HUD experiment with an opt-in,
+  per-instance metrics panel and exact presented-frame pacing history.

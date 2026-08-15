@@ -67,20 +67,39 @@ installation, use the corresponding directories under `~/Library` instead:
 
 Restart or rescan the audio host after copying the bundle.
 
-## Metal performance HUD
+## Performance metrics
 
-The editor's **HUD** toggle enables Apple's Metal Performance HUD directly on
-Audio Insight's Metal layer. It works in Release builds, is off by default, and
-is saved with the plugin state. The focused HUD layout shows frame rate, frame
-interval and pacing graph, GPU and Metal CPU time, presentation delay, and the
-layer's pixel size and scale.
+The editor's **Metrics** toggle opens a per-instance observability panel beside
+the visualization. It works in Release builds, is off by default, and is saved
+with the plugin state. The live summary includes presented-frame rate, an exact
+240-frame pacing graph, CPU encode and GPU execution time, presentation
+lateness, and renderer drops.
 
-For a useful visual report, let the plugin render for at least 30 seconds, then
-capture the HUD while audio is playing. Include the host, display refresh rate,
-editor size, and whether the display is Retina. The HUD adds some diagnostic
-overhead, so final performance measurements should also be confirmed with it
-disabled. Enable it on only one Audio Insight instance at a time so Metal's
-process-level metric attribution remains unambiguous.
+The scrollable detail view exposes every raw renderer, audio-capture, meter,
+scheduler, analysis-job, publication, and freshness metric currently collected,
+plus derived rates and frame-interval statistics. **Copy** exports stable field
+names with raw values and units. Timing counters distinguish valid, unavailable,
+and unclassifiable samples so a missing Metal timestamp cannot masquerade as
+zero latency. **Reset render** starts a new renderer telemetry epoch without
+resetting lifetime analysis counters. At narrow editor sizes, detail rows stack
+their labels and full-width values instead of squeezing the value column.
+
+The panel samples snapshots four times per second on the message thread, while
+the pacing history is recorded once per presented frame without allocation or
+audio-thread work. Native occlusion or minimization stops the sampling timer and
+marks retained values **PAUSED**; it restarts when rendering becomes effective
+again. The complete text export, including the exact history, is formatted only
+when **Copy** is pressed; in particular, the 240-entry history is not serialized
+during live polling. The panel still has some diagnostic overhead, so confirm
+important performance measurements with it disabled. For a useful report, let
+the plugin render for at least 30 seconds and include the host, display refresh
+rate, editor size, and whether the display is Retina.
+
+Audio Insight cannot reliably offer an Apple Metal Performance HUD switch from
+inside a plugin. Apple's HUD must be enabled for the hosting process before that
+process creates its first Metal device; configuring Audio Insight's layer later
+does not activate it. The built-in panel therefore remains the supported Release
+diagnostics path.
 
 For an existing clone, initialize the pinned JUCE dependency with:
 
