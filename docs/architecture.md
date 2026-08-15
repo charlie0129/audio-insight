@@ -34,6 +34,7 @@ an incidental result of analysis.
 | Graphics | Use a native Metal renderer, hosted in a MetalKit view inside the JUCE editor. On the initial macOS baseline, drive its Metal layer with `CAMetalDisplayLink` rather than JUCE repaint timers or MetalKit's internal timer. Do not use deprecated macOS OpenGL. |
 | Signal analysis | Initially use CPU analysis and Apple's Accelerate/vDSP where useful. GPU compute is deferred until profiling demonstrates a benefit. |
 | Frequency presentation | Expose one continuous Linear-to-Logarithmic frequency-spacing control, including intermediate mappings. Spectrum and Spectrogram share the same setting and coordinate transform; they do not have independent frequency scales. |
+| Dashboard interface | Keep one dashboard view with one Spectrum and no separate focus mode. After the fixed first-release vertical slice, add constrained grid-snapped width/height editing and the staged panels defined in [the analyzer interface requirements](analyzer-ui.md). |
 | Real-time handoff | The audio callback writes only to bounded, non-blocking data structures. Analysis and rendering never make the audio thread wait. |
 | Overflow policy | Prefer current visual data: coalesce or discard the oldest unclaimed analysis input, detect discontinuities by sequence number, and reset temporal analysis state across a gap. Never overwrite a slot being read or delay audio. |
 | Analysis scheduling | Do not create one thread per visualization. Each instance has a logical coordinator, not a dedicated thread, and submits fairly to a process-wide pool initially bounded to two workers. |
@@ -310,6 +311,10 @@ regular-density and Retina displays.
 
 ## Analyzer presentation
 
+Detailed layout, settings, labeling, and per-panel requirements live in
+[the analyzer interface requirements](analyzer-ui.md). The following invariants
+remain architectural because analysis and rendering share them.
+
 Spectrum and Spectrogram use the same continuous frequency-coordinate mapping.
 The control ranges from linear through intermediate spacing to logarithmic and
 applies to the Spectrum frequency axis and the Spectrogram frequency axis.
@@ -332,9 +337,12 @@ The first usable release deliberately has one layout and two visualizations:
 - a compact vertical stereo meter strip showing honest sample peak and RMS.
 
 A small controls row may expose essential spectrum and meter settings. The
-window is resizable, but configurable grids, detachable panels, and arbitrary
-layout editing are deferred. Do not label sample peak as true peak; that name is
-reserved for a correctly oversampled true-peak implementation.
+window is resizable. The first vertical slice may retain its fixed default
+arrangement; the accepted later dashboard adds constrained, grid-snapped tile
+resizing in both dimensions. Detached panels, overlapping floating windows, and
+arbitrary free-form windowing remain out of scope. Do not label sample peak as
+true peak; that name is reserved for a correctly oversampled true-peak
+implementation.
 
 Before distributing a binary, the controls must include an About/Legal path that
 shows the confirmed project copyright, AGPL/no-warranty notice, how to view the
@@ -563,3 +571,7 @@ order of visualizations.
   Spectrum and Spectrogram, including intermediate spacing.
 - Set the Spectrogram presentation target to intensity-colored energy traces
   over near-black, with only numeric frequency ticks shown.
+- Accepted one dashboard with no Focus Spectrum mode, a temporary right-side
+  Settings inspector, constrained width/height tile editing after the first
+  vertical slice, and staged presentation requirements for every analyzer
+  panel. See `docs/analyzer-ui.md`.

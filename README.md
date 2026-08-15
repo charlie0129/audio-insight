@@ -8,7 +8,9 @@ real-time-safe audio processing, and low overhead in the host.
 
 The first usable release will combine a real-time FFT spectrum with stereo
 sample-peak and RMS meters. See [the architecture and decision
-record](docs/architecture.md) for the accepted design and current open questions.
+record](docs/architecture.md) for the accepted system design and current open
+questions. The accepted, staged multi-panel dashboard is specified separately
+in [the analyzer interface requirements](docs/analyzer-ui.md).
 
 ## Development build
 

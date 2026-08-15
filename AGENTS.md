@@ -3,6 +3,7 @@
 Before planning or changing this repository, read:
 
 - `docs/architecture.md` for the accepted product and technical decisions.
+- `docs/analyzer-ui.md` for the accepted dashboard, settings, and panel design.
 - `docs/macos-distribution.md` for the macOS signing and release policy.
 
 Treat decisions marked **Accepted** as project requirements. Do not silently
