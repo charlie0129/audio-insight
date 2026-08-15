@@ -137,6 +137,14 @@ data race. Audio pass-through is never affected by analysis overflow.
 
 Peak/RMS measurements use a separate bounded coalescing accumulator so an
 overloaded raw-sample queue does not silently erase the largest recent peak.
+Its 300 ms RMS, live sample-peak release, held-peak decay, and OVER latch are
+owned by the audio producer and advanced from every sample in source order. The
+handoff publishes complete endpoint snapshots, so worker scheduling and endpoint
+coalescing cannot change the temporal result. Host blocks larger than one raw
+capture slot are processed in matching chunks so a detected reclaim/drop resets
+the meter at that chunk boundary instead of retroactively resetting the start of
+the host block. This producer work is bounded but must be included in audio
+callback profiling before the preliminary budget is considered met.
 
 Publishing samples, measurements, and bounded atomic state is the end of the
 audio callback's responsibility. It must not signal a semaphore or condition
@@ -207,6 +215,13 @@ audio.
 
 Returning from either inactive state begins a new capture/lifecycle generation;
 the first release does not attempt to reconstruct the missing interval.
+
+JUCE's non-real-time `prepareToPlay` boundary reports the active sample rate and
+mono/stereo layout to the coordinator. A changed format closes capture, cancels
+and drains the old worker generation, retires its pending handoffs, publishes a
+fully invalid fresh snapshot, and then reopens capture under a new generation.
+Reporting the same format is a no-op. This prevents a short new-format meter
+update from being combined with a still-valid spectrum from the previous format.
 
 ### Metal rendering
 
@@ -625,3 +640,9 @@ authorize fake values, background work, or speculative resource allocation.
 - Chose the macOS system monospaced font for the first scale-aware Metal glyph
   atlas, avoiding a bundled font asset while keeping rasterization and cached
   run construction outside the display callback.
+- Moved Peak/RMS temporal math to producer-owned sample-domain ballistics and
+  made the bounded meter handoff publish complete endpoint snapshots. Worker
+  polling and coalescing therefore cannot change RMS, release, hold, or OVER
+  results.
+- Made changed host sample rates and mono/stereo layouts start a clean capture
+  generation at `prepareToPlay`; identical format notifications are no-ops.
