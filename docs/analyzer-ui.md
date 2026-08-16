@@ -155,16 +155,17 @@ for the dashboard. At narrower editor widths, Settings takes the complete
 content area below the toolbar, becomes vertically scrollable, and the covered
 Metal canvas pauses. The tile topology itself never reflows.
 
-Organize controls into Shared analysis, Spectrum, Peak/RMS, Spectrogram, Stereo,
-and Loudness sections. Settings documented in each panel section below live in
-that inspector. Changes apply immediately and are saved with the plugin instance;
-there is no separate Apply step. Give each section with adjustable settings a
-reset-to-default action. Stereo's initial presentation is deliberately fixed,
-so its live section states that it has no adjustable settings and leaves Reset
-visibly unavailable. Loudness exposes its presentation-only reference setting;
-the section reset restores `-23 LUFS` and does not reset the transient Integrated
-measurement. Integration is reset only by the Loudness tile's explicit RESET
-action and the lifecycle boundaries specified below.
+Organize controls into Display, Shared analysis, Spectrum, Peak/RMS,
+Spectrogram, Stereo, and Loudness sections. Settings documented in each panel
+section below live in that inspector. Changes apply immediately and are saved
+with the plugin instance; there is no separate Apply step. Give each section
+with adjustable settings a reset-to-default action. Stereo's initial
+presentation is deliberately fixed, so its live section states that it has no
+adjustable settings and leaves Reset visibly unavailable. Loudness exposes its
+presentation-only reference setting; the section reset restores `-23 LUFS` and
+does not reset the transient Integrated measurement. Integration is reset only
+by the Loudness tile's explicit RESET action and the lifecycle boundaries
+specified below.
 
 Floor, Ceiling, and Temporal averaging live in the Spectrum section rather than
 the toolbar; do not duplicate them. Temporal averaging exposes Off plus a
@@ -179,6 +180,31 @@ normalized `Smooth` control. Its 75 ms default is approximately `0.37` on that
 legacy control's response curve, keeping the initial amount within the requested
 `0.3–0.5` range without retaining an ambiguous unitless control or duplicating it
 in the toolbar.
+
+### Display pacing
+
+| Setting | Accepted choices | Default |
+| --- | --- | --- |
+| Frame pacing | Fixed maximum, Adaptive | Fixed maximum |
+
+**Fixed maximum** requests one exact frame rate equal to the active display's
+reported maximum. Audio Insight does not cap that request at 120 Hz, so a future
+display reporting a higher maximum receives that higher request. If no valid
+display maximum is available, use 60 Hz as the fallback.
+
+**Adaptive** requests a Core Animation range from
+`min(60 Hz, display maximum)` through the display maximum and prefers the
+maximum. A display whose maximum is below 60 Hz therefore receives an exact
+request for its own maximum.
+
+Both choices are best-effort requests: macOS, the host, and the compositor may
+deliver another cadence. Actual display-link callbacks and presentation
+timestamps remain authoritative. The setting is non-automatable per-instance
+state, applies immediately, and is reapplied after movement to another display.
+Display Reset restores Fixed maximum. Switching modes changes presentation
+timing only; it does not advance analysis or lifecycle generations, clear
+Spectrogram history, Spectrum state, meter holds, Stereo state, or Loudness
+integration, or change process/thread scheduling priority.
 
 ### Utility-panel exclusivity
 
@@ -238,31 +264,35 @@ rebuild analysis state. Therefore none of the following is host-automatable in
 the initial product:
 
 - layout;
+- display frame pacing;
 - FFT size, window, or requested FFT slice rate;
 - shared frequency spacing;
 - Spectrum or Spectrogram presentation settings;
 - Spectrogram history mode or duration; or
 - panel-specific meter, scope, or loudness presentation settings.
 
-Save analyzer configuration as non-automatable per-instance plugin state so a
-DAW project can recall different analyzer views on different instances. Keep
-layout in the global store described above. Metrics remains a non-automatable
-per-instance toggle. Settings visibility, edit-mode working state, active
-history samples, holds, and loudness integration are transient and are not
-serialized.
+Save display pacing and analyzer configuration as non-automatable per-instance
+plugin state so a DAW project can recall different analyzer views on different
+instances. Keep layout in the global store described above. Metrics remains a
+non-automatable per-instance toggle. Settings visibility, edit-mode working
+state, active history samples, holds, and loudness integration are transient and
+are not serialized.
 
 After a user-originated analyzer configuration edit, notify the host that
 non-parameter plugin state changed so it can mark the project for re-saving.
 Loading or restoring existing state must not itself be reported as a new edit.
 
-Current development builds exposed `spectrumFloor`, `spectrumCeiling`, and
-`spectrumSmoothing` as automatable host parameters. There is no public state or
-automation compatibility baseline yet. When the Settings inspector lands, bump
-the state schema and retain those IDs with their original normalized mappings
-only as deprecated, non-automatable compatibility shims; do not silently assign
-them the new settings' ranges or meanings.
+The current analyzer-configuration schema is version 2. It adds Display pacing.
+An analyzer-configuration subtree from schema 1 or any other unknown version is
+intentionally rejected and replaced with current defaults; settings backward
+compatibility is not a requirement before the first public release. Missing or
+malformed values inside a structurally recognized schema-2 tree use their
+documented defaults.
 
-When loading a legacy state without the new analyzer-configuration subtree:
+The older `spectrumFloor`, `spectrumCeiling`, and `spectrumSmoothing` parameter
+IDs remain deprecated, non-automatable compatibility shims with their original
+normalized mappings. A state predating the analyzer-configuration subtree may
+still seed the current defaults from those shims:
 
 - preserve the physical floor and ceiling values, clamp them to the new ranges,
   and lower the floor if necessary to enforce the 24 dB minimum span;
@@ -273,7 +303,8 @@ When loading a legacy state without the new analyzer-configuration subtree:
   loads that new configuration wins over the compatibility shims.
 
 Legacy DAW automation lanes are intentionally not supported after this
-pre-release migration. Missing or malformed values use the documented defaults.
+pre-release migration. The retained shims do not imply compatibility with
+schema-1 analyzer configuration.
 
 ## Shared analysis controls
 
@@ -303,11 +334,11 @@ temporal state, and Spectrogram history.
 The requested FFT slice rate controls only new Spectrum FFT snapshots and
 Spectrogram history columns. It does not throttle Peak/RMS capture from every
 audio block, Stereo field/correlation sampling, or Loudness' fixed 100 ms
-measurement completions. It is also not the render rate: Metal remains paced by
-the active display, including host/display-permitted 120 Hz, and consumes or
-interpolates the newest complete snapshot. The fair, latest-wins scheduler may
-skip stale FFT work rather than building a backlog. Telemetry reports both
-requested and achieved FFT slice rates.
+measurement completions. It is also not the render rate: Metal follows the
+selected Display pacing request, potentially above 120 Hz when the active
+display reports it, and consumes or interpolates the newest complete snapshot.
+The fair, latest-wins scheduler may skip stale FFT work rather than building a
+backlog. Telemetry reports both requested and achieved FFT slice rates.
 
 For the single Spectrum and Spectrogram views, combine stereo channels using the
 greater per-bin power so out-of-phase material does not cancel. Analyze a mono
@@ -326,8 +357,8 @@ Use scoped generations rather than one counter that resets unrelated analyzers:
 - A Spectrogram-mapping generation changes with shared frequency spacing. It
   clears mapped Spectrogram history but does not invalidate FFT results or any
   other analyzer.
-- Layout, palette, color response/range, and loudness-reference changes are
-  presentation-only and do not advance an analysis generation.
+- Display pacing, layout, palette, color response/range, and loudness-reference
+  changes are presentation-only and do not advance an analysis generation.
 
 ## Shared frequency spacing
 
@@ -691,8 +722,9 @@ before reference tests pass.
   and visually consistent across backing-scale changes.
 - Rebuild only pixel-density-dependent resources, such as a glyph atlas, when
   backing scale changes.
-- Preserve display-linked 60 Hz and host/display-permitted 120 Hz animation
-  during live editor and tile resize, subject to accepted performance gates.
+- Preserve the selected display-linked Fixed maximum or Adaptive animation
+  during live editor and tile resize, including active-display maximums above
+  120 Hz, subject to accepted performance gates.
 
 ## Editor lifecycle
 
