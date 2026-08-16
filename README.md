@@ -2,76 +2,20 @@
 
 # Audio Insight
 
-Audio Insight is a work-in-progress, open-source AUv2 and VST3 audio analyzer
-for macOS. The project prioritizes smooth display-synchronized Metal graphics,
+Audio Insight is a open-source AUv2 and VST3 audio analyzer for macOS.
+The project prioritizes smooth display-synchronized Metal graphics,
 real-time-safe audio processing, and low overhead in the host.
 
 The current analyzer dashboard combines a real-time FFT Spectrum, mono/stereo
 sample-peak and RMS meters, a shared-FFT Spectrogram, and a fixed-scale Stereo
 field/correlation view, plus BS.1770-5 / EBU R128 Momentary, Short-term, and
-Integrated Loudness. See [the architecture and decision record](docs/architecture.md)
-for the accepted system design and current open questions. The accepted
-multi-panel dashboard is specified separately in [the analyzer interface
-requirements](docs/analyzer-ui.md).
+Integrated Loudness.
 
-## Development build
-
-Current development targets macOS 15 on Apple silicon with Xcode 16.4 or newer
-and CMake 3.25 or newer.
-
-```sh
-git clone --recurse-submodules https://github.com/charlie0129/audio-insight.git
-cd audio-insight
-cmake --preset macos-arm64
-cmake --build --preset macos-arm64-debug --target AudioInsight_AU AudioInsight_VST3
-```
-
-The final configure message, such as:
-
-```text
-Build files have been written to: /path/to/audio-insight/build/xcode
-```
-
-refers to the generated Xcode project, not the finished plugins. The Debug
-command above writes the plugin bundles to:
-
-```text
-build/xcode/AudioInsight_artefacts/Debug/AU/Audio Insight.component
-build/xcode/AudioInsight_artefacts/Debug/VST3/Audio Insight.vst3
-```
-
-For optimized Release bundles, build with:
-
-```sh
-cmake --build --preset macos-arm64-release --target AudioInsight_AU AudioInsight_VST3
-```
-
-The Release bundles are written to:
-
-```text
-build/xcode/AudioInsight_artefacts/Release/AU/Audio Insight.component
-build/xcode/AudioInsight_artefacts/Release/VST3/Audio Insight.vst3
-```
-
-To install the plugins system-wide, copy each complete bundle to its matching
-macOS plugin directory:
-
-```text
-Audio Insight.component -> /Library/Audio/Plug-Ins/Components/
-Audio Insight.vst3      -> /Library/Audio/Plug-Ins/VST3/
-```
-
-System-wide installation may require administrator privileges. For a per-user
-installation, use the corresponding directories under `~/Library` instead:
-
-```text
-~/Library/Audio/Plug-Ins/Components/
-~/Library/Audio/Plug-Ins/VST3/
-```
-
-Restart or rescan the audio host after copying the bundle.
+Also see the corresponding blog: https://blog.chlc.cc/p/building-audio-insight
 
 ## Using the analyzer dashboard
+
+<img width="1200" height="800" alt="Audio Insight dashboard with all five analyzers" src="https://github.com/user-attachments/assets/cd63ca6e-7976-406d-a028-b7d11b40fe06" />
 
 Choose **Edit layout** to resize the fixed five-tile dashboard. Drag the row
 splitter, the splitter between Spectrum and Peak/RMS, or either lower-row
@@ -85,6 +29,8 @@ saving them. **Cancel** or Escape restores the layout from before editing, while
 **Done** saves the working layout. The saved layout is a per-user preference
 shared by AUv2 and VST3 instances; it is not stored in an individual DAW
 project.
+
+<img width="1200" height="800" alt="Audio Insight spectrum settings" src="https://github.com/user-attachments/assets/cafc37d9-c168-4565-a2fd-7fa384e0a63e" />
 
 Spectrum response is in **Settings**, together with its floor, ceiling, slope,
 peak-hold, trace-colour, and fill controls. Its independent
@@ -117,6 +63,8 @@ Analyzer settings use the pre-release schema 3. Older analyzer schemas are
 intentionally replaced with the current defaults; the project does not carry
 analyzer-setting compatibility parameters or migration shims before its first
 public release.
+
+<img width="1200" height="800" alt="Audio Insight spectrogram settings" src="https://github.com/user-attachments/assets/4e973871-3176-47f6-a1d2-a50ca504fa97" />
 
 The Spectrogram uses each unsmoothed FFT slice and the same Linear-to-Logarithmic
 frequency spacing as Spectrum. Its literal-black history can use Blue Fire,
@@ -153,6 +101,8 @@ not claim complete “EBU Mode compliance,” LRA, or true peak.
 
 ## Performance metrics
 
+<img width="1200" height="800" alt="Audio Insight performance metrics" src="https://github.com/user-attachments/assets/35aa190a-5cb9-4df4-9c3a-e7eb19ba8d76" />
+
 The editor's **Metrics** toggle opens a per-instance observability panel beside
 the visualization. It works in Release builds, is off by default, and is saved
 with the plugin state. The live summary separates two measurements that should
@@ -187,6 +137,8 @@ buffer or drawable admission can return early. Metrics exposes ready-frame
 capacity/high-water values, partial packed frames, and overflow episodes for
 long-session verification.
 
+<img width="515" height="746" alt="Audio Insight performance metrics detail view" src="https://github.com/user-attachments/assets/97c09aa8-877b-4139-96f2-a3d2837abec6" />
+
 The scrollable detail view exposes every raw renderer, audio-capture, meter,
 scheduler, analysis-job, publication, and freshness metric currently collected,
 plus derived rates and frame-interval statistics. **Copy** exports stable field
@@ -217,15 +169,55 @@ process creates its first Metal device; configuring Audio Insight's layer later
 does not activate it. The built-in panel therefore remains the supported Release
 diagnostics path.
 
-For an existing clone, initialize the pinned JUCE dependency with:
+## Development build
+
+Current development targets macOS 15 on Apple silicon with Xcode 16.4 or newer
+and CMake 3.25 or newer.
 
 ```sh
-git submodule update --init --recursive
+git clone --recurse-submodules https://github.com/charlie0129/audio-insight.git
+cd audio-insight
+cmake --preset macos-arm64
+cmake --build --preset macos-arm64-debug --target AudioInsight_AU AudioInsight_VST3
 ```
 
-The build does not install plugins into user or system directories
-automatically. Signing, local installation, and quarantine guidance lives in
-[the macOS distribution policy](docs/macos-distribution.md).
+The Debug command above writes the plugin bundles to:
+
+```text
+build/xcode/AudioInsight_artefacts/Debug/AU/Audio Insight.component
+build/xcode/AudioInsight_artefacts/Debug/VST3/Audio Insight.vst3
+```
+
+For optimized Release bundles, build with:
+
+```sh
+cmake --build --preset macos-arm64-release --target AudioInsight_AU AudioInsight_VST3
+```
+
+The Release bundles are written to:
+
+```text
+build/xcode/AudioInsight_artefacts/Release/AU/Audio Insight.component
+build/xcode/AudioInsight_artefacts/Release/VST3/Audio Insight.vst3
+```
+
+To install the plugins system-wide, copy each complete bundle to its matching
+macOS plugin directory:
+
+```text
+Audio Insight.component -> /Library/Audio/Plug-Ins/Components/
+Audio Insight.vst3      -> /Library/Audio/Plug-Ins/VST3/
+```
+
+System-wide installation may require administrator privileges. For a per-user
+installation, use the corresponding directories under `~/Library` instead:
+
+```text
+~/Library/Audio/Plug-Ins/Components/
+~/Library/Audio/Plug-Ins/VST3/
+```
+
+Restart or rescan the audio host after copying the bundle.
 
 ## Formatting
 
