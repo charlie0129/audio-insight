@@ -32,7 +32,8 @@ bool configurationsMatch(
     const auto near
         = [](const double left, const double right) { return std::abs(left - right) <= epsilon; };
 
-    return first.sharedAnalysis.fftSize == second.sharedAnalysis.fftSize
+    return first.display.framePacing == second.display.framePacing
+        && first.sharedAnalysis.fftSize == second.sharedAnalysis.fftSize
         && first.sharedAnalysis.window == second.sharedAnalysis.window
         && first.sharedAnalysis.requestedFftSliceRateHz
         == second.sharedAnalysis.requestedFftSliceRateHz
@@ -68,6 +69,7 @@ public:
         {
             const auto configuration = AnalyzerConfigurationCodec::defaults();
 
+            expect(configuration.display.framePacing == DisplayFramePacing::fixedMaximum);
             expectEquals(configuration.sharedAnalysis.fftSize, 4096);
             expect(configuration.sharedAnalysis.window == FftWindow::periodicHann);
             expectEquals(configuration.sharedAnalysis.requestedFftSliceRateHz, 60);
@@ -99,6 +101,7 @@ public:
         beginTest("Sanitization enforces choices, ranges, steps, and both minimum spans");
         {
             auto input = AnalyzerConfigurationCodec::defaults();
+            input.display.framePacing = static_cast<DisplayFramePacing>(99);
             input.sharedAnalysis.fftSize = 1000;
             input.sharedAnalysis.window = static_cast<FftWindow>(99);
             input.sharedAnalysis.requestedFftSliceRateHz = 90;
@@ -120,6 +123,7 @@ public:
             input.loudness.referenceLufs = -22.74;
 
             const auto sanitized = AnalyzerConfigurationCodec::sanitize(input);
+            expect(sanitized.display.framePacing == DisplayFramePacing::fixedMaximum);
             expectEquals(sanitized.sharedAnalysis.fftSize, 4096);
             expect(sanitized.sharedAnalysis.window == FftWindow::periodicHann);
             expectEquals(sanitized.sharedAnalysis.requestedFftSliceRateHz, 60);
@@ -166,6 +170,7 @@ public:
         beginTest("The complete current schema round-trips through ValueTree XML");
         {
             auto expected = AnalyzerConfigurationCodec::defaults();
+            expected.display.framePacing = DisplayFramePacing::adaptive;
             expected.sharedAnalysis.fftSize = 16384;
             expected.sharedAnalysis.window = FftWindow::fiveTermFlatTop;
             expected.sharedAnalysis.requestedFftSliceRateHz = 120;
@@ -190,7 +195,8 @@ public:
             const auto encoded = AnalyzerConfigurationCodec::encode(expected);
             expect(encoded.hasType(AnalyzerConfigurationCodec::treeType()));
             expectEquals(encoded.getNumProperties(), 1);
-            expectEquals(encoded.getNumChildren(), 4);
+            expectEquals(encoded.getNumChildren(), 5);
+            expectEquals(encoded.getChildWithName("Display").getNumProperties(), 1);
             expectEquals(encoded.getChildWithName("SharedAnalysis").getNumProperties(), 4);
             expectEquals(encoded.getChildWithName("Spectrum").getNumProperties(), 9);
             expectEquals(encoded.getChildWithName("Spectrogram").getNumProperties(), 6);
@@ -233,6 +239,18 @@ public:
             constexpr std::array historyDurations { 2, 5, 10, 20, 30, 60 };
             constexpr std::array historyModes { SpectrogramHistoryMode::scroll,
                 SpectrogramHistoryMode::overwrite };
+            constexpr std::array framePacingModes { DisplayFramePacing::fixedMaximum,
+                DisplayFramePacing::adaptive };
+
+            for (const auto choice : framePacingModes) {
+                auto configuration = AnalyzerConfigurationCodec::defaults();
+                configuration.display.framePacing = choice;
+                const auto decoded = AnalyzerConfigurationCodec::decode(
+                    AnalyzerConfigurationCodec::encode(configuration));
+                expect(decoded.has_value());
+                if (decoded.has_value())
+                    expect(decoded->display.framePacing == choice);
+            }
 
             for (const auto choice : fftSizes) {
                 auto configuration = AnalyzerConfigurationCodec::defaults();
@@ -311,7 +329,7 @@ public:
         beginTest("Recognized partial state defaults and sanitizes individual settings");
         {
             juce::ValueTree partial(AnalyzerConfigurationCodec::treeType());
-            partial.setProperty("version", "1", nullptr);
+            partial.setProperty("version", "2", nullptr);
             juce::ValueTree shared("SharedAnalysis");
             shared.setProperty("frequencySpacing", "2.5", nullptr);
             shared.setProperty("fftSize", "not-an-integer", nullptr);
@@ -339,6 +357,7 @@ public:
                 expectEquals(decoded->spectrogram.historyDurationSeconds, 10);
                 expect(decoded->spectrogram.palette == SpectrogramPalette::blueFire);
                 expectWithinAbsoluteError(decoded->loudness.referenceLufs, -23.0, 1.0e-12);
+                expect(decoded->display.framePacing == DisplayFramePacing::fixedMaximum);
             }
         }
 
@@ -352,8 +371,13 @@ public:
             expect(!AnalyzerConfigurationCodec::decode(missingVersion).has_value());
 
             auto unknownVersion = AnalyzerConfigurationCodec::encode({ });
-            unknownVersion.setProperty("version", "2", nullptr);
+            unknownVersion.setProperty("version", "3", nullptr);
             expect(!AnalyzerConfigurationCodec::decode(unknownVersion).has_value());
+
+            auto oldVersion = AnalyzerConfigurationCodec::encode({ });
+            oldVersion.setProperty("version", "1", nullptr);
+            oldVersion.removeChild(oldVersion.getChildWithName("Display"), nullptr);
+            expect(!AnalyzerConfigurationCodec::decode(oldVersion).has_value());
 
             auto nonIntegerVersion = AnalyzerConfigurationCodec::encode({ });
             nonIntegerVersion.setProperty("version", "1.0", nullptr);

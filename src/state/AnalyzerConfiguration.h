@@ -52,6 +52,15 @@ enum class SpectrogramHistoryMode {
     overwrite,
 };
 
+enum class DisplayFramePacing {
+    fixedMaximum,
+    adaptive,
+};
+
+struct DisplaySettings final {
+    DisplayFramePacing framePacing = DisplayFramePacing::fixedMaximum;
+};
+
 struct SharedAnalysisSettings final {
     static constexpr int defaultFftSize = 4096;
     static constexpr int defaultFftSliceRateHz = 60;
@@ -140,6 +149,7 @@ struct LoudnessSettings final {
     gives those panels no persistent adjustable settings.
 */
 struct AnalyzerConfiguration final {
+    DisplaySettings display;
     SharedAnalysisSettings sharedAnalysis;
     SpectrumSettings spectrum;
     SpectrogramSettings spectrogram;
@@ -166,7 +176,7 @@ struct LegacySpectrumSettings final {
 */
 class AnalyzerConfigurationCodec final {
 public:
-    static constexpr int schemaVersion = 1;
+    static constexpr int schemaVersion = 2;
 
     [[nodiscard]] static const juce::Identifier& treeType();
     [[nodiscard]] static AnalyzerConfiguration defaults() noexcept;

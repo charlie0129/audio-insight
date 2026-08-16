@@ -201,6 +201,7 @@ public:
         testCase("Analyzer configuration round-trips beside compatibility parameters", [this] {
             PluginProcessor source;
             auto configuration = source.getAnalyzerConfiguration();
+            configuration.display.framePacing = DisplayFramePacing::adaptive;
             configuration.sharedAnalysis.fftSize = 8192;
             configuration.sharedAnalysis.frequencySpacing = 0.35;
             configuration.spectrum.floorDb = -132.0;
@@ -230,6 +231,7 @@ public:
             PluginProcessor restored;
             restored.setStateInformation(state.getData(), static_cast<int>(state.getSize()));
             const auto actual = restored.getAnalyzerConfiguration();
+            expect(actual.display.framePacing == DisplayFramePacing::adaptive);
             expectEquals(actual.sharedAnalysis.fftSize, 8192);
             expectWithinAbsoluteError(actual.sharedAnalysis.frequencySpacing, 0.35, 1.0e-12);
             expectWithinAbsoluteError(actual.spectrum.floorDb, -132.0, 1.0e-12);
@@ -308,6 +310,24 @@ public:
 
             expectEquals(afterEdit.fftGeneration, beforeEdit.fftGeneration);
             expectEquals(afterEdit.fftConfigurationChanges, beforeEdit.fftConfigurationChanges);
+            expectEquals(
+                afterEdit.spectrogramMappingGeneration, beforeEdit.spectrogramMappingGeneration);
+            expectEquals(afterEdit.spectrogramMappingChanges, beforeEdit.spectrogramMappingChanges);
+        });
+
+        testCase("Display pacing edits do not reconfigure any analyzer", [this] {
+            PluginProcessor processor;
+            const auto beforeEdit = processor.getAnalysisTelemetry();
+            auto configuration = processor.getAnalyzerConfiguration();
+            configuration.display.framePacing = DisplayFramePacing::adaptive;
+            processor.setAnalyzerConfiguration(configuration);
+            const auto afterEdit = processor.getAnalysisTelemetry();
+
+            expectEquals(afterEdit.captureGeneration, beforeEdit.captureGeneration);
+            expectEquals(afterEdit.fftGeneration, beforeEdit.fftGeneration);
+            expectEquals(afterEdit.fftConfigurationChanges, beforeEdit.fftConfigurationChanges);
+            expectEquals(afterEdit.spectrumTemporalConfigurationChanges,
+                beforeEdit.spectrumTemporalConfigurationChanges);
             expectEquals(
                 afterEdit.spectrogramMappingGeneration, beforeEdit.spectrogramMappingGeneration);
             expectEquals(afterEdit.spectrogramMappingChanges, beforeEdit.spectrogramMappingChanges);

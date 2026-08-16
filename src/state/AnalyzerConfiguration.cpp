@@ -12,6 +12,9 @@ namespace audio_insight {
 namespace {
 const juce::Identifier versionProperty { "version" };
 
+const juce::Identifier displayType { "Display" };
+const juce::Identifier displayFramePacingProperty { "framePacing" };
+
 const juce::Identifier sharedAnalysisType { "SharedAnalysis" };
 const juce::Identifier fftSizeProperty { "fftSize" };
 const juce::Identifier windowProperty { "window" };
@@ -41,6 +44,7 @@ const juce::Identifier loudnessType { "Loudness" };
 const juce::Identifier loudnessReferenceProperty { "referenceLufs" };
 
 const std::array rootProperties { versionProperty };
+const std::array displayProperties { displayFramePacingProperty };
 const std::array sharedAnalysisProperties {
     fftSizeProperty,
     windowProperty,
@@ -86,6 +90,7 @@ bool hasRecognizedShape(const juce::ValueTree& tree)
     if (!hasOnlyKnownProperties(tree, rootProperties))
         return false;
 
+    auto displayCount = 0;
     auto sharedAnalysisCount = 0;
     auto spectrumCount = 0;
     auto spectrogramCount = 0;
@@ -95,7 +100,11 @@ bool hasRecognizedShape(const juce::ValueTree& tree)
         if (child.getNumChildren() != 0)
             return false;
 
-        if (child.hasType(sharedAnalysisType)) {
+        if (child.hasType(displayType)) {
+            if (++displayCount > 1 || !hasOnlyKnownProperties(child, displayProperties)) {
+                return false;
+            }
+        } else if (child.hasType(sharedAnalysisType)) {
             if (++sharedAnalysisCount > 1
                 || !hasOnlyKnownProperties(child, sharedAnalysisProperties)) {
                 return false;
@@ -300,6 +309,38 @@ SpectrogramHistoryMode sanitizeHistoryMode(const SpectrogramHistoryMode mode) no
     return SpectrogramHistoryMode::scroll;
 }
 
+DisplayFramePacing sanitizeDisplayFramePacing(const DisplayFramePacing framePacing) noexcept
+{
+    switch (framePacing) {
+    case DisplayFramePacing::fixedMaximum:
+    case DisplayFramePacing::adaptive:
+        return framePacing;
+    }
+
+    return DisplayFramePacing::fixedMaximum;
+}
+
+const char* tokenForDisplayFramePacing(const DisplayFramePacing framePacing) noexcept
+{
+    switch (framePacing) {
+    case DisplayFramePacing::fixedMaximum:
+        return "fixedMaximum";
+    case DisplayFramePacing::adaptive:
+        return "adaptive";
+    }
+
+    return "fixedMaximum";
+}
+
+std::optional<DisplayFramePacing> parseDisplayFramePacing(const juce::String& token)
+{
+    if (token == "fixedMaximum")
+        return DisplayFramePacing::fixedMaximum;
+    if (token == "adaptive")
+        return DisplayFramePacing::adaptive;
+    return std::nullopt;
+}
+
 const char* tokenForWindow(const FftWindow window) noexcept
 {
     switch (window) {
@@ -492,6 +533,14 @@ void decodeLoudness(const juce::ValueTree& tree, LoudnessSettings& destination) 
     if (const auto value = readNumber(tree, loudnessReferenceProperty))
         destination.referenceLufs = *value;
 }
+
+void decodeDisplay(const juce::ValueTree& tree, DisplaySettings& destination) noexcept
+{
+    if (const auto value = readString(tree, displayFramePacingProperty)) {
+        destination.framePacing
+            = parseDisplayFramePacing(*value).value_or(DisplayFramePacing::fixedMaximum);
+    }
+}
 } // namespace
 
 const juce::Identifier& AnalyzerConfigurationCodec::treeType()
@@ -511,6 +560,9 @@ AnalyzerConfiguration AnalyzerConfigurationCodec::sanitize(
     constexpr std::array fftSizes { 1024, 2048, 4096, 8192, 16384 };
     constexpr std::array fftSliceRates { 15, 30, 60, 120 };
     constexpr std::array historyDurations { 2, 5, 10, 20, 30, 60 };
+
+    configuration.display.framePacing
+        = sanitizeDisplayFramePacing(configuration.display.framePacing);
 
     auto& shared = configuration.sharedAnalysis;
     shared.fftSize
@@ -575,6 +627,11 @@ juce::ValueTree AnalyzerConfigurationCodec::encode(const AnalyzerConfiguration& 
     juce::ValueTree tree(treeType());
     tree.setProperty(versionProperty, juce::String(schemaVersion), nullptr);
 
+    juce::ValueTree display(displayType);
+    display.setProperty(displayFramePacingProperty,
+        tokenForDisplayFramePacing(sanitized.display.framePacing), nullptr);
+    tree.addChild(display, -1, nullptr);
+
     juce::ValueTree shared(sharedAnalysisType);
     shared.setProperty(fftSizeProperty, juce::String(sanitized.sharedAnalysis.fftSize), nullptr);
     shared.setProperty(windowProperty, tokenForWindow(sanitized.sharedAnalysis.window), nullptr);
@@ -627,14 +684,17 @@ juce::ValueTree AnalyzerConfigurationCodec::encode(const AnalyzerConfiguration& 
 
 std::optional<AnalyzerConfiguration> AnalyzerConfigurationCodec::decode(const juce::ValueTree& tree)
 {
-    if (!tree.isValid() || !tree.hasType(treeType()) || !hasRecognizedShape(tree))
+    if (!tree.isValid() || !tree.hasType(treeType()))
         return std::nullopt;
 
     const auto version = readInteger(tree, versionProperty);
-    if (!version.has_value() || *version != schemaVersion)
+    if (!version.has_value() || *version != schemaVersion || !hasRecognizedShape(tree)) {
         return std::nullopt;
+    }
 
     auto configuration = defaults();
+    if (const auto display = tree.getChildWithName(displayType); display.isValid())
+        decodeDisplay(display, configuration.display);
     if (const auto shared = tree.getChildWithName(sharedAnalysisType); shared.isValid())
         decodeSharedAnalysis(shared, configuration.sharedAnalysis);
     if (const auto spectrum = tree.getChildWithName(spectrumType); spectrum.isValid())

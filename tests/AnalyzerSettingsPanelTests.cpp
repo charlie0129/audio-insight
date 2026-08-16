@@ -32,6 +32,40 @@ public:
 
     void runTest() override
     {
+        beginTest("Display pacing publishes immediately and resets to Fixed maximum");
+        {
+            auto callbackCount = 0;
+            AnalyzerConfiguration lastPublished;
+            AnalyzerSettingsPanel panel(
+                AnalyzerConfigurationCodec::defaults(),
+                [&](const AnalyzerConfiguration& configuration) {
+                    ++callbackCount;
+                    lastPublished = configuration;
+                },
+                [] { });
+            panel.setBounds(0, 0, 360, 720);
+
+            auto* framePacing = dynamic_cast<juce::ComboBox*>(
+                findDescendantWithId(panel, "settingsDisplayFramePacing"));
+            auto* reset
+                = dynamic_cast<juce::Button*>(findDescendantWithId(panel, "settingsDisplayReset"));
+            expect(framePacing != nullptr);
+            expect(reset != nullptr);
+            if (framePacing == nullptr || reset == nullptr)
+                return;
+
+            expectEquals(framePacing->getNumItems(), 2);
+            expectEquals(framePacing->getText(), juce::String("Fixed maximum"));
+            framePacing->setSelectedId(2, juce::sendNotificationSync);
+            expectEquals(callbackCount, 1);
+            expect(lastPublished.display.framePacing == DisplayFramePacing::adaptive);
+
+            reset->onClick();
+            expectEquals(callbackCount, 2);
+            expect(lastPublished.display.framePacing == DisplayFramePacing::fixedMaximum);
+            expectEquals(framePacing->getText(), juce::String("Fixed maximum"));
+        }
+
         beginTest("Temporal averaging uses physical time with an Off sentinel and log spacing");
         {
             auto callbackCount = 0;
@@ -264,6 +298,8 @@ public:
             };
 
             expectAvailable("settingsSpectrumTemporalAveraging");
+            expectAvailable("settingsDisplayFramePacing");
+            expectAvailable("settingsDisplayReset");
             expectAvailable("settingsSpectrumSlope");
             expectAvailable("settingsSpectrumPeakHoldMode");
             expectAvailable("settingsSpectrumTraceColor");
@@ -654,6 +690,7 @@ public:
             panel.setBounds(0, 0, 360, 720);
 
             auto replacement = AnalyzerConfigurationCodec::defaults();
+            replacement.display.framePacing = DisplayFramePacing::adaptive;
             replacement.sharedAnalysis.fftSize = 8192;
             replacement.sharedAnalysis.window = FftWindow::fiveTermFlatTop;
             replacement.sharedAnalysis.requestedFftSliceRateHz = 120;
@@ -678,6 +715,8 @@ public:
 
             auto* fftSizeControl
                 = dynamic_cast<juce::ComboBox*>(findDescendantWithId(panel, "settingsFftSize"));
+            auto* framePacing = dynamic_cast<juce::ComboBox*>(
+                findDescendantWithId(panel, "settingsDisplayFramePacing"));
             auto* window
                 = dynamic_cast<juce::ComboBox*>(findDescendantWithId(panel, "settingsFftWindow"));
             auto* fftRate = dynamic_cast<juce::ComboBox*>(
@@ -710,6 +749,7 @@ public:
                 findDescendantWithId(panel, "settingsSpectrogramHistoryMode"));
             auto* reference = dynamic_cast<juce::Slider*>(
                 findDescendantWithId(panel, "settingsLoudnessReference"));
+            expect(framePacing != nullptr && framePacing->getText() == "Adaptive");
             expect(fftSizeControl != nullptr && fftSizeControl->getText() == "8192");
             expect(window != nullptr && window->getText() == "Flat-top");
             expect(fftRate != nullptr && fftRate->getText() == "120 Hz");
@@ -775,6 +815,8 @@ public:
 
             constexpr std::array expectedControls {
                 ExpectedControl { "settingsClose", "Close" },
+                ExpectedControl { "settingsDisplayReset", "Display" },
+                ExpectedControl { "settingsDisplayFramePacing", "Display frame pacing" },
                 ExpectedControl { "settingsSharedReset", "Shared analysis" },
                 ExpectedControl { "settingsFftSize", "FFT size" },
                 ExpectedControl { "settingsFftWindow", "FFT window" },
