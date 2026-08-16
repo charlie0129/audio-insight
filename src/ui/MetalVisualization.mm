@@ -5233,11 +5233,13 @@ private:
             return;
 
         auto* screen = view.window.screen;
-        const auto reportedMaximum
-            = screen != nil ? std::max<NSInteger>(1, screen.maximumFramesPerSecond) : 60;
-        activeDisplayMaximumFramesPerSecond = reportedMaximum > std::numeric_limits<int>::max()
+        const auto reportedMaximum = screen != nil ? screen.maximumFramesPerSecond : 0;
+        const auto boundedReportedMaximum = reportedMaximum > std::numeric_limits<int>::max()
             ? std::numeric_limits<int>::max()
             : static_cast<int>(reportedMaximum);
+        activeDisplayMaximumFramesPerSecond = static_cast<int>(
+            displayLinkFrameRateRange(boundedReportedMaximum, MetalDisplayFramePacing::fixedMaximum)
+                .maximumFramesPerSecond);
         loadPublishedTelemetry()->configuredMaximumFramesPerSecond.store(
             static_cast<std::uint32_t>(activeDisplayMaximumFramesPerSecond),
             std::memory_order_relaxed);
