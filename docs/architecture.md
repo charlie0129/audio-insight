@@ -324,6 +324,26 @@ submissions. Each submitted frame instead has lifetime-safe correlation state
 that independently receives the GPU-completion and presentation callbacks. It
 must not retain a raw renderer pointer after teardown.
 
+Spectrogram Scroll keeps stored history on the captured-audio timeline but
+paces its visible head from the display link's target-presentation clock. Start
+one FFT slice behind the newest accepted timeline column, move discrete cells
+by fractional-column offsets at the requested slice rate, and do not blend dB
+values across time or across black timestamp gaps. Ordinary column bursts move
+the data frontier without moving the display head backward. Clamp a delayed
+head to one future cell; when that cushion is exhausted or the retained head has
+expired, the next accepted column deliberately establishes a fresh one-slice
+anchor. Overwrite mode retains its discrete physical-ring presentation.
+
+Allow at most one Spectrogram texture-upload transaction in flight. While it is
+outstanding, later display callbacks defer queue draining and ring mutation but
+continue submitting the complete dashboard. Those later frames mask the fixed
+set of destination columns until completion is observed. Matching success
+promotes them by removing the mask; matching failure clears history because a
+Metal command may have written only part of the set. History and texture
+revisions make lifecycle-invalidated completions stale. Upload deferrals are
+observable, while a full-frame upload-backpressure drop remains an expected-zero
+regression alarm.
+
 The editor exposes a built-in performance metrics panel rather than relying on
 Apple's Metal Performance HUD. On macOS 15, `CAMetalLayer.developerHUDProperties`
 configures a HUD only after the hosting process was launched with Apple's
@@ -667,6 +687,10 @@ authorize fake values, background work, or speculative resource allocation.
 
 ### 2026-08-16
 
+- Made Spectrogram Scroll presentation-time fractional with a one-slice cushion
+  while retaining discrete dB cells and black timestamp gaps. Upload contention
+  now defers column draining and masks pending destinations instead of skipping
+  a whole dashboard frame; revisions reject stale completion results.
 - Made About presentation lifecycle-preserving rather than state-restoring. An
   active dashboard keeps a right-side About panel and compact live Metal preview
   at a preferred 50% width, clamped to 360–700 logical points while leaving at

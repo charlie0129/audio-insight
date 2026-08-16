@@ -507,8 +507,19 @@ history.
   frame command buffer. Never upload or allocate from the audio callback.
 - Scroll mode remaps circular texture coordinates; never copy the whole texture
   to scroll pixels. Overwrite mode draws physical ring order.
+- In Scroll mode, start the visible head one requested-rate slice behind the
+  newest accepted column and advance it fractionally from display target time.
+  Shift discrete time cells without interpolating their dB values; stored black
+  gaps remain black. Ordinary analysis bursts do not move the head backward.
+  Freeze at one future cell if analysis stalls, then re-anchor when new data
+  arrives; re-anchor as well if the retained display head has expired.
 - A small bounded non-audio SPSC column queue may let a slower render consume
   multiple analysis columns without stretching time.
+- Keep no more than one texture-upload transaction in flight. During a busy
+  upload, submit the rest of the dashboard normally, do not drain another
+  Spectrogram column, and mask that transaction's destination columns in later
+  frames until success is observed. Clear history after a matching failure and
+  ignore completion made stale by a later history or texture revision.
 - Advance history by timestamps. Missing/coalesced intervals become black gap
   columns rather than making history appear slower than real time.
 
