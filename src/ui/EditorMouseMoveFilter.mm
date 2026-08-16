@@ -6,22 +6,34 @@
 
 #import <AppKit/AppKit.h>
 
+#include <cmath>
 #include <utility>
 
 namespace audio_insight {
 bool detail::RedundantMouseMoveCoalescer::shouldForward(const bool isInEditorScope,
-    const bool bypass, const void* const target, const std::uint64_t modifierFlags) noexcept
+    const bool bypass, const void* const target, const std::uint64_t modifierFlags,
+    const double timestampSeconds) noexcept
 {
     if (!isInEditorScope || bypass || target == nullptr) {
         reset();
         return true;
     }
 
-    const auto shouldForward
-        = !hasPreviousMove_ || previousTarget_ != target || previousModifierFlags_ != modifierFlags;
+    const auto timestampIsValid = std::isfinite(timestampSeconds) && timestampSeconds >= 0.0;
+    const auto elapsedSinceForward = timestampIsValid && hasPreviousForwardTimestamp_
+        ? timestampSeconds - previousForwardTimestampSeconds_
+        : 0.0;
+    const auto heartbeatIsDue = !timestampIsValid || !hasPreviousForwardTimestamp_
+        || elapsedSinceForward < 0.0 || elapsedSinceForward >= heartbeatIntervalSeconds;
+    const auto shouldForward = !hasPreviousMove_ || previousTarget_ != target
+        || previousModifierFlags_ != modifierFlags || heartbeatIsDue;
     previousTarget_ = target;
     previousModifierFlags_ = modifierFlags;
     hasPreviousMove_ = true;
+    if (shouldForward) {
+        previousForwardTimestampSeconds_ = timestampIsValid ? timestampSeconds : 0.0;
+        hasPreviousForwardTimestamp_ = timestampIsValid;
+    }
     return shouldForward;
 }
 
@@ -29,7 +41,9 @@ void detail::RedundantMouseMoveCoalescer::reset() noexcept
 {
     previousTarget_ = nullptr;
     previousModifierFlags_ = 0;
+    previousForwardTimestampSeconds_ = 0.0;
     hasPreviousMove_ = false;
+    hasPreviousForwardTimestamp_ = false;
 }
 
 class EditorMouseMoveFilter::Impl final {
@@ -142,7 +156,7 @@ private:
         auto* const target = editor_.getComponentAt(juce::Point<float> {
             static_cast<float>(localPoint.x), static_cast<float>(localPoint.y) });
         const auto shouldForward = coalescer_.shouldForward(
-            true, bypass, target, static_cast<std::uint64_t>(event.modifierFlags));
+            true, bypass, target, static_cast<std::uint64_t>(event.modifierFlags), event.timestamp);
 
         if (bypass || target == nullptr)
             previousTarget_ = nullptr;
