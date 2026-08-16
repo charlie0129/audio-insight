@@ -564,16 +564,26 @@ void appendRawSections(
         "Reclaimed ready chunks", analysis.capture.reclaimedReadyChunks, "chunks"));
     capture.rows.emplace_back(rawUnsigned("analysis.capture.droppedIncomingChunks",
         "Dropped incoming chunks", analysis.capture.droppedIncomingChunks, "chunks"));
+    capture.rows.emplace_back(rawUnsigned("analysis.capture.overflowEpisodes", "Overflow episodes",
+        analysis.capture.overflowEpisodes, "episodes"));
     capture.rows.emplace_back(rawUnsigned("analysis.capture.consumerDiscontinuities",
         "Consumer discontinuities", analysis.capture.consumerDiscontinuities));
     capture.rows.emplace_back(rawUnsigned("analysis.capture.lastAttemptedSequence",
         "Last attempted sequence", analysis.capture.lastAttemptedSequence));
     capture.rows.emplace_back(rawUnsigned("analysis.capture.capturedFrames", "Captured frames",
         analysis.capture.capturedFrames, "frames"));
+    capture.rows.emplace_back(rawUnsigned(
+        "analysis.capture.readyFrames", "Ready frames", analysis.capture.readyFrames, "frames"));
+    capture.rows.emplace_back(rawUnsigned("analysis.capture.readyFrameHighWaterMark",
+        "Ready-frame high-water mark", analysis.capture.readyFrameHighWaterMark, "frames"));
+    capture.rows.emplace_back(rawUnsigned("analysis.capture.bufferedFrameCapacity",
+        "Buffered-frame capacity", analysis.capture.bufferedFrameCapacity, "frames"));
     capture.rows.emplace_back(rawUnsigned("analysis.capture.readyHighWaterMark",
         "Ready-slot high-water mark", analysis.capture.readyHighWaterMark, "slots"));
     capture.rows.emplace_back(rawUnsigned(
         "analysis.capture.readySlots", "Ready slots", analysis.capture.readySlots, "slots"));
+    capture.rows.emplace_back(rawUnsigned("analysis.capture.partialFrames", "Partial packed frames",
+        analysis.capture.partialFrames, "frames"));
     sections.emplace_back(std::move(capture));
 
     PerformanceMetricGroup meters { "Analysis meter handoff", { } };
@@ -762,6 +772,10 @@ void appendRawSections(
     fftConfiguration.rows.emplace_back(rawUnsigned("analysis.spectrumTemporalConfigurationChanges",
         "Spectrum temporal configuration changes", analysis.spectrumTemporalConfigurationChanges,
         "changes"));
+    fftConfiguration.rows.emplace_back(rawDouble("analysis.configuredSpectrumAttackMilliseconds",
+        "Configured Spectrum attack", analysis.configuredSpectrumAttackMilliseconds, "ms", 3));
+    fftConfiguration.rows.emplace_back(rawDouble("analysis.configuredSpectrumReleaseMilliseconds",
+        "Configured Spectrum release", analysis.configuredSpectrumReleaseMilliseconds, "ms", 3));
     fftConfiguration.rows.emplace_back(
         rawUnsigned("analysis.fftGeneration", "FFT generation", analysis.fftGeneration));
     fftConfiguration.rows.emplace_back(rawUnsigned("analysis.configuredFftSize",
@@ -1142,6 +1156,9 @@ void buildRates(const PerformanceMetricsSnapshot& current,
     appendRate(rates, "analysis.capture.droppedIncomingChunks", "Dropped incoming chunks",
         "chunks/s", capture.droppedIncomingChunks, previousCapture.droppedIncomingChunks,
         elapsedSeconds, baselineIsValid);
+    appendRate(rates, "analysis.capture.overflowEpisodes", "Capture overflow episodes",
+        "episodes/s", capture.overflowEpisodes, previousCapture.overflowEpisodes, elapsedSeconds,
+        baselineIsValid);
     appendRate(rates, "analysis.capture.consumerDiscontinuities", "Capture discontinuities",
         "events/s", capture.consumerDiscontinuities, previousCapture.consumerDiscontinuities,
         elapsedSeconds, baselineIsValid);

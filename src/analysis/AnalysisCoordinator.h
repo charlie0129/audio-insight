@@ -68,6 +68,10 @@ struct AnalysisTelemetry {
     std::uint64_t spectrumUserClears = 0;
     std::uint64_t fftConfigurationChanges = 0;
     std::uint64_t spectrumTemporalConfigurationChanges = 0;
+    double configuredSpectrumAttackMilliseconds
+        = SpectrumTemporalConfiguration::defaultAttackMilliseconds;
+    double configuredSpectrumReleaseMilliseconds
+        = SpectrumTemporalConfiguration::defaultReleaseMilliseconds;
     std::uint64_t spectrogramTransformsOffered = 0;
     std::uint64_t spectrogramColumnsMapped = 0;
     std::uint64_t spectrogramMappingFailures = 0;
@@ -161,6 +165,7 @@ public:
         afterFramePublication,
         beforeFrameBoundaryAcknowledgement,
         beforeSpectrogramBoundaryAcknowledgement,
+        beforeLoudnessResetCommit,
     };
 
     using LifecycleTestHook = void (*)(void*, LifecycleTestOperation) noexcept;
@@ -169,7 +174,7 @@ public:
     /** Installs a synchronous test seam invoked while the non-real-time gate is held. */
     void setLifecycleTestHook(void* context, LifecycleTestHook hook) noexcept;
 
-    /** Installs a bounded non-audio worker/renderer test seam; absent from production builds. */
+    /** Installs a bounded non-audio coordination test seam; absent from production builds. */
     void setWorkerTestHook(void* context, WorkerTestHook hook) noexcept;
 
     /** Simulates one lost meter endpoint without disturbing the raw-sample capture sequence. */
@@ -204,7 +209,7 @@ private:
     bool staleClearRequested_ = false;
     SpectrumAnalysisConfiguration spectrumConfiguration_;
     SpectrumTemporalConfiguration spectrumTemporalConfiguration_;
-    double spectrogramFrequencySpacing_ = 1.0;
+    double spectrogramFrequencySpacing_ = 0.8;
     std::int64_t analysisRequestPeriodNanoseconds_ = 16'666'667;
     std::uint64_t fftGenerationCounter_ = 1;
     std::uint64_t spectrogramMappingGenerationCounter_ = 1;

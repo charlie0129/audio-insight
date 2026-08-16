@@ -100,6 +100,10 @@ public:
             detail::mapFrequencyToUnit(intermediateMapping, 1'000.0F), 0.307686192F, 0.000001F);
         expectWithinAbsoluteError(
             detail::mapFrequencyToUnit(logarithmicMapping, 1'000.0F), 0.566323335F, 0.000001F);
+        auto invalidSpacingMapping = detail::FrequencyAxisMapping { };
+        invalidSpacingMapping.spacing = std::numeric_limits<float>::quiet_NaN();
+        expectWithinAbsoluteError(detail::mapFrequencyToUnit(invalidSpacingMapping, 1'000.0F),
+            detail::mapFrequencyToUnit(detail::FrequencyAxisMapping { }, 1'000.0F), 0.000001F);
         expectEquals(detail::mapFrequencyToUnit(logarithmicMapping, 20.0F), 0.0F);
         expectEquals(detail::mapFrequencyToUnit(logarithmicMapping, 20'000.0F), 1.0F);
         expectEquals(detail::mapFrequencyToUnit(logarithmicMapping, 1.0F), 0.0F);

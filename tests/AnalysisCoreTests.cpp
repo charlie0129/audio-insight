@@ -27,28 +27,35 @@ public:
         beginTest("Continuous chunks preserve plugin sequence and frame time");
         {
             StereoSampleCapture capture;
-            constexpr std::array<float, 4> left { 0.1F, 0.2F, 0.3F, 0.4F };
-            constexpr std::array<float, 4> right { -0.1F, -0.2F, -0.3F, -0.4F };
+            std::array<float, 64> left { };
+            std::array<float, 64> right { };
+            left.fill(0.25F);
+            right.fill(-0.5F);
 
-            for (std::size_t block = 0; block < 3; ++block) {
-                const auto result
-                    = capture.publishBlock(left.data(), right.data(), left.size(), 48000.0, 7);
-                expect(result.publishedChunks == 1);
-                expect(result.droppedIncomingChunks == 0);
-                expect(result.captureDiscontinuityRevision == 0);
-                expect(!result.beganCaptureDiscontinuity);
+            for (std::size_t chunk = 0; chunk < 3; ++chunk) {
+                for (std::size_t quarter = 0; quarter < 4; ++quarter) {
+                    const auto result
+                        = capture.publishBlock(left.data(), right.data(), left.size(), 48000.0, 7);
+                    expect(result.attemptedChunks == (quarter == 0 ? 1 : 0));
+                    expect(result.publishedChunks == (quarter == 3 ? 1 : 0));
+                    expect(result.droppedIncomingChunks == 0);
+                    expect(result.captureDiscontinuityRevision == 0);
+                    expect(!result.beganCaptureDiscontinuity);
+                }
             }
 
             for (std::uint64_t expectedSequence = 1; expectedSequence <= 3; ++expectedSequence) {
                 StereoSampleCapture::ReadHandle handle;
                 expect(capture.tryAcquireOldest(handle));
                 expect(handle.view().sequence == expectedSequence);
-                expect(handle.view().capturedFrameEnd == expectedSequence * left.size());
+                expect(handle.view().frameCount == StereoSampleCapture::framesPerSlot);
+                expect(handle.view().capturedFrameEnd
+                    == expectedSequence * StereoSampleCapture::framesPerSlot);
                 expect(!handle.view().followsDiscontinuity);
                 expect(handle.view().captureDiscontinuityRevision == 0);
                 expect(handle.view().captureLifecycleGeneration == 7);
-                expectWithinAbsoluteError(handle.view().left[2], left[2], 1.0e-7F);
-                expectWithinAbsoluteError(handle.view().right[2], right[2], 1.0e-7F);
+                expectWithinAbsoluteError(handle.view().left[200], 0.25F, 1.0e-7F);
+                expectWithinAbsoluteError(handle.view().right[200], -0.5F, 1.0e-7F);
             }
 
             const auto telemetry = capture.telemetry();
@@ -56,15 +63,87 @@ public:
             expect(telemetry.publishedChunks == 3);
             expect(telemetry.lostChunks() == 0);
             expect(telemetry.readyHighWaterMark == 3);
+            expect(telemetry.readyFrameHighWaterMark == 3 * StereoSampleCapture::framesPerSlot);
+            expect(telemetry.partialFrames == 0);
+        }
+
+        beginTest("Small host blocks pack into frame-bounded storage without a false overflow");
+        {
+            StereoSampleCapture capture;
+            std::array<float, 64> block { };
+            block.fill(0.25F);
+
+            // 4,800 frames models 100 ms without analysis service at 48 kHz.
+            for (std::size_t callback = 0; callback < 75; ++callback) {
+                const auto publication
+                    = capture.publishBlock(block.data(), block.data(), block.size(), 48'000.0, 1);
+                expect(!publication.beganCaptureDiscontinuity);
+            }
+
+            const auto telemetry = capture.telemetry();
+            expect(telemetry.capturedFrames == 4'800);
+            expect(telemetry.publishedChunks == 18);
+            expect(telemetry.readyFrames == 4'608);
+            expect(telemetry.partialFrames == 192);
+            expect(telemetry.bufferedFrameCapacity == 32'768);
+            expect(telemetry.reclaimedReadyChunks == 0);
+            expect(telemetry.droppedIncomingChunks == 0);
+            expect(telemetry.overflowEpisodes == 0);
+        }
+
+        beginTest("Packing preserves sample order across uneven host callbacks");
+        {
+            StereoSampleCapture capture;
+            std::array<float, 31> firstLeft { };
+            std::array<float, 31> firstRight { };
+            std::array<float, 100> secondLeft { };
+            std::array<float, 100> secondRight { };
+            std::array<float, 125> thirdLeft { };
+            std::array<float, 125> thirdRight { };
+            const auto fillRange = [](auto& left, auto& right, const std::size_t start) {
+                for (std::size_t index = 0; index < left.size(); ++index) {
+                    left[index] = static_cast<float>(start + index);
+                    right[index] = -left[index];
+                }
+            };
+            fillRange(firstLeft, firstRight, 0);
+            fillRange(secondLeft, secondRight, firstLeft.size());
+            fillRange(thirdLeft, thirdRight, firstLeft.size() + secondLeft.size());
+
+            expect(capture
+                       .publishBlock(
+                           firstLeft.data(), firstRight.data(), firstLeft.size(), 48'000.0, 1)
+                       .publishedChunks
+                == 0);
+            expect(capture
+                       .publishBlock(
+                           secondLeft.data(), secondRight.data(), secondLeft.size(), 48'000.0, 1)
+                       .publishedChunks
+                == 0);
+            expect(capture
+                       .publishBlock(
+                           thirdLeft.data(), thirdRight.data(), thirdLeft.size(), 48'000.0, 1)
+                       .publishedChunks
+                == 1);
+
+            StereoSampleCapture::ReadHandle handle;
+            expect(capture.tryAcquireOldest(handle));
+            expect(handle.view().frameCount == StereoSampleCapture::framesPerSlot);
+            for (std::size_t index = 0; index < handle.view().frameCount; ++index) {
+                expectWithinAbsoluteError(
+                    handle.view().left[index], static_cast<float>(index), 0.0F);
+                expectWithinAbsoluteError(
+                    handle.view().right[index], -static_cast<float>(index), 0.0F);
+            }
         }
 
         beginTest("Overflow never overwrites reading storage and is observable");
         {
             StereoSampleCapture capture;
-            std::array<float, 1> sample { };
+            std::array<float, StereoSampleCapture::framesPerSlot> sample { };
 
             for (std::size_t index = 0; index < StereoSampleCapture::slotCount; ++index) {
-                sample[0] = static_cast<float>(index + 1);
+                sample.fill(static_cast<float>(index + 1));
                 expect(capture.publishBlock(sample.data(), sample.data(), sample.size(), 48000.0, 1)
                            .publishedChunks
                     == 1);
@@ -76,7 +155,7 @@ public:
 
             auto firstGapRevision = std::uint64_t { 0 };
             for (std::size_t index = 0; index < StereoSampleCapture::slotCount; ++index) {
-                sample[0] = 100.0F + static_cast<float>(index);
+                sample.fill(100.0F + static_cast<float>(index));
                 const auto publication
                     = capture.publishBlock(sample.data(), sample.data(), sample.size(), 48000.0, 1);
                 expect(publication.publishedChunks == 1);
@@ -101,7 +180,7 @@ public:
             expect(telemetry.consumerDiscontinuities == 1);
 
             // With every fixed slot being read there is no safe reclaim target.
-            sample[0] = 999.0F;
+            sample.fill(999.0F);
             const auto dropped
                 = capture.publishBlock(sample.data(), sample.data(), sample.size(), 48000.0, 1);
             expect(dropped.droppedIncomingChunks == 1);
@@ -126,10 +205,10 @@ public:
         beginTest("Overflow does not reclassify an older surviving slot as post-gap input");
         {
             StereoSampleCapture capture;
-            std::array<float, 1> sample { };
+            std::array<float, StereoSampleCapture::framesPerSlot> sample { };
 
             for (std::size_t index = 0; index < StereoSampleCapture::slotCount; ++index) {
-                sample[0] = static_cast<float>(index + 1);
+                sample.fill(static_cast<float>(index + 1));
                 expect(capture
                            .publishBlock(
                                sample.data(), sample.data(), sample.size(), 48'000.0, 1, 2, 9)
@@ -137,7 +216,7 @@ public:
                     == 1);
             }
 
-            sample[0] = 100.0F;
+            sample.fill(100.0F);
             const auto overflow = capture.publishBlock(
                 sample.data(), sample.data(), sample.size(), 48'000.0, 1, 2, 9);
             expect(overflow.reclaimedReadyChunks == 1);
@@ -154,10 +233,39 @@ public:
             expectWithinAbsoluteError(survivingPreGap.view().left[0], 2.0F, 1.0e-7F);
         }
 
+        beginTest("A packed overflow reports its exact host-block frame boundary");
+        {
+            StereoSampleCapture capture;
+            std::array<float, StereoSampleCapture::framesPerSlot> full { };
+            full.fill(0.1F);
+            for (std::size_t index = 0; index + 1 < StereoSampleCapture::slotCount; ++index) {
+                static_cast<void>(
+                    capture.publishBlock(full.data(), full.data(), full.size(), 48'000.0, 1));
+            }
+
+            std::array<float, StereoSampleCapture::framesPerSlot / 2> half { };
+            half.fill(0.2F);
+            const auto partial
+                = capture.publishBlock(half.data(), half.data(), half.size(), 48'000.0, 1);
+            expect(partial.publishedChunks == 0);
+            expect(capture.telemetry().partialFrames == half.size());
+
+            const auto crossing
+                = capture.publishBlock(full.data(), full.data(), full.size(), 48'000.0, 1);
+            expect(crossing.beganCaptureDiscontinuity);
+            expect(crossing.firstDiscontinuityFrameOffset == half.size());
+            expect(crossing.precedingCaptureDiscontinuityRevision == 0);
+            expect(crossing.captureDiscontinuityRevision != 0);
+            expect(crossing.reclaimedReadyChunks == 1);
+            expect(capture.telemetry().overflowEpisodes == 1);
+        }
+
         beginTest("Mono layout metadata is preserved without duplicating its samples");
         {
             StereoSampleCapture capture;
-            constexpr std::array<float, 3> mono { 0.25F, -0.5F, 0.75F };
+            std::array<float, StereoSampleCapture::framesPerSlot> mono { };
+            mono.fill(0.25F);
+            mono[2] = 0.75F;
 
             expect(capture.publishBlock(mono.data(), nullptr, mono.size(), 48'000.0, 3, 1)
                        .publishedChunks
@@ -181,7 +289,8 @@ public:
         beginTest("Raw discontinuity revisions stay within one capture lifecycle");
         {
             StereoSampleCapture capture;
-            constexpr std::array<float, 1> sample { 0.25F };
+            std::array<float, StereoSampleCapture::framesPerSlot> sample { };
+            sample.fill(0.25F);
             constexpr auto oldLifecycle = std::uint64_t { 41 };
             constexpr auto newLifecycle = std::uint64_t { 73 };
 
@@ -195,7 +304,12 @@ public:
                 == oldPublication.captureDiscontinuityRevision);
             expect(capture.captureDiscontinuityRevision(newLifecycle) == 0);
 
-            capture.discardPending();
+            std::array<float, StereoSampleCapture::framesPerSlot / 2> partial { };
+            const auto oldPartial = capture.publishBlock(
+                partial.data(), partial.data(), partial.size(), 48'000.0, 1, 2, oldLifecycle);
+            expect(oldPartial.publishedChunks == 0);
+            expect(capture.telemetry().partialFrames == partial.size());
+
             const auto newPublication = capture.publishBlock(
                 sample.data(), sample.data(), sample.size(), 48'000.0, 2, 2, newLifecycle);
             expect(newPublication.captureDiscontinuityRevision == 0);
@@ -210,7 +324,8 @@ public:
         beginTest("Unsupported channel metadata is preserved for downstream rejection");
         {
             StereoSampleCapture capture;
-            constexpr std::array<float, 1> sample { 0.25F };
+            std::array<float, StereoSampleCapture::framesPerSlot> sample { };
+            sample.fill(0.25F);
             expect(capture.publishBlock(sample.data(), sample.data(), sample.size(), 48'000.0, 4, 3)
                        .publishedChunks
                 == 1);

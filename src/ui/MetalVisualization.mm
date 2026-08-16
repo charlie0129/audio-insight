@@ -110,8 +110,9 @@ float mapFrequencyToUnit(const FrequencyAxisMapping& mapping, const float freque
     const auto frequency
         = std::clamp(std::isfinite(frequencyHz) ? frequencyHz : mapping.minimumFrequencyHz,
             mapping.minimumFrequencyHz, mapping.maximumFrequencyHz);
-    const auto spacing
-        = std::clamp(std::isfinite(mapping.spacing) ? mapping.spacing : 1.0F, 0.0F, 1.0F);
+    const auto spacing = std::clamp(
+        std::isfinite(mapping.spacing) ? mapping.spacing : FrequencyAxisMapping { }.spacing, 0.0F,
+        1.0F);
     const auto linear = (frequency - mapping.minimumFrequencyHz)
         / (mapping.maximumFrequencyHz - mapping.minimumFrequencyHz);
     const auto logarithmic = std::log(frequency / mapping.minimumFrequencyHz)
@@ -3669,6 +3670,10 @@ public:
         const auto callbackHostTime = CACurrentMediaTime();
         applyPendingTelemetryAtSafeBoundary();
         const auto telemetry = callbackTelemetry;
+        // Rendering backpressure must not starve the independent capture and
+        // analysis pipeline.
+        source.requestAnalysis();
+        telemetry->analysisRequestCalls.fetch_add(1, std::memory_order_relaxed);
         const auto targetTimestamp = update.targetTimestamp;
         const auto targetPresentationTimestamp = update.targetPresentationTimestamp;
         const auto scrollTargetTimestamp = spectrogramPresentationTimebase.presentationTime(
@@ -3727,9 +3732,6 @@ public:
         // Keep telemetry current here, but leave atlas rebuilding to AppKit's
         // existing backing-property and window-lifecycle notifications.
         updateBackingScale(false);
-
-        source.requestAnalysis();
-        telemetry->analysisRequestCalls.fetch_add(1, std::memory_order_relaxed);
 
         VisualizationFrame incomingFrame;
 

@@ -45,14 +45,14 @@ consteval std::size_t aggregateFieldCount()
 static_assert(aggregateFieldCount<PresentedFrameIntervalSample>() == 2);
 static_assert(aggregateFieldCount<FrameLatencySample>() == 9);
 static_assert(aggregateFieldCount<MetalRenderTelemetry>() == 103);
-static_assert(aggregateFieldCount<StereoSampleCapture::Telemetry>() == 9);
+static_assert(aggregateFieldCount<StereoSampleCapture::Telemetry>() == 14);
 static_assert(aggregateFieldCount<StereoMeterAccumulator::Telemetry>() == 7);
 static_assert(aggregateFieldCount<AudioCallbackBlockTelemetry>() == 5);
 static_assert(aggregateFieldCount<AudioCallbackTelemetry>() == 15);
 static_assert(aggregateFieldCount<SharedAnalysisScheduler::Counters>() == 12);
 static_assert(aggregateFieldCount<LoudnessAnalyzer::Statistics>() == 33);
 static_assert(aggregateFieldCount<LoudnessMeasurement>() == 19);
-static_assert(aggregateFieldCount<AnalysisTelemetry>() == 71);
+static_assert(aggregateFieldCount<AnalysisTelemetry>() == 73);
 
 constexpr auto expectedRawFieldNames = std::to_array<std::string_view>({
     "metal.epoch",
@@ -201,11 +201,16 @@ constexpr auto expectedRawFieldNames = std::to_array<std::string_view>({
     "analysis.capture.publishedChunks",
     "analysis.capture.reclaimedReadyChunks",
     "analysis.capture.droppedIncomingChunks",
+    "analysis.capture.overflowEpisodes",
     "analysis.capture.consumerDiscontinuities",
     "analysis.capture.lastAttemptedSequence",
     "analysis.capture.capturedFrames",
+    "analysis.capture.readyFrames",
+    "analysis.capture.readyFrameHighWaterMark",
+    "analysis.capture.bufferedFrameCapacity",
     "analysis.capture.readyHighWaterMark",
     "analysis.capture.readySlots",
+    "analysis.capture.partialFrames",
     "analysis.meters.attemptedBlocks",
     "analysis.meters.publishedBlocks",
     "analysis.meters.coalescedBlocks",
@@ -295,6 +300,8 @@ constexpr auto expectedRawFieldNames = std::to_array<std::string_view>({
     "analysis.scheduler.timingUnavailable",
     "analysis.fftConfigurationChanges",
     "analysis.spectrumTemporalConfigurationChanges",
+    "analysis.configuredSpectrumAttackMilliseconds",
+    "analysis.configuredSpectrumReleaseMilliseconds",
     "analysis.spectrogramTransformsOffered",
     "analysis.spectrogramColumnsMapped",
     "analysis.spectrogramMappingFailures",
@@ -343,7 +350,7 @@ constexpr auto expectedRawFieldNames = std::to_array<std::string_view>({
     "analysis.peakRmsUserResets",
     "analysis.spectrumUserClears",
 });
-static_assert(expectedRawFieldNames.size() == 287);
+static_assert(expectedRawFieldNames.size() == 294);
 
 const PerformanceMetricRate* findRate(
     const PerformanceMetricsViewModel& view, const std::string_view sourceFieldName)
@@ -962,6 +969,36 @@ public:
             expect(updateRate != nullptr && updateRate->available);
             if (updateRate != nullptr)
                 expectWithinAbsoluteError(updateRate->value, 3.0, 1.0e-12);
+        });
+
+        testCase("Configured Spectrum attack and release are exact raw metrics", [this] {
+            PerformanceMetricsModel model;
+            PerformanceMetricsSnapshot snapshot;
+            snapshot.analysis.configuredSpectrumAttackMilliseconds = 125.5;
+            snapshot.analysis.configuredSpectrumReleaseMilliseconds = 875.25;
+
+            const auto view = model.update(snapshot, 10.0);
+            const auto* attack = findRawRow(view, "analysis.configuredSpectrumAttackMilliseconds");
+            const auto* release
+                = findRawRow(view, "analysis.configuredSpectrumReleaseMilliseconds");
+
+            expect(attack != nullptr);
+            expect(release != nullptr);
+            if (attack != nullptr) {
+                expectEquals(attack->label, std::string("Configured Spectrum attack"));
+                expectEquals(attack->rawValue, std::string("125.5"));
+                expectEquals(attack->rawUnit, std::string("ms"));
+            }
+            if (release != nullptr) {
+                expectEquals(release->label, std::string("Configured Spectrum release"));
+                expectEquals(release->rawValue, std::string("875.25"));
+                expectEquals(release->rawUnit, std::string("ms"));
+            }
+
+            expect(view.report.find("analysis.configuredSpectrumAttackMilliseconds = 125.5 ms")
+                != std::string::npos);
+            expect(view.report.find("analysis.configuredSpectrumReleaseMilliseconds = 875.25 ms")
+                != std::string::npos);
         });
 
         testCase("Requested and achieved FFT slice rates are explicit", [this] {

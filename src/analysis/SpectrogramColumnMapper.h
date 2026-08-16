@@ -49,7 +49,7 @@ private:
     [[nodiscard]] static float powerToDecibels(float power) noexcept;
 
     std::array<RowMapping, maximumSpectrogramRowCount> rows_ { };
-    double frequencySpacing_ = 1.0;
+    double frequencySpacing_ = 0.8;
     std::uint64_t mappingGeneration_ = 1;
     double mappedSampleRate_ = 0.0;
     double minimumFrequencyHz_ = 20.0;

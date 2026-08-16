@@ -39,14 +39,23 @@ struct CapturedStereoChunkView {
 */
 class StereoSampleCapture final {
 public:
-    static constexpr std::size_t slotCount = 16;
-    static constexpr std::size_t framesPerSlot = 2048;
+    // Keep the original 32,768-frame storage budget, but divide it into small
+    // packed chunks. A 64-frame host callback therefore no longer consumes one
+    // whole 2,048-frame slot. The resulting capacity is about 683 ms at 48 kHz,
+    // 341 ms at 96 kHz, and 171 ms at 192 kHz, independent of host block size.
+    static constexpr std::size_t slotCount = 128;
+    static constexpr std::size_t framesPerSlot = 256;
+    static constexpr std::size_t bufferedFrameCapacity = slotCount * framesPerSlot;
+    static constexpr std::size_t maximumFramesPerPublishCall = framesPerSlot;
+    static constexpr std::size_t noDiscontinuityFrameOffset = static_cast<std::size_t>(-1);
 
     struct PublishResult {
         std::uint32_t attemptedChunks = 0;
         std::uint32_t publishedChunks = 0;
         std::uint32_t reclaimedReadyChunks = 0;
         std::uint32_t droppedIncomingChunks = 0;
+        std::size_t firstDiscontinuityFrameOffset = noDiscontinuityFrameOffset;
+        std::uint64_t precedingCaptureDiscontinuityRevision = 0;
         std::uint64_t captureDiscontinuityRevision = 0;
         bool beganCaptureDiscontinuity = false;
     };
@@ -56,11 +65,16 @@ public:
         std::uint64_t publishedChunks = 0;
         std::uint64_t reclaimedReadyChunks = 0;
         std::uint64_t droppedIncomingChunks = 0;
+        std::uint64_t overflowEpisodes = 0;
         std::uint64_t consumerDiscontinuities = 0;
         std::uint64_t lastAttemptedSequence = 0;
         std::uint64_t capturedFrames = 0;
+        std::uint64_t readyFrames = 0;
+        std::uint64_t readyFrameHighWaterMark = 0;
+        std::uint64_t bufferedFrameCapacity = StereoSampleCapture::bufferedFrameCapacity;
         std::uint32_t readyHighWaterMark = 0;
         std::uint32_t readySlots = 0;
+        std::uint32_t partialFrames = 0;
 
         [[nodiscard]] std::uint64_t lostChunks() const noexcept
         {
@@ -105,7 +119,9 @@ public:
     StereoSampleCapture& operator=(const StereoSampleCapture&) = delete;
 
     /**
-        Publishes all frames, splitting blocks larger than framesPerSlot.
+        Packs frames into fixed 256-frame chunks. frameCount must not exceed
+        maximumFramesPerPublishCall; Debug builds assert this precondition and
+        release builds reject oversized calls without mutating capture state.
 
         A null channel pointer is treated as silence. Passing the same pointer for
         both channels is supported. generation is the public capture generation;
@@ -146,6 +162,11 @@ private:
     static_assert(std::atomic<std::uint32_t>::is_always_lock_free);
     static_assert(std::atomic<std::uint64_t>::is_always_lock_free);
 
+    static constexpr std::uint64_t partialFrameMask = (std::uint64_t { 1 } << 16U) - 1U;
+    static constexpr std::uint64_t readyFrameMask = (std::uint64_t { 1 } << 32U) - 1U;
+    static constexpr std::uint64_t readyFrameUnit = std::uint64_t { 1 } << 16U;
+    static constexpr std::uint64_t readySlotUnit = std::uint64_t { 1 } << 48U;
+
     struct Slot {
         std::atomic<SlotState> state { SlotState::free };
         // Safe selection key: readers must not inspect non-atomic payload fields
@@ -164,11 +185,17 @@ private:
     };
 
     [[nodiscard]] Slot* claimSlot(bool& reclaimedReady, std::size_t& slotIndex) noexcept;
-    void publishChunk(const float* left, const float* right, std::size_t frameCount,
-        double sampleRate, std::uint64_t generation, std::uint32_t channelCount,
-        std::uint64_t captureLifecycleGeneration, PublishResult& result) noexcept;
+    [[nodiscard]] bool beginPackedChunk(double sampleRate, std::uint64_t generation,
+        std::uint32_t channelCount, std::uint64_t captureLifecycleGeneration,
+        std::size_t inputFrameOffset, PublishResult& result) noexcept;
+    void finalizePackedChunk(PublishResult& result) noexcept;
+    void abandonPackedChunk() noexcept;
+    void retireReadyChunksForLifecycleChange() noexcept;
+    void beginCaptureDiscontinuity(
+        std::uint64_t sequence, std::size_t inputFrameOffset, PublishResult& result) noexcept;
     void releaseReadSlot(std::size_t slotIndex) noexcept;
-    void updateReadyHighWaterMark() noexcept;
+    void addReadyFrames(std::size_t frameCount) noexcept;
+    void removeReadyFrames(std::size_t frameCount) noexcept;
 
     std::array<Slot, slotCount> slots_ { };
 
@@ -177,7 +204,11 @@ private:
     std::uint64_t capturedFrameCursor_ = 0;
     std::uint64_t producerCaptureLifecycleGeneration_ = 0;
     std::uint64_t captureDiscontinuityRevision_ = 0;
+    std::size_t nextClaimIndex_ = 0;
+    std::size_t packedSlotIndex_ = slotCount;
+    std::size_t packedFrameCount_ = 0;
     std::uint32_t producerReadyHighWaterMark_ = 0;
+    std::uint64_t producerReadyFrameHighWaterMark_ = 0;
 
     // Written only by the logical consumer.
     bool consumerHasPreviousSequence_ = false;
@@ -189,6 +220,7 @@ private:
     std::atomic<std::uint64_t> publishedChunks_ { 0 };
     std::atomic<std::uint64_t> reclaimedReadyChunks_ { 0 };
     std::atomic<std::uint64_t> droppedIncomingChunks_ { 0 };
+    std::atomic<std::uint64_t> overflowEpisodes_ { 0 };
     std::atomic<std::uint64_t> consumerDiscontinuities_ { 0 };
     std::atomic<std::uint64_t> lastAttemptedSequence_ { 0 };
     std::atomic<std::uint64_t> capturedFrames_ { 0 };
@@ -196,5 +228,9 @@ private:
     std::atomic<std::uint64_t> publishedCaptureDiscontinuityLifecycleGeneration_ { 0 };
     std::atomic<std::uint64_t> acknowledgedCaptureDiscontinuityRevision_ { 0 };
     std::atomic<std::uint32_t> readyHighWaterMark_ { 0 };
+    // One lock-free word keeps ready-slot, ready-frame, and producer-partial
+    // counts coherent for concurrent telemetry snapshots.
+    std::atomic<std::uint64_t> bufferedState_ { 0 };
+    std::atomic<std::uint64_t> readyFrameHighWaterMark_ { 0 };
 };
 } // namespace audio_insight

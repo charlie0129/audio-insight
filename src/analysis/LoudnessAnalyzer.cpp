@@ -31,8 +31,8 @@ LoudnessAnalyzer::LoudnessAnalyzer()
     publishIntegrationIndexStatistics();
 }
 
-LoudnessAnalyzer::ProcessResult LoudnessAnalyzer::process(
-    const CapturedStereoChunkView& chunk) noexcept
+LoudnessAnalyzer::ProcessResult LoudnessAnalyzer::process(const CapturedStereoChunkView& chunk,
+    const std::optional<std::uint64_t> integrationResetCapturedFrameEnd) noexcept
 {
     telemetryInputChunks_.fetch_add(1, std::memory_order_relaxed);
 
@@ -61,39 +61,60 @@ LoudnessAnalyzer::ProcessResult LoudnessAnalyzer::process(
     result.accepted = true;
     telemetryInputFrames_.fetch_add(chunk.frameCount, std::memory_order_relaxed);
 
-    for (std::size_t frame = 0; frame < chunk.frameCount; ++frame) {
-        const auto leftInput
-            = std::isfinite(chunk.left[frame]) ? static_cast<double>(chunk.left[frame]) : 0.0;
-        const auto left = filterSample(0, leftInput);
+    auto integrationResetOffset = chunk.frameCount;
+    if (integrationResetCapturedFrameEnd.has_value()
+        && *integrationResetCapturedFrameEnd > chunkFrameStart
+        && *integrationResetCapturedFrameEnd < chunk.capturedFrameEnd) {
+        integrationResetOffset
+            = static_cast<std::size_t>(*integrationResetCapturedFrameEnd - chunkFrameStart);
+    }
 
-        auto energy = left * left;
-        if (channelCount_ == 2) {
-            const auto rightInput
-                = std::isfinite(chunk.right[frame]) ? static_cast<double>(chunk.right[frame]) : 0.0;
-            const auto right = filterSample(1, rightInput);
-            energy += right * right;
+    const auto processFrames = [&](const std::size_t firstFrame,
+                                   const std::size_t frameEnd) noexcept {
+        for (auto frame = firstFrame; frame < frameEnd; ++frame) {
+            const auto leftInput
+                = std::isfinite(chunk.left[frame]) ? static_cast<double>(chunk.left[frame]) : 0.0;
+            const auto left = filterSample(0, leftInput);
+
+            auto energy = left * left;
+            if (channelCount_ == 2) {
+                const auto rightInput = std::isfinite(chunk.right[frame])
+                    ? static_cast<double>(chunk.right[frame])
+                    : 0.0;
+                const auto right = filterSample(1, rightInput);
+                energy += right * right;
+            }
+
+            if (!std::isfinite(energy) || energy < 0.0)
+                energy = 0.0;
+
+            appendEnergy(partialMeasurementHop_, energy);
+            appendEnergy(partialIntegrationHop_, energy);
+
+            const auto capturedFrameEnd = chunkFrameStart + frame + 1;
+            if (--measurementFramesUntilCompletion_ == 0) {
+                appendMeasurementHop(partialMeasurementHop_, capturedFrameEnd);
+                partialMeasurementHop_ = { };
+                measurementFramesUntilCompletion_
+                    = advancePeriodScheduler(measurementPeriodScheduler_);
+                ++result.measurementCompletions;
+            }
+
+            if (--integrationFramesUntilCompletion_ == 0) {
+                if (appendIntegrationHop(partialIntegrationHop_, capturedFrameEnd))
+                    ++result.integrationBlockCompletions;
+                partialIntegrationHop_ = { };
+                integrationFramesUntilCompletion_
+                    = advancePeriodScheduler(integrationPeriodScheduler_);
+            }
         }
+    };
 
-        if (!std::isfinite(energy) || energy < 0.0)
-            energy = 0.0;
-
-        appendEnergy(partialMeasurementHop_, energy);
-        appendEnergy(partialIntegrationHop_, energy);
-
-        const auto capturedFrameEnd = chunkFrameStart + frame + 1;
-        if (--measurementFramesUntilCompletion_ == 0) {
-            appendMeasurementHop(partialMeasurementHop_, capturedFrameEnd);
-            partialMeasurementHop_ = { };
-            measurementFramesUntilCompletion_ = advancePeriodScheduler(measurementPeriodScheduler_);
-            ++result.measurementCompletions;
-        }
-
-        if (--integrationFramesUntilCompletion_ == 0) {
-            if (appendIntegrationHop(partialIntegrationHop_, capturedFrameEnd))
-                ++result.integrationBlockCompletions;
-            partialIntegrationHop_ = { };
-            integrationFramesUntilCompletion_ = advancePeriodScheduler(integrationPeriodScheduler_);
-        }
+    processFrames(0, integrationResetOffset);
+    if (integrationResetOffset < chunk.frameCount) {
+        resetIntegration();
+        result.integrationResetApplied = true;
+        processFrames(integrationResetOffset, chunk.frameCount);
     }
 
     previousGeneration_ = chunk.generation;

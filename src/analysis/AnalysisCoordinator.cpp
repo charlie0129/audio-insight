@@ -10,12 +10,14 @@
 #include <array>
 #include <atomic>
 #include <bit>
+#include <cassert>
 #include <chrono>
 #include <cmath>
 #include <cstddef>
 #include <cstdint>
 #include <cstring>
 #include <limits>
+#include <optional>
 #include <utility>
 
 namespace audio_insight {
@@ -28,6 +30,7 @@ constexpr auto requestDeadlineToleranceNanoseconds
 constexpr auto staleInputTimeout = std::chrono::milliseconds { 250 };
 constexpr auto staleInputTimeoutNanoseconds
     = std::chrono::duration_cast<std::chrono::nanoseconds>(staleInputTimeout).count();
+constexpr auto uncoalescedCaptureFrameLimit = std::size_t { 2048 };
 
 [[nodiscard]] bool sampleRatesDiffer(const double left, const double right) noexcept
 {
@@ -227,6 +230,13 @@ struct AnalysisCoordinator::State final : SharedAnalysisScheduler::JobClient,
                                           SpectrumTransformSink {
     enum class CaptureBoundaryPhase { steady, publishing, awaitingDelivery, recovering };
 
+    struct LoudnessResetRequestSnapshot final {
+        std::uint64_t epoch = 0;
+        std::uint64_t capturedFrameEnd = 0;
+    };
+
+    static constexpr auto loudnessResetSnapshotAttempts = std::size_t { 3 };
+
     void captureAudioBlock(const float* const left, const float* const right,
         const std::size_t frameCount, const double sampleRate,
         const std::uint32_t channelCount) noexcept
@@ -241,19 +251,51 @@ struct AnalysisCoordinator::State final : SharedAnalysisScheduler::JobClient,
             std::bit_cast<std::uint64_t>(sampleRate), std::memory_order_relaxed);
 
         std::size_t offset = 0;
+        std::size_t meterSegmentOffset = 0;
+        bool meterSegmentFollowsDiscontinuity = false;
+        std::uint64_t meterSegmentDiscontinuityRevision = 0;
+        std::uint64_t latestCaptureDiscontinuityRevision = 0;
+        const auto publishMeterSegment = [&](const std::size_t segmentStart,
+                                             const std::size_t segmentEnd,
+                                             const bool followsDiscontinuity,
+                                             const std::uint64_t discontinuityRevision) noexcept {
+            if (segmentEnd <= segmentStart)
+                return;
+
+            static_cast<void>(meters.publishBlock(
+                left != nullptr ? left + static_cast<std::ptrdiff_t>(segmentStart) : nullptr,
+                right != nullptr ? right + static_cast<std::ptrdiff_t>(segmentStart) : nullptr,
+                segmentEnd - segmentStart, sampleRate, captureGeneration, channelCount,
+                followsDiscontinuity, discontinuityRevision, lifecycleGeneration));
+        };
+
         while (offset < frameCount) {
             const auto chunkFrames
-                = std::min(StereoSampleCapture::framesPerSlot, frameCount - offset);
+                = std::min(StereoSampleCapture::maximumFramesPerPublishCall, frameCount - offset);
             const auto* const chunkLeft = left != nullptr ? left + offset : nullptr;
             const auto* const chunkRight = right != nullptr ? right + offset : nullptr;
             const auto samplePublication = samples.publishBlock(chunkLeft, chunkRight, chunkFrames,
                 sampleRate, captureGeneration, channelCount, lifecycleGeneration);
-            const auto followsCaptureDiscontinuity = samplePublication.beganCaptureDiscontinuity;
-            static_cast<void>(meters.publishBlock(chunkLeft, chunkRight, chunkFrames, sampleRate,
-                captureGeneration, channelCount, followsCaptureDiscontinuity,
-                samplePublication.captureDiscontinuityRevision, lifecycleGeneration));
+            latestCaptureDiscontinuityRevision = samplePublication.captureDiscontinuityRevision;
+            if (samplePublication.beganCaptureDiscontinuity) {
+                const auto discontinuityOffset
+                    = offset + samplePublication.firstDiscontinuityFrameOffset;
+                assert(discontinuityOffset >= offset && discontinuityOffset < offset + chunkFrames);
+                publishMeterSegment(meterSegmentOffset, discontinuityOffset,
+                    meterSegmentFollowsDiscontinuity,
+                    meterSegmentFollowsDiscontinuity
+                        ? meterSegmentDiscontinuityRevision
+                        : samplePublication.precedingCaptureDiscontinuityRevision);
+                meterSegmentOffset = discontinuityOffset;
+                meterSegmentFollowsDiscontinuity = true;
+                meterSegmentDiscontinuityRevision = samplePublication.captureDiscontinuityRevision;
+            }
             offset += chunkFrames;
         }
+
+        publishMeterSegment(meterSegmentOffset, frameCount, meterSegmentFollowsDiscontinuity,
+            meterSegmentFollowsDiscontinuity ? meterSegmentDiscontinuityRevision
+                                             : latestCaptureDiscontinuityRevision);
 
         captureRevision.fetch_add(1, std::memory_order_release);
     }
@@ -279,7 +321,9 @@ struct AnalysisCoordinator::State final : SharedAnalysisScheduler::JobClient,
             loudness.resetForFormatChange();
         else
             loudness.resetForLifecycle();
-        appliedLoudnessResetEpoch = loudnessResetRequestEpoch.load(std::memory_order_acquire);
+        LoudnessResetRequestSnapshot resetRequest;
+        appliedLoudnessResetEpoch
+            = tryCopyLoudnessResetRequest(resetRequest) ? resetRequest.epoch : 0;
         mirroredLoudnessStateSequence = 0;
         mirroredLoudnessResetEpoch = 0;
         static_cast<void>(refreshLoudnessFrameState(true));
@@ -374,6 +418,12 @@ struct AnalysisCoordinator::State final : SharedAnalysisScheduler::JobClient,
         workingFrame.generation = currentCaptureGeneration.load(std::memory_order_acquire);
         workingFrame.spectrumSequence = nextSpectrumSequence++;
         spectrumCapturedFrameEnd.store(0, std::memory_order_relaxed);
+        configuredSpectrumAttackMillisecondsBits.store(
+            std::bit_cast<std::uint64_t>(configuration.attackMilliseconds),
+            std::memory_order_relaxed);
+        configuredSpectrumReleaseMillisecondsBits.store(
+            std::bit_cast<std::uint64_t>(configuration.releaseMilliseconds),
+            std::memory_order_relaxed);
         spectrumTemporalConfigurationChanges.fetch_add(1, std::memory_order_relaxed);
         static_cast<void>(refreshLoudnessFrameState());
         if (!hasPendingCaptureBoundary())
@@ -697,11 +747,19 @@ struct AnalysisCoordinator::State final : SharedAnalysisScheduler::JobClient,
 
     void requestLoudnessReset() noexcept
     {
+        // Single-writer publication is serialized by AnalysisCoordinator's
+        // lifecycle mutex. The odd revision keeps bounded readers from pairing
+        // an older epoch with this request's future frame boundary.
+        static_cast<void>(loudnessResetPublicationRevision.fetch_add(1, std::memory_order_seq_cst));
         loudnessResetCapturedFrameEnd.store(
-            samples.telemetry().capturedFrames, std::memory_order_relaxed);
-        auto requested = loudnessResetRequestEpoch.fetch_add(1, std::memory_order_release) + 1;
+            samples.telemetry().capturedFrames, std::memory_order_seq_cst);
+#if defined(JUCE_UNIT_TESTS) && JUCE_UNIT_TESTS
+        invokeWorkerTestHook(AnalysisCoordinator::WorkerTestOperation::beforeLoudnessResetCommit);
+#endif
+        auto requested = loudnessResetRequestEpoch.fetch_add(1, std::memory_order_seq_cst) + 1;
         if (requested == 0)
-            static_cast<void>(loudnessResetRequestEpoch.fetch_add(1, std::memory_order_release));
+            static_cast<void>(loudnessResetRequestEpoch.fetch_add(1, std::memory_order_seq_cst));
+        static_cast<void>(loudnessResetPublicationRevision.fetch_add(1, std::memory_order_seq_cst));
     }
 
     void applyPeakRmsReading(const StereoMeterReading& reading) noexcept
@@ -749,34 +807,55 @@ struct AnalysisCoordinator::State final : SharedAnalysisScheduler::JobClient,
         stereoMono.store(workingFrame.stereoMono, std::memory_order_relaxed);
     }
 
-    [[nodiscard]] bool loudnessResetIsPending() const noexcept
+    [[nodiscard]] bool tryCopyLoudnessResetRequest(
+        LoudnessResetRequestSnapshot& destination) const noexcept
     {
-        return loudnessResetRequestEpoch.load(std::memory_order_acquire)
-            != appliedLoudnessResetEpoch;
+        for (auto attempt = std::size_t { 0 }; attempt < loudnessResetSnapshotAttempts; ++attempt) {
+            const auto revisionBefore
+                = loudnessResetPublicationRevision.load(std::memory_order_seq_cst);
+            if ((revisionBefore & 1U) != 0)
+                continue;
+
+            const LoudnessResetRequestSnapshot candidate {
+                loudnessResetRequestEpoch.load(std::memory_order_seq_cst),
+                loudnessResetCapturedFrameEnd.load(std::memory_order_seq_cst),
+            };
+            const auto revisionAfter
+                = loudnessResetPublicationRevision.load(std::memory_order_seq_cst);
+            if (revisionBefore == revisionAfter) {
+                destination = candidate;
+                return true;
+            }
+        }
+
+        return false;
     }
 
     [[nodiscard]] bool applyLoudnessResetAtFrameBoundary(
+        const LoudnessResetRequestSnapshot& request,
         const std::uint64_t observedCapturedFrameEnd) noexcept
     {
-        const auto requested = loudnessResetRequestEpoch.load(std::memory_order_acquire);
-        if (requested == appliedLoudnessResetEpoch)
+        if (request.epoch == appliedLoudnessResetEpoch)
             return false;
 
-        const auto boundary = loudnessResetCapturedFrameEnd.load(std::memory_order_relaxed);
-        if (observedCapturedFrameEnd < boundary)
+        if (observedCapturedFrameEnd < request.capturedFrameEnd)
             return false;
 
         loudness.resetIntegration();
-        appliedLoudnessResetEpoch = requested;
+        appliedLoudnessResetEpoch = request.epoch;
         return true;
     }
 
     [[nodiscard]] bool refreshLoudnessFrameState(const bool force = false) noexcept
     {
         const auto& measurement = loudness.current();
-        const auto resetEpoch = loudnessResetRequestEpoch.load(std::memory_order_acquire);
-        if (!force && measurement.stateSequence == mirroredLoudnessStateSequence
-            && resetEpoch == mirroredLoudnessResetEpoch) {
+        LoudnessResetRequestSnapshot resetRequest;
+        const auto resetRequestIsCoherent = tryCopyLoudnessResetRequest(resetRequest);
+        const auto resetIsPending
+            = !resetRequestIsCoherent || resetRequest.epoch != appliedLoudnessResetEpoch;
+        if (!force && resetRequestIsCoherent
+            && measurement.stateSequence == mirroredLoudnessStateSequence
+            && resetRequest.epoch == mirroredLoudnessResetEpoch) {
             return false;
         }
 
@@ -787,20 +866,20 @@ struct AnalysisCoordinator::State final : SharedAnalysisScheduler::JobClient,
         workingFrame.loudnessIntegratedCapturedFrameEnd = measurement.integratedCapturedFrameEnd;
         workingFrame.loudnessMomentaryValid = measurement.momentaryValid;
         workingFrame.loudnessShortTermValid = measurement.shortTermValid;
-        workingFrame.loudnessIntegratedValid
-            = measurement.integratedValid && !loudnessResetIsPending();
+        workingFrame.loudnessIntegratedValid = measurement.integratedValid && !resetIsPending;
         workingFrame.loudnessSequence = nextLoudnessSequence++;
         workingFrame.loudnessAppliedResetEpoch = appliedLoudnessResetEpoch;
 
         {
             const std::lock_guard telemetryLock(loudnessMeasurementMutex);
             loudnessMeasurementTelemetry = measurement;
-            if (loudnessResetIsPending())
+            if (resetIsPending)
                 loudnessMeasurementTelemetry.integratedValid = false;
         }
 
         mirroredLoudnessStateSequence = measurement.stateSequence;
-        mirroredLoudnessResetEpoch = resetEpoch;
+        if (resetRequestIsCoherent)
+            mirroredLoudnessResetEpoch = resetRequest.epoch;
         return true;
     }
 
@@ -845,6 +924,7 @@ struct AnalysisCoordinator::State final : SharedAnalysisScheduler::JobClient,
 
     void clearCaptureBoundaryState() noexcept
     {
+        retainedLoudnessResetRawHandle.release();
         retainedBoundaryRawHandle.release();
         retainedBoundaryMeterReading = { };
         hasRetainedBoundaryMeterReading = false;
@@ -1033,7 +1113,8 @@ struct AnalysisCoordinator::State final : SharedAnalysisScheduler::JobClient,
     [[nodiscard]] bool prepareDirtyCaptureBoundaryRecoveryFrame() noexcept
     {
         if (captureBoundaryPhase != CaptureBoundaryPhase::recovering || !recoveryAnalysisStateDirty
-            || retainedBoundaryRawHandle || hasRetainedBoundaryMeterReading) {
+            || retainedLoudnessResetRawHandle || retainedBoundaryRawHandle
+            || hasRetainedBoundaryMeterReading) {
             return false;
         }
 
@@ -1084,9 +1165,11 @@ struct AnalysisCoordinator::State final : SharedAnalysisScheduler::JobClient,
 
     void suppressUnpublishedLoudnessReset(VisualizationFrame& frame) const noexcept
     {
-        const auto requested = loudnessResetRequestEpoch.load(std::memory_order_acquire);
-        if (requested != frame.loudnessAppliedResetEpoch)
+        LoudnessResetRequestSnapshot resetRequest;
+        if (!tryCopyLoudnessResetRequest(resetRequest)
+            || resetRequest.epoch != frame.loudnessAppliedResetEpoch) {
             frame.loudnessIntegratedValid = false;
+        }
     }
 
     void execute(const SharedAnalysisScheduler::JobContext& context) override
@@ -1198,11 +1281,16 @@ struct AnalysisCoordinator::State final : SharedAnalysisScheduler::JobClient,
         bool inputFollowsDiscontinuity = false;
         std::uint64_t discardedFrames = 0;
         const auto activeFftSize = spectrum.configuredFftSize();
-        auto retentionCapacity = std::max(activeFftSize, StereoSampleCapture::framesPerSlot);
-        auto retainedChunkCount = std::size_t { 0 };
+        auto retentionCapacity = std::max(activeFftSize, uncoalescedCaptureFrameLimit);
 
-        static_cast<void>(
-            applyLoudnessResetAtFrameBoundary(loudness.statistics().capturedFrameEnd));
+        LoudnessResetRequestSnapshot initialLoudnessResetRequest;
+        if (!tryCopyLoudnessResetRequest(initialLoudnessResetRequest)) {
+            static_cast<void>(refreshLoudnessFrameState());
+            finish(false);
+            return;
+        }
+        static_cast<void>(applyLoudnessResetAtFrameBoundary(
+            initialLoudnessResetRequest, loudness.statistics().capturedFrameEnd));
         loudnessStateChanged = refreshLoudnessFrameState();
 
         for (std::size_t consumed = 0; consumed < StereoSampleCapture::slotCount; ++consumed) {
@@ -1222,7 +1310,9 @@ struct AnalysisCoordinator::State final : SharedAnalysisScheduler::JobClient,
                 return;
             }
 
-            if (captureBoundaryPhase == CaptureBoundaryPhase::recovering
+            if (retainedLoudnessResetRawHandle) {
+                handle = std::move(retainedLoudnessResetRawHandle);
+            } else if (captureBoundaryPhase == CaptureBoundaryPhase::recovering
                 && retainedBoundaryRawHandle) {
                 handle = std::move(retainedBoundaryRawHandle);
             } else {
@@ -1232,6 +1322,13 @@ struct AnalysisCoordinator::State final : SharedAnalysisScheduler::JobClient,
 #endif
                 if (!samples.tryAcquireOldest(handle))
                     break;
+            }
+
+            LoudnessResetRequestSnapshot chunkLoudnessResetRequest;
+            if (!tryCopyLoudnessResetRequest(chunkLoudnessResetRequest)) {
+                retainedLoudnessResetRawHandle = std::move(handle);
+                finish(false);
+                return;
             }
 
             auto chunk = handle.view();
@@ -1283,10 +1380,25 @@ struct AnalysisCoordinator::State final : SharedAnalysisScheduler::JobClient,
             const auto chunkFrameStart
                 = hasValidRange ? chunk.capturedFrameEnd - chunk.frameCount : 0;
             if (hasValidRange)
-                static_cast<void>(applyLoudnessResetAtFrameBoundary(chunkFrameStart));
-            static_cast<void>(loudness.process(chunk));
+                static_cast<void>(
+                    applyLoudnessResetAtFrameBoundary(chunkLoudnessResetRequest, chunkFrameStart));
+
+            auto interiorLoudnessResetEpoch = std::uint64_t { 0 };
+            auto interiorLoudnessResetBoundary = std::optional<std::uint64_t> { };
+            if (hasValidRange && chunkLoudnessResetRequest.epoch != appliedLoudnessResetEpoch) {
+                const auto boundary = chunkLoudnessResetRequest.capturedFrameEnd;
+                if (boundary > chunkFrameStart && boundary < chunk.capturedFrameEnd) {
+                    interiorLoudnessResetEpoch = chunkLoudnessResetRequest.epoch;
+                    interiorLoudnessResetBoundary = boundary;
+                }
+            }
+
+            const auto loudnessResult = loudness.process(chunk, interiorLoudnessResetBoundary);
+            if (loudnessResult.integrationResetApplied)
+                appliedLoudnessResetEpoch = interiorLoudnessResetEpoch;
             if (hasValidRange)
-                static_cast<void>(applyLoudnessResetAtFrameBoundary(chunk.capturedFrameEnd));
+                static_cast<void>(applyLoudnessResetAtFrameBoundary(
+                    chunkLoudnessResetRequest, chunk.capturedFrameEnd));
             loudnessStateChanged = refreshLoudnessFrameState() || loudnessStateChanged;
 
             static_cast<void>(stereoField.process(chunk));
@@ -1297,12 +1409,11 @@ struct AnalysisCoordinator::State final : SharedAnalysisScheduler::JobClient,
                 processedCaptureBoundaryInput = true;
             }
 
-            ++retainedChunkCount;
-            if (retainedChunkCount == 2) {
-                // One ordinary capture slot must remain intact even for a 1024-
-                // point FFT so hop cadence is not mistaken for backlog. Once a
-                // second slot is pending, latest-wins analysis keeps only the
-                // newest complete FFT window.
+            if (retentionCapacity != activeFftSize
+                && retainedFrames + chunk.frameCount > uncoalescedCaptureFrameLimit) {
+                // Keep one ordinary 2,048-frame input window intact even though
+                // it now arrives in packed 256-frame storage slots. Beyond that
+                // window, latest-wins analysis keeps only the newest complete FFT.
                 retentionCapacity = activeFftSize;
                 if (retainedFrames > retentionCapacity) {
                     const auto overflow = retainedFrames - retentionCapacity;
@@ -1698,6 +1809,10 @@ struct AnalysisCoordinator::State final : SharedAnalysisScheduler::JobClient,
         result.fftConfigurationChanges = fftConfigurationChanges.load(std::memory_order_relaxed);
         result.spectrumTemporalConfigurationChanges
             = spectrumTemporalConfigurationChanges.load(std::memory_order_relaxed);
+        result.configuredSpectrumAttackMilliseconds = std::bit_cast<double>(
+            configuredSpectrumAttackMillisecondsBits.load(std::memory_order_relaxed));
+        result.configuredSpectrumReleaseMilliseconds = std::bit_cast<double>(
+            configuredSpectrumReleaseMillisecondsBits.load(std::memory_order_relaxed));
         const auto spectrogramQueueTelemetry = spectrogramColumns.telemetry();
         result.spectrogramTransformsOffered
             = spectrogramTransformsOffered.load(std::memory_order_relaxed);
@@ -1742,6 +1857,7 @@ struct AnalysisCoordinator::State final : SharedAnalysisScheduler::JobClient,
     std::array<float, maximumFftSize> spectrumRightScratch { };
     VisualizationFrame workingFrame;
     SpectrogramColumn spectrogramColumnScratch;
+    StereoSampleCapture::ReadHandle retainedLoudnessResetRawHandle;
     StereoSampleCapture::ReadHandle retainedBoundaryRawHandle;
     StereoMeterReading retainedBoundaryMeterReading;
     std::uint64_t newestCapturedFrameEnd = 0;
@@ -1788,6 +1904,7 @@ struct AnalysisCoordinator::State final : SharedAnalysisScheduler::JobClient,
     std::atomic<bool> staleClearPending { false };
     std::atomic<std::uint64_t> peakRmsResetPendingEpoch { 0 };
     std::atomic<bool> spectrumClearPending { false };
+    std::atomic<std::uint64_t> loudnessResetPublicationRevision { 0 };
     std::atomic<std::uint64_t> loudnessResetRequestEpoch { 0 };
     std::atomic<std::uint64_t> loudnessResetCapturedFrameEnd { 0 };
     std::atomic<std::uint64_t> staleClearRevision { 0 };
@@ -1815,6 +1932,12 @@ struct AnalysisCoordinator::State final : SharedAnalysisScheduler::JobClient,
     std::atomic<std::uint64_t> spectrumUserClears { 0 };
     std::atomic<std::uint64_t> fftConfigurationChanges { 0 };
     std::atomic<std::uint64_t> spectrumTemporalConfigurationChanges { 0 };
+    std::atomic<std::uint64_t> configuredSpectrumAttackMillisecondsBits {
+        std::bit_cast<std::uint64_t>(SpectrumTemporalConfiguration::defaultAttackMilliseconds)
+    };
+    std::atomic<std::uint64_t> configuredSpectrumReleaseMillisecondsBits {
+        std::bit_cast<std::uint64_t>(SpectrumTemporalConfiguration::defaultReleaseMilliseconds)
+    };
     std::atomic<std::uint64_t> spectrogramTransformsOffered { 0 };
     std::atomic<std::uint64_t> spectrogramColumnsMapped { 0 };
     std::atomic<std::uint64_t> spectrogramMappingFailures { 0 };
@@ -1824,7 +1947,7 @@ struct AnalysisCoordinator::State final : SharedAnalysisScheduler::JobClient,
     std::atomic<std::uint64_t> currentFftGeneration { 1 };
     std::atomic<std::uint32_t> configuredFftSize { static_cast<std::uint32_t>(fftSize) };
     std::atomic<std::uint32_t> configuredFftWindow { static_cast<std::uint32_t>(
-        FftWindow::periodicHann) };
+        FftWindow::fiveTermFlatTop) };
     std::atomic<std::uint32_t> requestedFftSliceRateHz { 60 };
     std::atomic<std::uint32_t> spectrogramRowCount { 0 };
     std::atomic<bool> stereoFieldValid { false };

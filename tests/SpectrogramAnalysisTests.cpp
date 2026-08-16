@@ -261,6 +261,7 @@ public:
             power.fill(1.0e-18F);
 
             SpectrogramColumnMapper mapper;
+            expectWithinAbsoluteError(mapper.frequencySpacing(), 0.8, 1.0e-12);
             SpectrogramColumn column;
             column.captureBoundary = true;
             expect(mapper.map(
@@ -395,6 +396,7 @@ public:
             power[interpolationUpperBin] = 1.0F;
 
             SpectrogramColumnMapper mapper;
+            expect(mapper.setFrequencySpacing(1.0, 2));
             SpectrogramColumn column;
             expect(mapper.map(
                 makeTransformView(power.data(), fftSizeToUse, sampleRate), 1, false, column));
@@ -604,7 +606,7 @@ private:
         coordinator.setVisualizationActive(true);
         expectAndDrainActivationMarker(coordinator);
 
-        std::array<float, StereoSampleCapture::framesPerSlot> signal { };
+        std::array<float, 2048> signal { };
         for (std::size_t index = 0; index < signal.size(); ++index) {
             signal[index] = std::sin(static_cast<float>(
                 2.0 * std::numbers::pi * 31.0 * static_cast<double>(index) / 1024.0));
@@ -790,7 +792,7 @@ private:
         coordinator.setVisualizationActive(true);
         expectAndDrainActivationMarker(coordinator);
 
-        std::array<float, StereoSampleCapture::framesPerSlot> block { };
+        std::array<float, 2048> block { };
         block.fill(0.25F);
         const auto beforeWarmup = coordinator.telemetry();
         coordinator.captureAudioBlock(block.data(), block.data(), block.size(), 48'000.0, 2);
@@ -805,8 +807,10 @@ private:
         const auto beforeGap = coordinator.telemetry();
         expect(beforeGap.spectrogramQueueReadyColumns == 2);
 
-        for (std::size_t index = 0; index < StereoSampleCapture::slotCount + 2; ++index)
+        for (std::size_t index = 0;
+            index < StereoSampleCapture::bufferedFrameCapacity / block.size() + 2; ++index) {
             coordinator.captureAudioBlock(block.data(), block.data(), block.size(), 48'000.0, 2);
+        }
 
         auto observedBoundary = false;
         auto observedBoundaryMarker = false;

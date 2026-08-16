@@ -20,6 +20,7 @@
 namespace audio_insight {
 namespace {
 using namespace std::chrono_literals;
+constexpr auto ordinaryCaptureWindowFrames = std::size_t { 2048 };
 
 void drainSpectrogramColumns(
     AnalysisCoordinator& coordinator, std::uint64_t& captureBoundaryGeneration)
@@ -133,6 +134,20 @@ void captureRepeated(AnalysisCoordinator& coordinator, const std::array<float, F
         coordinator.captureAudioBlock(left.data(), right.data(), left.size(), sampleRate, 2);
 }
 
+template <std::size_t FrameCount> [[nodiscard]] consteval std::size_t captureCallsToFillRawQueue()
+{
+    static_assert(StereoSampleCapture::bufferedFrameCapacity % FrameCount == 0);
+    return StereoSampleCapture::bufferedFrameCapacity / FrameCount;
+}
+
+template <std::size_t FrameCount>
+[[nodiscard]] consteval std::size_t captureCallsThroughFirstPackedOverflow()
+{
+    static_assert(StereoSampleCapture::framesPerSlot % FrameCount == 0);
+    return captureCallsToFillRawQueue<FrameCount>()
+        + StereoSampleCapture::framesPerSlot / FrameCount;
+}
+
 template <typename Predicate>
 bool waitForFrame(AnalysisCoordinator& coordinator, VisualizationFrame& frame,
     Predicate&& predicate, const std::chrono::milliseconds timeout = 2s)
@@ -195,6 +210,10 @@ bool waitForFrameWithoutRequest(AnalysisCoordinator& coordinator, VisualizationF
 
 constexpr double loudnessTestSampleRate = 48'000.0;
 constexpr std::size_t loudnessMeasurementPeriodFrames = 4'800;
+constexpr std::size_t loudnessPeriodsPerPackedBatch = 4;
+static_assert((loudnessMeasurementPeriodFrames * loudnessPeriodsPerPackedBatch)
+        % StereoSampleCapture::framesPerSlot
+    == 0);
 
 void fillLoudnessTone(
     std::span<float> signal, const double peakDecibels, std::uint64_t& toneFrameCursor)
@@ -212,14 +231,20 @@ bool feedLoudnessTonePeriods(AnalysisCoordinator& coordinator, const std::size_t
     const double peakDecibels, std::uint64_t& toneFrameCursor, VisualizationFrame& frame,
     const std::uint32_t channelCount = 2)
 {
+    if (periodCount == 0 || periodCount % loudnessPeriodsPerPackedBatch != 0)
+        return false;
+
     std::array<float, loudnessMeasurementPeriodFrames> signal { };
 
     for (std::size_t period = 0; period < periodCount; ++period) {
         fillLoudnessTone(signal, peakDecibels, toneFrameCursor);
-        const auto expectedCapturedFrameEnd
-            = coordinator.telemetry().capture.capturedFrames + signal.size();
         coordinator.captureAudioBlock(signal.data(), channelCount == 2 ? signal.data() : nullptr,
             signal.size(), loudnessTestSampleRate, channelCount);
+
+        if ((period + 1) % loudnessPeriodsPerPackedBatch != 0)
+            continue;
+
+        const auto expectedCapturedFrameEnd = coordinator.telemetry().capture.capturedFrames;
         if (!waitForFrame(coordinator, frame, [expectedCapturedFrameEnd](const auto& candidate) {
                 return candidate.loudnessMeasurementCapturedFrameEnd >= expectedCapturedFrameEnd;
             })) {
@@ -402,6 +427,8 @@ public:
             expect(telemetry.capture.attemptedChunks == 0);
             expect(telemetry.meters.attemptedBlocks == 0);
             expect(telemetry.scheduler.submitted == 0);
+            expectWithinAbsoluteError(telemetry.configuredSpectrumAttackMilliseconds, 0.0, 0.0);
+            expectWithinAbsoluteError(telemetry.configuredSpectrumReleaseMilliseconds, 250.0, 0.0);
         }
 
         beginTest("Visible analysis publishes a spectrum and honest stereo meters");
@@ -455,8 +482,9 @@ public:
             expectWithinAbsoluteError(frame.stereoCorrelation, 1.0F, 0.0001F);
 
             const auto activeTelemetry = coordinator.telemetry();
-            expect(activeTelemetry.capture.attemptedChunks == 2);
-            expect(activeTelemetry.meters.attemptedBlocks == 2);
+            expect(activeTelemetry.capture.attemptedChunks
+                == fftSize / StereoSampleCapture::framesPerSlot);
+            expect(activeTelemetry.meters.attemptedBlocks == 1);
             expect(activeTelemetry.jobsCompleted >= 1);
             expect(activeTelemetry.spectrumCapturedFrameEnd == fftSize);
             expect(activeTelemetry.meterCapturedFrameEnd == fftSize);
@@ -469,11 +497,12 @@ public:
             expect(activeTelemetry.spectrumFreshnessNanoseconds == 0);
             expect(activeTelemetry.peakRmsFreshnessNanoseconds == 0);
             expect(activeTelemetry.stereoCapturedFrameEnd == fftSize);
-            expect(activeTelemetry.stereoFieldProcessedChunks == 2);
+            expect(activeTelemetry.stereoFieldProcessedChunks
+                == fftSize / StereoSampleCapture::framesPerSlot);
             expect(activeTelemetry.stereoFieldProcessedFrames == fftSize);
             expect(activeTelemetry.stereoFieldSelectedPoints == frame.stereoFieldPointCount);
             expect(activeTelemetry.stereoCorrelationProcessedSamples == fftSize);
-            expect(activeTelemetry.stereoCorrelationPublishedEndpoints == 2);
+            expect(activeTelemetry.stereoCorrelationPublishedEndpoints == 1);
             expect(activeTelemetry.stereoCorrelationConsumedEndpoints >= 1);
             expect(activeTelemetry.stereoSequence == frame.stereoSequence);
             expect(activeTelemetry.stereoFieldPointCount == frame.stereoFieldPointCount);
@@ -522,840 +551,1015 @@ public:
                 afterClosedCapture.scheduler.submitted == beforeClosedCapture.scheduler.submitted);
         }
 
-        beginTest("Coordinator publishes standards-based M, S, and I Loudness snapshots");
-        {
-            AnalysisCoordinator coordinator;
-            coordinator.setCaptureFormat(loudnessTestSampleRate, 2);
-            coordinator.setVisualizationActive(true);
+        const auto runLoudnessTests = [this] {
+            beginTest("Coordinator publishes standards-based M, S, and I Loudness snapshots");
+            {
+                AnalysisCoordinator coordinator;
+                coordinator.setCaptureFormat(loudnessTestSampleRate, 2);
+                coordinator.setVisualizationActive(true);
 
-            auto toneFrameCursor = std::uint64_t { 0 };
-            VisualizationFrame frame;
-            expect(feedLoudnessTonePeriods(coordinator, 30, -23.0, toneFrameCursor, frame));
-            expect(frame.loudnessMomentaryValid);
-            expect(frame.loudnessShortTermValid);
-            expect(frame.loudnessIntegratedValid);
-            expectWithinAbsoluteError(frame.loudnessMomentaryLufs, -23.0, 0.1);
-            expectWithinAbsoluteError(frame.loudnessShortTermLufs, -23.0, 0.1);
-            expectWithinAbsoluteError(frame.loudnessIntegratedLufs, -23.0, 0.1);
-            expect(frame.loudnessMeasurementCapturedFrameEnd == toneFrameCursor);
-            expect(frame.loudnessIntegratedCapturedFrameEnd == toneFrameCursor);
-            expect(frame.loudnessSequence != 0);
+                auto toneFrameCursor = std::uint64_t { 0 };
+                VisualizationFrame frame;
+                expect(feedLoudnessTonePeriods(coordinator, 32, -23.0, toneFrameCursor, frame));
+                expect(frame.loudnessMomentaryValid);
+                expect(frame.loudnessShortTermValid);
+                expect(frame.loudnessIntegratedValid);
+                expectWithinAbsoluteError(frame.loudnessMomentaryLufs, -23.0, 0.1);
+                expectWithinAbsoluteError(frame.loudnessShortTermLufs, -23.0, 0.1);
+                expectWithinAbsoluteError(frame.loudnessIntegratedLufs, -23.0, 0.1);
+                expect(frame.loudnessMeasurementCapturedFrameEnd == toneFrameCursor);
+                expect(frame.loudnessIntegratedCapturedFrameEnd == toneFrameCursor);
+                expect(frame.loudnessSequence != 0);
 
-            const auto telemetry = coordinator.telemetry();
-            expect(telemetry.loudness.inputFrames == toneFrameCursor);
-            expect(telemetry.loudness.measurementCompletions == 30);
-            expect(telemetry.loudness.integrationBlockCompletions == 27);
-            expect(telemetry.loudnessMeasurement.momentaryValid);
-            expect(telemetry.loudnessMeasurement.shortTermValid);
-            expect(telemetry.loudnessMeasurement.integratedValid);
-        }
-
-        beginTest("Loudness reset publishes without new audio and preserves M/S");
-        {
-            AnalysisCoordinator coordinator;
-            coordinator.setCaptureFormat(loudnessTestSampleRate, 2);
-            coordinator.setVisualizationActive(true);
-
-            auto toneFrameCursor = std::uint64_t { 0 };
-            VisualizationFrame beforeReset;
-            expect(feedLoudnessTonePeriods(coordinator, 30, -18.0, toneFrameCursor, beforeReset));
-            expect(beforeReset.loudnessMomentaryValid && beforeReset.loudnessShortTermValid
-                && beforeReset.loudnessIntegratedValid);
-
-            coordinator.resetLoudness();
-            VisualizationFrame afterReset;
-            expect(waitForFrameWithoutRequest(
-                coordinator, afterReset,
-                [sequence = beforeReset.loudnessSequence](const auto& candidate) {
-                    return candidate.loudnessSequence > sequence
-                        && !candidate.loudnessIntegratedValid;
-                },
-                2s));
-            expect(afterReset.loudnessMomentaryValid);
-            expect(afterReset.loudnessShortTermValid);
-            expectWithinAbsoluteError(
-                afterReset.loudnessMomentaryLufs, beforeReset.loudnessMomentaryLufs, 0.0);
-            expectWithinAbsoluteError(
-                afterReset.loudnessShortTermLufs, beforeReset.loudnessShortTermLufs, 0.0);
-            expect(afterReset.loudnessMeasurementCapturedFrameEnd
-                == beforeReset.loudnessMeasurementCapturedFrameEnd);
-            expect(afterReset.loudnessIntegratedCapturedFrameEnd == 0);
-            expect(coordinator.telemetry().loudness.integrationResets == 1);
-        }
-
-        beginTest("Queued pre-reset samples cannot enter a new Integrated interval");
-        {
-            AnalysisCoordinator coordinator;
-            coordinator.setCaptureFormat(loudnessTestSampleRate, 2);
-            coordinator.setVisualizationActive(true);
-
-            auto toneFrameCursor = std::uint64_t { 0 };
-            VisualizationFrame frame;
-            expect(feedLoudnessTonePeriods(coordinator, 30, -10.0, toneFrameCursor, frame));
-            expect(frame.loudnessIntegratedValid);
-
-            std::array<float, loudnessMeasurementPeriodFrames * 2> queuedBeforeReset { };
-            fillLoudnessTone(queuedBeforeReset, -10.0, toneFrameCursor);
-            coordinator.captureAudioBlock(queuedBeforeReset.data(), queuedBeforeReset.data(),
-                queuedBeforeReset.size(), loudnessTestSampleRate, 2);
-            const auto resetBoundary = coordinator.telemetry().capture.capturedFrames;
-            coordinator.resetLoudness();
-
-            VisualizationFrame resetFrame;
-            expect(waitForFrameWithoutRequest(
-                coordinator, resetFrame,
-                [resetBoundary](const auto& candidate) {
-                    return !candidate.loudnessIntegratedValid
-                        && candidate.loudnessMeasurementCapturedFrameEnd >= resetBoundary;
-                },
-                2s));
-
-            std::array<float, loudnessMeasurementPeriodFrames * 4> afterReset { };
-            fillLoudnessTone(afterReset, -30.0, toneFrameCursor);
-            const auto expectedIntegratedEndpoint
-                = coordinator.telemetry().capture.capturedFrames + afterReset.size();
-            coordinator.captureAudioBlock(
-                afterReset.data(), afterReset.data(), afterReset.size(), loudnessTestSampleRate, 2);
-
-            VisualizationFrame integrated;
-            expect(waitForFrame(
-                coordinator, integrated, [expectedIntegratedEndpoint](const auto& candidate) {
-                    return candidate.loudnessIntegratedValid
-                        && candidate.loudnessIntegratedCapturedFrameEnd
-                        >= expectedIntegratedEndpoint;
-                }));
-            expectWithinAbsoluteError(integrated.loudnessIntegratedLufs, -30.0, 0.15);
-            expect(coordinator.telemetry().loudnessMeasurement.integrationBlockCount == 1);
-        }
-
-        beginTest("FFT and presentation mapping changes preserve Loudness state");
-        {
-            AnalysisCoordinator coordinator;
-            coordinator.setCaptureFormat(loudnessTestSampleRate, 2);
-            coordinator.setVisualizationActive(true);
-
-            auto toneFrameCursor = std::uint64_t { 0 };
-            VisualizationFrame beforeChanges;
-            expect(feedLoudnessTonePeriods(coordinator, 30, -20.0, toneFrameCursor, beforeChanges));
-            const auto loudnessBefore = coordinator.telemetry().loudnessMeasurement;
-
-            coordinator.setSpectrumAnalysisConfiguration(
-                { 2048, FftWindow::fourTermBlackmanHarris, 120 });
-            coordinator.setSpectrumTemporalConfiguration(
-                { true, 125.0, SpectrumPeakHoldMode::finite, 1.0 });
-            coordinator.setSpectrogramFrequencySpacing(0.35);
-
-            VisualizationFrame afterChanges;
-            expect(waitForFrame(coordinator, afterChanges,
-                [generation = beforeChanges.generation](const auto& candidate) {
-                    return candidate.generation == generation && candidate.loudnessMomentaryValid
-                        && candidate.loudnessShortTermValid && candidate.loudnessIntegratedValid;
-                }));
-            const auto loudnessAfter = coordinator.telemetry().loudnessMeasurement;
-            expect(loudnessAfter.stateSequence == loudnessBefore.stateSequence);
-            expect(loudnessAfter.integrationBlockCount == loudnessBefore.integrationBlockCount);
-            expectWithinAbsoluteError(
-                afterChanges.loudnessMomentaryLufs, beforeChanges.loudnessMomentaryLufs, 0.0);
-            expectWithinAbsoluteError(
-                afterChanges.loudnessShortTermLufs, beforeChanges.loudnessShortTermLufs, 0.0);
-            expectWithinAbsoluteError(
-                afterChanges.loudnessIntegratedLufs, beforeChanges.loudnessIntegratedLufs, 0.0);
-        }
-
-        beginTest("A reset racing FFT reconfiguration never republishes valid old I");
-        {
-            AnalysisCoordinator coordinator;
-            coordinator.setCaptureFormat(loudnessTestSampleRate, 2);
-            coordinator.setVisualizationActive(true);
-
-            auto toneFrameCursor = std::uint64_t { 0 };
-            VisualizationFrame ready;
-            expect(feedLoudnessTonePeriods(coordinator, 4, -18.0, toneFrameCursor, ready));
-            expect(ready.loudnessIntegratedValid);
-            while (coordinator.copyLatestVisualizationFrame(ready)) { }
-
-            coordinator.resetLoudness();
-            coordinator.setSpectrumAnalysisConfiguration({ 2048, FftWindow::periodicHann, 60 });
-
-            VisualizationFrame invalidated;
-            expect(waitForFrameWithoutRequest(
-                coordinator, invalidated,
-                [](const auto& candidate) { return !candidate.loudnessIntegratedValid; }, 2s));
-        }
-
-#if defined(JUCE_UNIT_TESTS) && JUCE_UNIT_TESTS
-        beginTest("A worker publication racing Loudness reset cannot expose valid old I");
-        {
-            AnalysisCoordinator coordinator;
-            coordinator.setCaptureFormat(loudnessTestSampleRate, 2);
-            coordinator.setVisualizationActive(true);
-
-            auto toneFrameCursor = std::uint64_t { 0 };
-            VisualizationFrame ready;
-            expect(feedLoudnessTonePeriods(coordinator, 4, -18.0, toneFrameCursor, ready));
-            expect(ready.loudnessIntegratedValid);
-            while (coordinator.copyLatestVisualizationFrame(ready)) { }
-
-            WorkerPublicationBarrier barrier;
-            coordinator.setWorkerTestHook(&barrier, &WorkerPublicationBarrier::invoke);
-
-            std::array<float, loudnessMeasurementPeriodFrames> nextPeriod { };
-            fillLoudnessTone(nextPeriod, -18.0, toneFrameCursor);
-            coordinator.captureAudioBlock(
-                nextPeriod.data(), nextPeriod.data(), nextPeriod.size(), loudnessTestSampleRate, 2);
-            auto workerReachedPublication = false;
-            const auto publicationDeadline = std::chrono::steady_clock::now() + 2s;
-            while (!workerReachedPublication
-                && std::chrono::steady_clock::now() < publicationDeadline) {
-                coordinator.requestAnalysis();
-                workerReachedPublication = barrier.waitUntilBeforeEntered(2ms);
+                const auto telemetry = coordinator.telemetry();
+                expect(telemetry.loudness.inputFrames == toneFrameCursor);
+                expect(telemetry.loudness.measurementCompletions == 32);
+                expect(telemetry.loudness.integrationBlockCompletions == 29);
+                expect(telemetry.loudnessMeasurement.momentaryValid);
+                expect(telemetry.loudnessMeasurement.shortTermValid);
+                expect(telemetry.loudnessMeasurement.integratedValid);
             }
-            expect(workerReachedPublication,
-                "The worker did not pause before publishing its pre-reset frame");
 
-            coordinator.resetLoudness();
-            barrier.releaseBefore();
-            expect(barrier.waitUntilAfterEntered(),
-                "The worker did not publish the frame that raced the reset");
+            beginTest("Loudness reset publishes without new audio and preserves M/S");
+            {
+                AnalysisCoordinator coordinator;
+                coordinator.setCaptureFormat(loudnessTestSampleRate, 2);
+                coordinator.setVisualizationActive(true);
 
-            VisualizationFrame racedPublication;
-            expect(coordinator.copyLatestVisualizationFrame(racedPublication));
-            expect(!racedPublication.loudnessIntegratedValid,
-                "A frame published after reset exposed the old Integrated value");
+                auto toneFrameCursor = std::uint64_t { 0 };
+                VisualizationFrame beforeReset;
+                expect(
+                    feedLoudnessTonePeriods(coordinator, 32, -18.0, toneFrameCursor, beforeReset));
+                expect(beforeReset.loudnessMomentaryValid && beforeReset.loudnessShortTermValid
+                    && beforeReset.loudnessIntegratedValid);
 
-            barrier.releaseAfter();
-            VisualizationFrame appliedReset;
-            expect(waitForFrameWithoutRequest(
-                coordinator, appliedReset,
-                [sequence = racedPublication.loudnessSequence](const auto& candidate) {
-                    return candidate.loudnessSequence > sequence
-                        && !candidate.loudnessIntegratedValid;
-                },
-                2s));
-            coordinator.setWorkerTestHook(nullptr, nullptr);
-        }
-
-        beginTest("A producer-only gap cannot consume a pending Loudness reset boundary");
-        {
-            AnalysisCoordinator coordinator;
-            coordinator.setCaptureFormat(loudnessTestSampleRate, 2);
-            coordinator.setVisualizationActive(true);
-
-            auto toneFrameCursor = std::uint64_t { 0 };
-            VisualizationFrame beforeGap;
-            expect(feedLoudnessTonePeriods(coordinator, 4, -18.0, toneFrameCursor, beforeGap));
-            expect(beforeGap.loudnessIntegratedValid);
-
-            WorkerHookBarrier barrier(
-                AnalysisCoordinator::WorkerTestOperation::beforeMeterConsumption);
-            coordinator.setWorkerTestHook(&barrier, &WorkerHookBarrier::invoke);
-
-            std::array<float, 128> trigger { };
-            trigger.fill(0.125F);
-            coordinator.captureAudioBlock(
-                trigger.data(), trigger.data(), trigger.size(), loudnessTestSampleRate, 2);
-            auto workerReachedMeter = false;
-            const auto meterDeadline = std::chrono::steady_clock::now() + 2s;
-            while (!workerReachedMeter && std::chrono::steady_clock::now() < meterDeadline) {
-                coordinator.requestAnalysis();
-                workerReachedMeter = barrier.waitUntilEntered(2ms);
+                coordinator.resetLoudness();
+                VisualizationFrame afterReset;
+                expect(waitForFrameWithoutRequest(
+                    coordinator, afterReset,
+                    [sequence = beforeReset.loudnessSequence](const auto& candidate) {
+                        return candidate.loudnessSequence > sequence
+                            && !candidate.loudnessIntegratedValid;
+                    },
+                    2s));
+                expect(afterReset.loudnessMomentaryValid);
+                expect(afterReset.loudnessShortTermValid);
+                expectWithinAbsoluteError(
+                    afterReset.loudnessMomentaryLufs, beforeReset.loudnessMomentaryLufs, 0.0);
+                expectWithinAbsoluteError(
+                    afterReset.loudnessShortTermLufs, beforeReset.loudnessShortTermLufs, 0.0);
+                expect(afterReset.loudnessMeasurementCapturedFrameEnd
+                    == beforeReset.loudnessMeasurementCapturedFrameEnd);
+                expect(afterReset.loudnessIntegratedCapturedFrameEnd == 0);
+                expect(coordinator.telemetry().loudness.integrationResets == 1);
             }
-            expect(workerReachedMeter, "The worker did not reach the meter boundary seam");
 
-            std::array<float, StereoSampleCapture::framesPerSlot> queuedBeforeReset { };
-            queuedBeforeReset.fill(0.125F);
-            for (std::size_t index = 0; index < StereoSampleCapture::slotCount * 2; ++index) {
+            beginTest("Queued pre-reset samples cannot enter a new Integrated interval");
+            {
+                AnalysisCoordinator coordinator;
+                coordinator.setCaptureFormat(loudnessTestSampleRate, 2);
+                coordinator.setVisualizationActive(true);
+
+                auto toneFrameCursor = std::uint64_t { 0 };
+                VisualizationFrame frame;
+                expect(feedLoudnessTonePeriods(coordinator, 32, -10.0, toneFrameCursor, frame));
+                expect(frame.loudnessIntegratedValid);
+
+                // End on a packed-capture boundary so every pre-reset sample is
+                // publishable before the explicit Loudness boundary is taken.
+                std::array<float, loudnessMeasurementPeriodFrames * 4> queuedBeforeReset { };
+                fillLoudnessTone(queuedBeforeReset, -10.0, toneFrameCursor);
                 coordinator.captureAudioBlock(queuedBeforeReset.data(), queuedBeforeReset.data(),
                     queuedBeforeReset.size(), loudnessTestSampleRate, 2);
+                const auto resetBoundary = coordinator.telemetry().capture.capturedFrames;
+                coordinator.resetLoudness();
+
+                VisualizationFrame resetFrame;
+                expect(waitForFrameWithoutRequest(
+                    coordinator, resetFrame,
+                    [resetBoundary](const auto& candidate) {
+                        return !candidate.loudnessIntegratedValid
+                            && candidate.loudnessMeasurementCapturedFrameEnd >= resetBoundary;
+                    },
+                    2s));
+
+                std::array<float, loudnessMeasurementPeriodFrames * 4> afterReset { };
+                fillLoudnessTone(afterReset, -30.0, toneFrameCursor);
+                const auto expectedIntegratedEndpoint
+                    = coordinator.telemetry().capture.capturedFrames + afterReset.size();
+                coordinator.captureAudioBlock(afterReset.data(), afterReset.data(),
+                    afterReset.size(), loudnessTestSampleRate, 2);
+
+                VisualizationFrame integrated;
+                expect(waitForFrame(
+                    coordinator, integrated, [expectedIntegratedEndpoint](const auto& candidate) {
+                        return candidate.loudnessIntegratedValid
+                            && candidate.loudnessIntegratedCapturedFrameEnd
+                            >= expectedIntegratedEndpoint;
+                    }));
+                expectWithinAbsoluteError(integrated.loudnessIntegratedLufs, -30.0, 0.15);
+                expect(coordinator.telemetry().loudnessMeasurement.integrationBlockCount == 1);
             }
 
-            const auto resetBoundary = coordinator.telemetry().capture.capturedFrames;
-            coordinator.resetLoudness();
-            barrier.release();
+            beginTest("Loudness RESET is sample-exact inside a packed capture chunk");
+            {
+                AnalysisCoordinator coordinator;
+                coordinator.setCaptureFormat(loudnessTestSampleRate, 2);
+                coordinator.setVisualizationActive(true);
 
-            VisualizationFrame afterGap;
-            const auto receivedAfterGap = waitForFrame(
-                coordinator, afterGap,
-                [sequence = beforeGap.loudnessSequence, resetBoundary](const auto& candidate) {
-                    return candidate.loudnessSequence > sequence
-                        && candidate.capturedFrameEnd >= resetBoundary
-                        && candidate.loudnessMomentaryValid;
-                },
-                2s);
-            const auto afterGapTelemetry = coordinator.telemetry();
-            expect(receivedAfterGap,
-                juce::String("No post-gap Loudness frame: frameEnd=")
-                    + juce::String(static_cast<juce::int64>(afterGap.capturedFrameEnd))
-                    + ", resetBoundary=" + juce::String(static_cast<juce::int64>(resetBoundary))
-                    + ", M valid=" + juce::String(afterGap.loudnessMomentaryValid ? 1 : 0)
-                    + ", ready=" + juce::String(afterGapTelemetry.capture.readySlots)
-                    + ", reclaimed="
-                    + juce::String(
-                        static_cast<juce::int64>(afterGapTelemetry.capture.reclaimedReadyChunks))
-                    + ", ignored="
-                    + juce::String(
-                        static_cast<juce::int64>(afterGapTelemetry.ignoredGenerationChunks))
-                    + ", loudnessEnd="
-                    + juce::String(
-                        static_cast<juce::int64>(afterGapTelemetry.loudness.capturedFrameEnd))
-                    + ", discontinuityResets="
-                    + juce::String(
-                        static_cast<juce::int64>(afterGapTelemetry.loudness.discontinuityResets)));
-            expect(!afterGap.loudnessIntegratedValid,
-                "Pre-reset raw survivors entered the new Integrated interval");
+                auto toneFrameCursor = std::uint64_t { 0 };
+                VisualizationFrame beforeReset;
+                expect(
+                    feedLoudnessTonePeriods(coordinator, 4, -18.0, toneFrameCursor, beforeReset));
+                expect(beforeReset.loudnessIntegratedValid);
 
-            const auto telemetry = coordinator.telemetry();
-            expect(telemetry.capture.reclaimedReadyChunks >= 4);
-            expect(telemetry.loudness.discontinuityResets >= 1);
-            expect(telemetry.loudness.integrationResets >= 1);
-            expect(telemetry.loudness.capturedFrameEnd == resetBoundary);
+                const auto telemetryBeforeReset = coordinator.telemetry();
+                constexpr auto partialFrameCount = StereoSampleCapture::framesPerSlot / 2;
+                std::array<float, partialFrameCount> beforeBoundary { };
+                fillLoudnessTone(beforeBoundary, -18.0, toneFrameCursor);
+                coordinator.captureAudioBlock(beforeBoundary.data(), beforeBoundary.data(),
+                    beforeBoundary.size(), loudnessTestSampleRate, 2);
+                const auto resetBoundary = coordinator.telemetry().capture.capturedFrames;
+                expect(coordinator.telemetry().capture.partialFrames == partialFrameCount);
 
-            coordinator.setWorkerTestHook(nullptr, nullptr);
-        }
+                coordinator.resetLoudness();
+                VisualizationFrame pendingReset;
+                expect(waitForFrameWithoutRequest(
+                    coordinator, pendingReset,
+                    [sequence = beforeReset.loudnessSequence](const auto& candidate) {
+                        return candidate.loudnessSequence > sequence
+                            && !candidate.loudnessIntegratedValid;
+                    },
+                    2s));
+                expect(coordinator.telemetry().loudness.capturedFrameEnd
+                    == beforeReset.capturedFrameEnd);
+
+                std::array<float, partialFrameCount> afterBoundary { };
+                fillLoudnessTone(afterBoundary, -18.0, toneFrameCursor);
+                coordinator.captureAudioBlock(afterBoundary.data(), afterBoundary.data(),
+                    afterBoundary.size(), loudnessTestSampleRate, 2);
+
+                std::array<float, loudnessMeasurementPeriodFrames * 4> continuedSignal { };
+                fillLoudnessTone(continuedSignal, -18.0, toneFrameCursor);
+                coordinator.captureAudioBlock(continuedSignal.data(), continuedSignal.data(),
+                    continuedSignal.size(), loudnessTestSampleRate, 2);
+
+                const auto expectedIntegratedEndpoint
+                    = resetBoundary + loudnessMeasurementPeriodFrames * 4;
+                VisualizationFrame integrated;
+                expect(waitForFrame(
+                    coordinator, integrated, [expectedIntegratedEndpoint](const auto& candidate) {
+                        return candidate.loudnessIntegratedValid
+                            && candidate.loudnessIntegratedCapturedFrameEnd
+                            == expectedIntegratedEndpoint;
+                    }));
+
+                const auto telemetry = coordinator.telemetry();
+                expect(telemetry.loudness.integrationResets
+                    == telemetryBeforeReset.loudness.integrationResets + 1);
+                expect(telemetry.loudness.inputChunks
+                    == telemetryBeforeReset.loudness.inputChunks + 76);
+                expect(telemetry.stereoFieldProcessedChunks
+                    == telemetryBeforeReset.stereoFieldProcessedChunks + 76);
+                expect(telemetry.loudnessMeasurement.integrationBlockCount == 1);
+                expect(telemetry.loudnessMeasurement.integratedCapturedFrameEnd
+                    == expectedIntegratedEndpoint);
+            }
+
+#if defined(JUCE_UNIT_TESTS) && JUCE_UNIT_TESTS
+            beginTest("Racing Loudness RESET requests publish one coherent boundary");
+            {
+                AnalysisCoordinator coordinator;
+                coordinator.setCaptureFormat(loudnessTestSampleRate, 2);
+                coordinator.setVisualizationActive(true);
+
+                auto toneFrameCursor = std::uint64_t { 0 };
+                VisualizationFrame beforeReset;
+                expect(
+                    feedLoudnessTonePeriods(coordinator, 4, -18.0, toneFrameCursor, beforeReset));
+                expect(beforeReset.loudnessIntegratedValid);
+                const auto telemetryBeforeReset = coordinator.telemetry();
+
+                WorkerHookBarrier rawAcquisitionBarrier(
+                    AnalysisCoordinator::WorkerTestOperation::beforeRawAcquisition);
+                coordinator.setWorkerTestHook(&rawAcquisitionBarrier, &WorkerHookBarrier::invoke);
+
+                constexpr auto quarterSlot = StereoSampleCapture::framesPerSlot / 4;
+                std::array<float, quarterSlot> firstPartial { };
+                fillLoudnessTone(firstPartial, -18.0, toneFrameCursor);
+                coordinator.captureAudioBlock(firstPartial.data(), firstPartial.data(),
+                    firstPartial.size(), loudnessTestSampleRate, 2);
+                coordinator.resetLoudness();
+                expect(rawAcquisitionBarrier.waitUntilEntered(),
+                    "The worker did not pause before raw acquisition");
+
+                std::array<float, quarterSlot> secondPartial { };
+                fillLoudnessTone(secondPartial, -18.0, toneFrameCursor);
+                coordinator.captureAudioBlock(secondPartial.data(), secondPartial.data(),
+                    secondPartial.size(), loudnessTestSampleRate, 2);
+                const auto secondResetBoundary = coordinator.telemetry().capture.capturedFrames;
+
+                WorkerHookBarrier resetCommitBarrier(
+                    AnalysisCoordinator::WorkerTestOperation::beforeLoudnessResetCommit);
+                coordinator.setWorkerTestHook(&resetCommitBarrier, &WorkerHookBarrier::invoke);
+                std::thread secondResetThread([&coordinator] { coordinator.resetLoudness(); });
+                const auto secondResetPaused = resetCommitBarrier.waitUntilEntered();
+                expect(secondResetPaused, "The second RESET did not pause before publication");
+
+                std::array<float, StereoSampleCapture::framesPerSlot / 2> completingPartial { };
+                fillLoudnessTone(completingPartial, -18.0, toneFrameCursor);
+                coordinator.captureAudioBlock(completingPartial.data(), completingPartial.data(),
+                    completingPartial.size(), loudnessTestSampleRate, 2);
+
+                const auto jobsCompletedBeforeRelease = coordinator.telemetry().jobsCompleted;
+                rawAcquisitionBarrier.release();
+                expect(waitUntil([&] {
+                    const auto telemetry = coordinator.telemetry();
+                    return telemetry.jobsCompleted > jobsCompletedBeforeRelease
+                        && telemetry.loudness.capturedFrameEnd == beforeReset.capturedFrameEnd;
+                }));
+
+                resetCommitBarrier.release();
+                secondResetThread.join();
+
+                std::array<float, loudnessMeasurementPeriodFrames * 4> continuedSignal { };
+                fillLoudnessTone(continuedSignal, -18.0, toneFrameCursor);
+                coordinator.captureAudioBlock(continuedSignal.data(), continuedSignal.data(),
+                    continuedSignal.size(), loudnessTestSampleRate, 2);
+
+                const auto expectedIntegratedEndpoint
+                    = secondResetBoundary + loudnessMeasurementPeriodFrames * 4;
+                VisualizationFrame integrated;
+                expect(waitForFrame(
+                    coordinator, integrated, [expectedIntegratedEndpoint](const auto& candidate) {
+                        return candidate.loudnessIntegratedValid
+                            && candidate.loudnessIntegratedCapturedFrameEnd
+                            == expectedIntegratedEndpoint;
+                    }));
+
+                const auto telemetry = coordinator.telemetry();
+                expect(telemetry.loudness.integrationResets
+                    == telemetryBeforeReset.loudness.integrationResets + 1);
+                expect(telemetry.loudnessMeasurement.integratedCapturedFrameEnd
+                    == expectedIntegratedEndpoint);
+                coordinator.setWorkerTestHook(nullptr, nullptr);
+            }
 #endif
 
-        beginTest("FFT-only reconfiguration preserves capture and Peak/RMS state");
-        {
-            AnalysisCoordinator coordinator;
-            coordinator.setVisualizationActive(true);
+            beginTest("FFT and presentation mapping changes preserve Loudness state");
+            {
+                AnalysisCoordinator coordinator;
+                coordinator.setCaptureFormat(loudnessTestSampleRate, 2);
+                coordinator.setVisualizationActive(true);
 
-            std::array<float, fftSize> overSignal { };
-            overSignal.fill(1.1F);
-            coordinator.captureAudioBlock(
-                overSignal.data(), overSignal.data(), overSignal.size(), 48'000.0);
+                auto toneFrameCursor = std::uint64_t { 0 };
+                VisualizationFrame beforeChanges;
+                expect(feedLoudnessTonePeriods(
+                    coordinator, 32, -20.0, toneFrameCursor, beforeChanges));
+                const auto loudnessBefore = coordinator.telemetry().loudnessMeasurement;
 
-            VisualizationFrame beforeChange;
-            expect(waitForFrame(coordinator, beforeChange, [](const auto& candidate) {
-                return candidate.spectrumValid && candidate.meterValid && candidate.over[0];
-            }));
+                coordinator.setSpectrumAnalysisConfiguration(
+                    { 2048, FftWindow::fourTermBlackmanHarris, 120 });
+                coordinator.setSpectrumTemporalConfiguration(
+                    { 25.0, 125.0, SpectrumPeakHoldMode::finite, 1.0 });
+                coordinator.setSpectrogramFrequencySpacing(0.35);
 
-            const auto telemetryBefore = coordinator.telemetry();
-            constexpr std::array replacements {
-                SpectrumAnalysisConfiguration { 1024, FftWindow::periodicHann, 60 },
-                SpectrumAnalysisConfiguration { 1024, FftWindow::fourTermBlackmanHarris, 60 },
-                SpectrumAnalysisConfiguration { 1024, FftWindow::fourTermBlackmanHarris, 120 },
-            };
-            auto precedingFrame = beforeChange;
-            VisualizationFrame invalidated;
-            for (const auto& replacement : replacements) {
-                coordinator.setSpectrumAnalysisConfiguration(replacement);
+                VisualizationFrame afterChanges;
+                expect(waitForFrame(coordinator, afterChanges,
+                    [generation = beforeChanges.generation](const auto& candidate) {
+                        return candidate.generation == generation
+                            && candidate.loudnessMomentaryValid && candidate.loudnessShortTermValid
+                            && candidate.loudnessIntegratedValid;
+                    }));
+                const auto loudnessAfter = coordinator.telemetry().loudnessMeasurement;
+                expect(loudnessAfter.stateSequence == loudnessBefore.stateSequence);
+                expect(loudnessAfter.integrationBlockCount == loudnessBefore.integrationBlockCount);
+                expectWithinAbsoluteError(
+                    afterChanges.loudnessMomentaryLufs, beforeChanges.loudnessMomentaryLufs, 0.0);
+                expectWithinAbsoluteError(
+                    afterChanges.loudnessShortTermLufs, beforeChanges.loudnessShortTermLufs, 0.0);
+                expectWithinAbsoluteError(
+                    afterChanges.loudnessIntegratedLufs, beforeChanges.loudnessIntegratedLufs, 0.0);
+            }
 
-                expect(coordinator.copyLatestVisualizationFrame(invalidated),
-                    "FFT reconfiguration did not immediately publish its invalid snapshot");
-                expect(invalidated.generation == beforeChange.generation);
-                expect(invalidated.fftGeneration > precedingFrame.fftGeneration);
+            beginTest("A reset racing FFT reconfiguration never republishes valid old I");
+            {
+                AnalysisCoordinator coordinator;
+                coordinator.setCaptureFormat(loudnessTestSampleRate, 2);
+                coordinator.setVisualizationActive(true);
+
+                auto toneFrameCursor = std::uint64_t { 0 };
+                VisualizationFrame ready;
+                expect(feedLoudnessTonePeriods(coordinator, 4, -18.0, toneFrameCursor, ready));
+                expect(ready.loudnessIntegratedValid);
+                while (coordinator.copyLatestVisualizationFrame(ready)) { }
+
+                coordinator.resetLoudness();
+                coordinator.setSpectrumAnalysisConfiguration({ 2048, FftWindow::periodicHann, 60 });
+
+                VisualizationFrame invalidated;
+                expect(waitForFrameWithoutRequest(
+                    coordinator, invalidated,
+                    [](const auto& candidate) { return !candidate.loudnessIntegratedValid; }, 2s));
+            }
+
+#if defined(JUCE_UNIT_TESTS) && JUCE_UNIT_TESTS
+            beginTest("A worker publication racing Loudness reset cannot expose valid old I");
+            {
+                AnalysisCoordinator coordinator;
+                coordinator.setCaptureFormat(loudnessTestSampleRate, 2);
+                coordinator.setVisualizationActive(true);
+
+                auto toneFrameCursor = std::uint64_t { 0 };
+                VisualizationFrame ready;
+                expect(feedLoudnessTonePeriods(coordinator, 4, -18.0, toneFrameCursor, ready));
+                expect(ready.loudnessIntegratedValid);
+                while (coordinator.copyLatestVisualizationFrame(ready)) { }
+
+                WorkerPublicationBarrier barrier;
+                coordinator.setWorkerTestHook(&barrier, &WorkerPublicationBarrier::invoke);
+
+                std::array<float, loudnessMeasurementPeriodFrames> nextPeriod { };
+                fillLoudnessTone(nextPeriod, -18.0, toneFrameCursor);
+                coordinator.captureAudioBlock(nextPeriod.data(), nextPeriod.data(),
+                    nextPeriod.size(), loudnessTestSampleRate, 2);
+                auto workerReachedPublication = false;
+                const auto publicationDeadline = std::chrono::steady_clock::now() + 2s;
+                while (!workerReachedPublication
+                    && std::chrono::steady_clock::now() < publicationDeadline) {
+                    coordinator.requestAnalysis();
+                    workerReachedPublication = barrier.waitUntilBeforeEntered(2ms);
+                }
+                expect(workerReachedPublication,
+                    "The worker did not pause before publishing its pre-reset frame");
+
+                coordinator.resetLoudness();
+                barrier.releaseBefore();
+                expect(barrier.waitUntilAfterEntered(),
+                    "The worker did not publish the frame that raced the reset");
+
+                VisualizationFrame racedPublication;
+                expect(coordinator.copyLatestVisualizationFrame(racedPublication));
+                expect(!racedPublication.loudnessIntegratedValid,
+                    "A frame published after reset exposed the old Integrated value");
+
+                barrier.releaseAfter();
+                VisualizationFrame appliedReset;
+                expect(waitForFrameWithoutRequest(
+                    coordinator, appliedReset,
+                    [sequence = racedPublication.loudnessSequence](const auto& candidate) {
+                        return candidate.loudnessSequence > sequence
+                            && !candidate.loudnessIntegratedValid;
+                    },
+                    2s));
+                coordinator.setWorkerTestHook(nullptr, nullptr);
+            }
+
+            beginTest("A producer-only gap cannot consume a pending Loudness reset boundary");
+            {
+                AnalysisCoordinator coordinator;
+                coordinator.setCaptureFormat(loudnessTestSampleRate, 2);
+                coordinator.setVisualizationActive(true);
+
+                auto toneFrameCursor = std::uint64_t { 0 };
+                VisualizationFrame beforeGap;
+                expect(feedLoudnessTonePeriods(coordinator, 4, -18.0, toneFrameCursor, beforeGap));
+                expect(beforeGap.loudnessIntegratedValid);
+
+                WorkerHookBarrier barrier(
+                    AnalysisCoordinator::WorkerTestOperation::beforeMeterConsumption);
+                coordinator.setWorkerTestHook(&barrier, &WorkerHookBarrier::invoke);
+
+                std::array<float, StereoSampleCapture::framesPerSlot> trigger { };
+                trigger.fill(0.125F);
+                coordinator.captureAudioBlock(
+                    trigger.data(), trigger.data(), trigger.size(), loudnessTestSampleRate, 2);
+                auto workerReachedMeter = false;
+                const auto meterDeadline = std::chrono::steady_clock::now() + 2s;
+                while (!workerReachedMeter && std::chrono::steady_clock::now() < meterDeadline) {
+                    coordinator.requestAnalysis();
+                    workerReachedMeter = barrier.waitUntilEntered(2ms);
+                }
+                expect(workerReachedMeter, "The worker did not reach the meter boundary seam");
+
+                std::array<float, StereoSampleCapture::framesPerSlot> queuedBeforeReset { };
+                queuedBeforeReset.fill(0.125F);
+                for (std::size_t index = 0; index < StereoSampleCapture::slotCount * 2; ++index) {
+                    coordinator.captureAudioBlock(queuedBeforeReset.data(),
+                        queuedBeforeReset.data(), queuedBeforeReset.size(), loudnessTestSampleRate,
+                        2);
+                }
+
+                const auto resetBoundary = coordinator.telemetry().capture.capturedFrames;
+                coordinator.resetLoudness();
+                barrier.release();
+
+                VisualizationFrame afterGap;
+                const auto receivedAfterGap = waitForFrame(
+                    coordinator, afterGap,
+                    [sequence = beforeGap.loudnessSequence, resetBoundary](const auto& candidate) {
+                        return candidate.loudnessSequence > sequence
+                            && candidate.capturedFrameEnd >= resetBoundary
+                            && candidate.loudnessMomentaryValid;
+                    },
+                    2s);
+                const auto afterGapTelemetry = coordinator.telemetry();
+                expect(receivedAfterGap,
+                    juce::String("No post-gap Loudness frame: frameEnd=")
+                        + juce::String(static_cast<juce::int64>(afterGap.capturedFrameEnd))
+                        + ", resetBoundary=" + juce::String(static_cast<juce::int64>(resetBoundary))
+                        + ", M valid=" + juce::String(afterGap.loudnessMomentaryValid ? 1 : 0)
+                        + ", ready=" + juce::String(afterGapTelemetry.capture.readySlots)
+                        + ", reclaimed="
+                        + juce::String(static_cast<juce::int64>(
+                            afterGapTelemetry.capture.reclaimedReadyChunks))
+                        + ", ignored="
+                        + juce::String(
+                            static_cast<juce::int64>(afterGapTelemetry.ignoredGenerationChunks))
+                        + ", loudnessEnd="
+                        + juce::String(
+                            static_cast<juce::int64>(afterGapTelemetry.loudness.capturedFrameEnd))
+                        + ", discontinuityResets="
+                        + juce::String(static_cast<juce::int64>(
+                            afterGapTelemetry.loudness.discontinuityResets)));
+                expect(!afterGap.loudnessIntegratedValid,
+                    "Pre-reset raw survivors entered the new Integrated interval");
+
+                const auto telemetry = coordinator.telemetry();
+                expect(telemetry.capture.reclaimedReadyChunks >= 4);
+                expect(telemetry.loudness.discontinuityResets >= 1);
+                expect(telemetry.loudness.integrationResets >= 1);
+                expect(telemetry.loudness.capturedFrameEnd == resetBoundary);
+
+                coordinator.setWorkerTestHook(nullptr, nullptr);
+            }
+#endif
+        };
+        runLoudnessTests();
+
+        const auto runConfigurationTests = [this] {
+            beginTest("FFT-only reconfiguration preserves capture and Peak/RMS state");
+            {
+                AnalysisCoordinator coordinator;
+                coordinator.setVisualizationActive(true);
+
+                std::array<float, fftSize> overSignal { };
+                overSignal.fill(1.1F);
+                coordinator.captureAudioBlock(
+                    overSignal.data(), overSignal.data(), overSignal.size(), 48'000.0);
+
+                VisualizationFrame beforeChange;
+                expect(waitForFrame(coordinator, beforeChange, [](const auto& candidate) {
+                    return candidate.spectrumValid && candidate.meterValid && candidate.over[0];
+                }));
+
+                const auto telemetryBefore = coordinator.telemetry();
+                constexpr std::array replacements {
+                    SpectrumAnalysisConfiguration { 1024, FftWindow::periodicHann, 60 },
+                    SpectrumAnalysisConfiguration { 1024, FftWindow::fourTermBlackmanHarris, 60 },
+                    SpectrumAnalysisConfiguration { 1024, FftWindow::fourTermBlackmanHarris, 120 },
+                };
+                auto precedingFrame = beforeChange;
+                VisualizationFrame invalidated;
+                for (const auto& replacement : replacements) {
+                    coordinator.setSpectrumAnalysisConfiguration(replacement);
+
+                    expect(coordinator.copyLatestVisualizationFrame(invalidated),
+                        "FFT reconfiguration did not immediately publish its invalid snapshot");
+                    expect(invalidated.generation == beforeChange.generation);
+                    expect(invalidated.fftGeneration > precedingFrame.fftGeneration);
+                    expect(!invalidated.spectrumValid);
+                    expect(invalidated.spectrumSequence > precedingFrame.spectrumSequence);
+                    expect(invalidated.spectrumFftSize == replacement.fftSize);
+                    expect(invalidated.spectrumBinCount == (replacement.fftSize / 2) + 1);
+                    expect(invalidated.meterValid);
+                    expect(invalidated.meterSequence == beforeChange.meterSequence);
+                    expect(invalidated.stereoSequence == beforeChange.stereoSequence);
+                    expect(invalidated.stereoFieldValid == beforeChange.stereoFieldValid);
+                    expect(invalidated.stereoFieldPointCount == beforeChange.stereoFieldPointCount);
+                    expect(
+                        invalidated.stereoCorrelationValid == beforeChange.stereoCorrelationValid);
+                    expectWithinAbsoluteError(
+                        invalidated.stereoCorrelation, beforeChange.stereoCorrelation, 0.0001F);
+                    expect(invalidated.capturedFrameEnd == beforeChange.capturedFrameEnd);
+                    for (std::size_t channel = 0; channel < 2; ++channel) {
+                        expectWithinAbsoluteError(invalidated.peakDecibels[channel],
+                            beforeChange.peakDecibels[channel], 0.0001F);
+                        expectWithinAbsoluteError(invalidated.rmsDecibels[channel],
+                            beforeChange.rmsDecibels[channel], 0.0001F);
+                        expectWithinAbsoluteError(invalidated.heldPeakDecibels[channel],
+                            beforeChange.heldPeakDecibels[channel], 0.0001F);
+                        expect(invalidated.over[channel] == beforeChange.over[channel]);
+                    }
+                    precedingFrame = invalidated;
+                }
+
+                const auto telemetryAfterChange = coordinator.telemetry();
+                expect(telemetryAfterChange.fftConfigurationChanges
+                    == telemetryBefore.fftConfigurationChanges + replacements.size());
+                expect(telemetryAfterChange.fftGeneration == invalidated.fftGeneration);
+                expect(telemetryAfterChange.configuredFftSize == replacements.back().fftSize);
+                expect(telemetryAfterChange.configuredFftWindow
+                    == static_cast<std::uint32_t>(replacements.back().window));
+                expect(telemetryAfterChange.requestedFftSliceRateHz
+                    == replacements.back().requestedSliceRateHz);
+
+                std::array<float, ordinaryCaptureWindowFrames> quieterSignal { };
+                quieterSignal.fill(0.25F);
+                coordinator.captureAudioBlock(
+                    quieterSignal.data(), quieterSignal.data(), quieterSignal.size(), 48'000.0);
+
+                VisualizationFrame warmedUp;
+                expect(waitForFrame(coordinator, warmedUp,
+                    [captureGeneration = beforeChange.generation,
+                        fftGeneration = invalidated.fftGeneration](const auto& candidate) {
+                        return candidate.generation == captureGeneration
+                            && candidate.fftGeneration == fftGeneration && candidate.spectrumValid
+                            && candidate.spectrumFftSize == 1024
+                            && candidate.spectrumBinCount == 513;
+                    }));
+                expect(warmedUp.meterSequence > invalidated.meterSequence);
+                expectWithinAbsoluteError(
+                    warmedUp.heldPeakDecibels[0], beforeChange.heldPeakDecibels[0], 0.0001F);
+                expect(warmedUp.over[0] && warmedUp.over[1]);
+            }
+
+            beginTest("Spectrum temporal configuration and Clear preserve unrelated state");
+            {
+                AnalysisCoordinator coordinator;
+                coordinator.setVisualizationActive(true);
+
+                std::array<float, fftSize> signal { };
+                signal.fill(1.1F);
+                coordinator.captureAudioBlock(
+                    signal.data(), signal.data(), signal.size(), 48'000.0);
+
+                VisualizationFrame beforeChange;
+                expect(waitForFrame(coordinator, beforeChange, [](const auto& candidate) {
+                    return candidate.spectrumValid && candidate.meterValid && candidate.over[0];
+                }));
+                const auto telemetryBefore = coordinator.telemetry();
+
+                coordinator.setSpectrumTemporalConfiguration(
+                    { 25.0, 250.0, SpectrumPeakHoldMode::infinite, 2.0 });
+
+                VisualizationFrame invalidated;
+                expect(coordinator.copyLatestVisualizationFrame(invalidated));
                 expect(!invalidated.spectrumValid);
-                expect(invalidated.spectrumSequence > precedingFrame.spectrumSequence);
-                expect(invalidated.spectrumFftSize == replacement.fftSize);
-                expect(invalidated.spectrumBinCount == (replacement.fftSize / 2) + 1);
+                expect(!invalidated.spectrumPeakHoldValid);
+                expect(invalidated.generation == beforeChange.generation);
+                expect(invalidated.fftGeneration == beforeChange.fftGeneration);
                 expect(invalidated.meterValid);
                 expect(invalidated.meterSequence == beforeChange.meterSequence);
-                expect(invalidated.stereoSequence == beforeChange.stereoSequence);
-                expect(invalidated.stereoFieldValid == beforeChange.stereoFieldValid);
-                expect(invalidated.stereoFieldPointCount == beforeChange.stereoFieldPointCount);
-                expect(invalidated.stereoCorrelationValid == beforeChange.stereoCorrelationValid);
+                expect(invalidated.over == beforeChange.over);
                 expectWithinAbsoluteError(
-                    invalidated.stereoCorrelation, beforeChange.stereoCorrelation, 0.0001F);
-                expect(invalidated.capturedFrameEnd == beforeChange.capturedFrameEnd);
-                for (std::size_t channel = 0; channel < 2; ++channel) {
-                    expectWithinAbsoluteError(invalidated.peakDecibels[channel],
-                        beforeChange.peakDecibels[channel], 0.0001F);
-                    expectWithinAbsoluteError(invalidated.rmsDecibels[channel],
-                        beforeChange.rmsDecibels[channel], 0.0001F);
-                    expectWithinAbsoluteError(invalidated.heldPeakDecibels[channel],
-                        beforeChange.heldPeakDecibels[channel], 0.0001F);
-                    expect(invalidated.over[channel] == beforeChange.over[channel]);
-                }
-                precedingFrame = invalidated;
-            }
+                    invalidated.heldPeakDecibels[0], beforeChange.heldPeakDecibels[0], 0.0001F);
 
-            const auto telemetryAfterChange = coordinator.telemetry();
-            expect(telemetryAfterChange.fftConfigurationChanges
-                == telemetryBefore.fftConfigurationChanges + replacements.size());
-            expect(telemetryAfterChange.fftGeneration == invalidated.fftGeneration);
-            expect(telemetryAfterChange.configuredFftSize == replacements.back().fftSize);
-            expect(telemetryAfterChange.configuredFftWindow
-                == static_cast<std::uint32_t>(replacements.back().window));
-            expect(telemetryAfterChange.requestedFftSliceRateHz
-                == replacements.back().requestedSliceRateHz);
+                const auto telemetryAfterConfiguration = coordinator.telemetry();
+                expect(telemetryAfterConfiguration.fftGeneration == telemetryBefore.fftGeneration);
+                expect(telemetryAfterConfiguration.fftConfigurationChanges
+                    == telemetryBefore.fftConfigurationChanges);
+                expect(telemetryAfterConfiguration.spectrumTemporalConfigurationChanges
+                    == telemetryBefore.spectrumTemporalConfigurationChanges + 1);
+                expectWithinAbsoluteError(
+                    telemetryAfterConfiguration.configuredSpectrumAttackMilliseconds, 25.0, 0.0);
+                expectWithinAbsoluteError(
+                    telemetryAfterConfiguration.configuredSpectrumReleaseMilliseconds, 250.0, 0.0);
 
-            std::array<float, StereoSampleCapture::framesPerSlot> quieterSignal { };
-            quieterSignal.fill(0.25F);
-            coordinator.captureAudioBlock(
-                quieterSignal.data(), quieterSignal.data(), quieterSignal.size(), 48'000.0);
-
-            VisualizationFrame warmedUp;
-            expect(waitForFrame(coordinator, warmedUp,
-                [captureGeneration = beforeChange.generation,
-                    fftGeneration = invalidated.fftGeneration](const auto& candidate) {
-                    return candidate.generation == captureGeneration
-                        && candidate.fftGeneration == fftGeneration && candidate.spectrumValid
-                        && candidate.spectrumFftSize == 1024 && candidate.spectrumBinCount == 513;
-                }));
-            expect(warmedUp.meterSequence > invalidated.meterSequence);
-            expectWithinAbsoluteError(
-                warmedUp.heldPeakDecibels[0], beforeChange.heldPeakDecibels[0], 0.0001F);
-            expect(warmedUp.over[0] && warmedUp.over[1]);
-        }
-
-        beginTest("Spectrum temporal configuration and Clear preserve unrelated state");
-        {
-            AnalysisCoordinator coordinator;
-            coordinator.setVisualizationActive(true);
-
-            std::array<float, fftSize> signal { };
-            signal.fill(1.1F);
-            coordinator.captureAudioBlock(signal.data(), signal.data(), signal.size(), 48'000.0);
-
-            VisualizationFrame beforeChange;
-            expect(waitForFrame(coordinator, beforeChange, [](const auto& candidate) {
-                return candidate.spectrumValid && candidate.meterValid && candidate.over[0];
-            }));
-            const auto telemetryBefore = coordinator.telemetry();
-
-            coordinator.setSpectrumTemporalConfiguration(
-                { true, 250.0, SpectrumPeakHoldMode::infinite, 2.0 });
-
-            VisualizationFrame invalidated;
-            expect(coordinator.copyLatestVisualizationFrame(invalidated));
-            expect(!invalidated.spectrumValid);
-            expect(!invalidated.spectrumPeakHoldValid);
-            expect(invalidated.generation == beforeChange.generation);
-            expect(invalidated.fftGeneration == beforeChange.fftGeneration);
-            expect(invalidated.meterValid);
-            expect(invalidated.meterSequence == beforeChange.meterSequence);
-            expect(invalidated.over == beforeChange.over);
-            expectWithinAbsoluteError(
-                invalidated.heldPeakDecibels[0], beforeChange.heldPeakDecibels[0], 0.0001F);
-
-            const auto telemetryAfterConfiguration = coordinator.telemetry();
-            expect(telemetryAfterConfiguration.fftGeneration == telemetryBefore.fftGeneration);
-            expect(telemetryAfterConfiguration.fftConfigurationChanges
-                == telemetryBefore.fftConfigurationChanges);
-            expect(telemetryAfterConfiguration.spectrumTemporalConfigurationChanges
-                == telemetryBefore.spectrumTemporalConfigurationChanges + 1);
-
-            std::array<float, 800> nextHop { };
-            nextHop.fill(0.25F);
-            coordinator.captureAudioBlock(nextHop.data(), nextHop.data(), nextHop.size(), 48'000.0);
-
-            VisualizationFrame warmed;
-            expect(waitForFrame(coordinator, warmed,
-                [sequence = invalidated.spectrumSequence](const auto& candidate) {
-                    return candidate.spectrumSequence > sequence && candidate.spectrumValid
-                        && candidate.spectrumPeakHoldValid;
-                }));
-
-            coordinator.resetSpectrum();
-            coordinator.resetSpectrum();
-            VisualizationFrame cleared;
-            expect(waitForFrameWithoutRequest(
-                coordinator, cleared, [sequence = warmed.spectrumSequence](const auto& candidate) {
-                    return candidate.spectrumSequence > sequence && !candidate.spectrumValid
-                        && !candidate.spectrumPeakHoldValid;
-                }));
-            expect(cleared.fftGeneration == warmed.fftGeneration);
-            expect(cleared.meterValid);
-            expect(cleared.meterSequence == warmed.meterSequence);
-            expect(cleared.over == warmed.over);
-            expect(coordinator.telemetry().spectrumUserClears == 2);
-        }
-
-        beginTest("One normal capture slot is not backlog for a 1024-point FFT");
-        {
-            AnalysisCoordinator coordinator;
-            coordinator.setSpectrumAnalysisConfiguration({ 1024, FftWindow::periodicHann, 15 });
-            coordinator.setVisualizationActive(true);
-
-            std::array<float, StereoSampleCapture::framesPerSlot> samples { };
-            samples.fill(0.25F);
-            coordinator.captureAudioBlock(samples.data(), samples.data(), samples.size(), 48'000.0);
-
-            VisualizationFrame frame;
-            expect(waitForFrame(
-                coordinator, frame, [](const auto& candidate) { return candidate.spectrumValid; }));
-            expect(frame.spectrumFftSize == 1024);
-            expect(frame.spectrumBinCount == 513);
-
-            const auto telemetry = coordinator.telemetry();
-            expect(telemetry.capture.reclaimedReadyChunks == 0);
-            expect(telemetry.capture.droppedIncomingChunks == 0);
-            expect(telemetry.backlogDiscardedFrames == 0,
-                "A single ordinary 2048-frame capture slot was truncated as backlog");
-            expect(telemetry.spectrumTransforms == 1);
-            expect(telemetry.spectrumCapturedFrameEnd == 1024);
-            expect(telemetry.meterCapturedFrameEnd == StereoSampleCapture::framesPerSlot);
-        }
-
-        beginTest("A capture gap publishes a sequenced invalid Spectrum before warm-up");
-        {
-            AnalysisCoordinator coordinator;
-            coordinator.setSpectrumAnalysisConfiguration({ 16384, FftWindow::periodicHann, 60 });
-            coordinator.setVisualizationActive(true);
-
-            std::array<float, maximumFftSize> initialSignal { };
-            initialSignal.fill(0.25F);
-            coordinator.captureAudioBlock(
-                initialSignal.data(), initialSignal.data(), initialSignal.size(), 48'000.0);
-
-            VisualizationFrame valid;
-            expect(waitForFrame(
-                coordinator, valid, [](const auto& candidate) { return candidate.spectrumValid; }));
-
-            constexpr std::array<float, 64> shortChunk { };
-            for (std::size_t chunk = 0; chunk < StereoSampleCapture::slotCount + 1; ++chunk) {
+                std::array<float, 1024> nextHop { };
+                nextHop.fill(0.25F);
                 coordinator.captureAudioBlock(
-                    shortChunk.data(), shortChunk.data(), shortChunk.size(), 48'000.0);
+                    nextHop.data(), nextHop.data(), nextHop.size(), 48'000.0);
+
+                VisualizationFrame warmed;
+                expect(waitForFrame(coordinator, warmed,
+                    [sequence = invalidated.spectrumSequence](const auto& candidate) {
+                        return candidate.spectrumSequence > sequence && candidate.spectrumValid
+                            && candidate.spectrumPeakHoldValid;
+                    }));
+
+                coordinator.resetSpectrum();
+                coordinator.resetSpectrum();
+                VisualizationFrame cleared;
+                expect(waitForFrameWithoutRequest(coordinator, cleared,
+                    [sequence = warmed.spectrumSequence](const auto& candidate) {
+                        return candidate.spectrumSequence > sequence && !candidate.spectrumValid
+                            && !candidate.spectrumPeakHoldValid;
+                    }));
+                expect(cleared.fftGeneration == warmed.fftGeneration);
+                expect(cleared.meterValid);
+                expect(cleared.meterSequence == warmed.meterSequence);
+                expect(cleared.over == warmed.over);
+                expect(coordinator.telemetry().spectrumUserClears == 2);
             }
 
-            VisualizationFrame invalidated;
-            expect(waitForFrame(coordinator, invalidated,
-                [capturedFrameEnd = valid.capturedFrameEnd](const auto& candidate) {
-                    return candidate.capturedFrameEnd > capturedFrameEnd
-                        && !candidate.spectrumValid;
-                }));
-            expect(invalidated.generation > valid.generation);
-            expect(invalidated.fftGeneration == valid.fftGeneration);
-            expect(invalidated.spectrumSequence > valid.spectrumSequence,
-                "Capture-gap invalidation reused the preceding valid Spectrum sequence");
-            expect(coordinator.telemetry().capture.reclaimedReadyChunks > 0);
-        }
-
-        beginTest("A meter-only endpoint gap preserves continuous Stereo field history");
-        {
-            AnalysisCoordinator coordinator;
-            coordinator.setVisualizationActive(true);
-
-            std::array<float, 192> left { };
-            std::array<float, 192> right { };
-            left.fill(0.5F);
-            right.fill(-0.25F);
-            coordinator.captureAudioBlock(left.data(), right.data(), left.size(), 48'000.0);
-
-            VisualizationFrame first;
-            expect(waitForFrame(coordinator, first, [expectedEnd = left.size()](const auto& frame) {
-                return frame.stereoFieldValid && frame.meterValid
-                    && frame.stereoCapturedFrameEnd == expectedEnd;
-            }));
-
-            const auto telemetryBeforeGap = coordinator.telemetry();
-            coordinator.skipNextMeterEndpointSequenceForTesting();
-            coordinator.captureAudioBlock(left.data(), right.data(), left.size(), 48'000.0);
-
-            VisualizationFrame second;
-            expect(waitForFrame(coordinator, second,
-                [expectedEnd = left.size() * 2, firstSequence = first.stereoSequence](
-                    const auto& frame) {
-                    return frame.stereoFieldValid && frame.meterValid
-                        && frame.stereoCapturedFrameEnd == expectedEnd
-                        && frame.stereoSequence > firstSequence;
-                }));
-
-            const auto telemetryAfterGap = coordinator.telemetry();
-            expect(second.generation == first.generation);
-            expect(telemetryAfterGap.captureGeneration == telemetryBeforeGap.captureGeneration);
-            expect(second.stereoFieldPointCount > first.stereoFieldPointCount);
-            expect(telemetryAfterGap.stereoFieldHistoryResets
-                == telemetryBeforeGap.stereoFieldHistoryResets);
-            expect(telemetryAfterGap.capture.consumerDiscontinuities
-                == telemetryBeforeGap.capture.consumerDiscontinuities);
-            expect(telemetryAfterGap.meters.consumerDiscontinuities
-                > telemetryBeforeGap.meters.consumerDiscontinuities);
-        }
-
-        beginTest("A 15 Hz FFT request rate still services meters at 60 Hz");
-        {
-            auto establishedTimingWindow = false;
-            auto servicedSecondCapture = false;
-
-            for (auto attempt = 0; attempt < 4 && !establishedTimingWindow; ++attempt) {
+            beginTest("One normal capture slot is not backlog for a 1024-point FFT");
+            {
                 AnalysisCoordinator coordinator;
                 coordinator.setSpectrumAnalysisConfiguration({ 1024, FftWindow::periodicHann, 15 });
                 coordinator.setVisualizationActive(true);
 
-                std::array<float, 64> samples { };
+                std::array<float, ordinaryCaptureWindowFrames> samples { };
                 samples.fill(0.25F);
                 coordinator.captureAudioBlock(
                     samples.data(), samples.data(), samples.size(), 48'000.0);
 
-                const auto firstRequest = std::chrono::steady_clock::now();
-                coordinator.requestAnalysis();
-                while (coordinator.telemetry().jobsCompleted == 0
-                    && std::chrono::steady_clock::now() - firstRequest < 55ms) {
-                    std::this_thread::yield();
-                }
+                VisualizationFrame frame;
+                expect(waitForFrame(coordinator, frame,
+                    [](const auto& candidate) { return candidate.spectrumValid; }));
+                expect(frame.spectrumFftSize == 1024);
+                expect(frame.spectrumBinCount == 513);
 
-                if (coordinator.telemetry().jobsCompleted == 0)
-                    continue;
-
-                while (std::chrono::steady_clock::now() - firstRequest < 25ms)
-                    std::this_thread::yield();
-
-                if (std::chrono::steady_clock::now() - firstRequest >= 60ms)
-                    continue;
-
-                establishedTimingWindow = true;
-                const auto submittedBeforeSecond = coordinator.telemetry().scheduler.submitted;
-                coordinator.captureAudioBlock(
-                    samples.data(), samples.data(), samples.size(), 48'000.0);
-                coordinator.requestAnalysis();
-                const auto secondRequestAccepted
-                    = coordinator.telemetry().scheduler.submitted == submittedBeforeSecond + 1;
-
-                VisualizationFrame second;
-                servicedSecondCapture = secondRequestAccepted
-                    && waitForFrameWithoutRequest(coordinator, second,
-                        [expectedFrameEnd = samples.size() * 2](const auto& candidate) {
-                            return candidate.meterValid
-                                && candidate.capturedFrameEnd == expectedFrameEnd;
-                        });
+                const auto telemetry = coordinator.telemetry();
+                expect(telemetry.capture.reclaimedReadyChunks == 0);
+                expect(telemetry.capture.droppedIncomingChunks == 0);
+                expect(telemetry.backlogDiscardedFrames == 0,
+                    "A single ordinary 2048-frame capture slot was truncated as backlog");
+                expect(telemetry.spectrumTransforms == 1);
+                expect(telemetry.spectrumCapturedFrameEnd == 1024);
+                expect(telemetry.meterCapturedFrameEnd == ordinaryCaptureWindowFrames);
             }
 
-            expect(establishedTimingWindow,
-                "The test machine could not establish the 60-vs-15 Hz timing window");
-            expect(servicedSecondCapture,
-                "The 15 Hz FFT cadence incorrectly throttled a meter-only update");
-        }
-
-        beginTest("A 120 Hz FFT request rate is not capped by a 60 Hz service gate");
-        {
-            auto establishedTimingWindow = false;
-            auto servicedSecondCapture = false;
-
-            for (auto attempt = 0; attempt < 4 && !establishedTimingWindow; ++attempt) {
+            beginTest("A capture gap publishes a sequenced invalid Spectrum before warm-up");
+            {
                 AnalysisCoordinator coordinator;
                 coordinator.setSpectrumAnalysisConfiguration(
-                    { 1024, FftWindow::periodicHann, 120 });
+                    { 16384, FftWindow::periodicHann, 60 });
                 coordinator.setVisualizationActive(true);
 
-                std::array<float, 32> samples { };
-                samples.fill(0.25F);
+                std::array<float, maximumFftSize> initialSignal { };
+                initialSignal.fill(0.25F);
                 coordinator.captureAudioBlock(
-                    samples.data(), samples.data(), samples.size(), 48'000.0);
+                    initialSignal.data(), initialSignal.data(), initialSignal.size(), 48'000.0);
 
-                const auto firstRequest = std::chrono::steady_clock::now();
-                coordinator.requestAnalysis();
-                while (coordinator.telemetry().jobsCompleted == 0
-                    && std::chrono::steady_clock::now() - firstRequest < 14ms) {
-                    std::this_thread::yield();
+                VisualizationFrame valid;
+                expect(waitForFrame(coordinator, valid,
+                    [](const auto& candidate) { return candidate.spectrumValid; }));
+
+                constexpr std::array<float, 64> shortChunk { };
+                for (std::size_t chunk = 0; chunk < captureCallsThroughFirstPackedOverflow<64>();
+                    ++chunk) {
+                    coordinator.captureAudioBlock(
+                        shortChunk.data(), shortChunk.data(), shortChunk.size(), 48'000.0);
                 }
 
-                if (coordinator.telemetry().jobsCompleted == 0)
-                    continue;
+                VisualizationFrame invalidated;
+                expect(waitForFrame(coordinator, invalidated,
+                    [capturedFrameEnd = valid.capturedFrameEnd](const auto& candidate) {
+                        return candidate.capturedFrameEnd > capturedFrameEnd
+                            && !candidate.spectrumValid;
+                    }));
+                expect(invalidated.generation > valid.generation);
+                expect(invalidated.fftGeneration == valid.fftGeneration);
+                expect(invalidated.spectrumSequence > valid.spectrumSequence,
+                    "Capture-gap invalidation reused the preceding valid Spectrum sequence");
+                expect(coordinator.telemetry().capture.reclaimedReadyChunks > 0);
+            }
 
-                while (std::chrono::steady_clock::now() - firstRequest < 10ms)
-                    std::this_thread::yield();
+            beginTest("A meter-only endpoint gap preserves continuous Stereo field history");
+            {
+                AnalysisCoordinator coordinator;
+                coordinator.setVisualizationActive(true);
 
-                if (std::chrono::steady_clock::now() - firstRequest >= 14ms)
-                    continue;
+                std::array<float, StereoSampleCapture::framesPerSlot> left { };
+                std::array<float, StereoSampleCapture::framesPerSlot> right { };
+                left.fill(0.5F);
+                right.fill(-0.25F);
+                coordinator.captureAudioBlock(left.data(), right.data(), left.size(), 48'000.0);
 
-                establishedTimingWindow = true;
-                const auto submittedBeforeSecond = coordinator.telemetry().scheduler.submitted;
-                coordinator.captureAudioBlock(
-                    samples.data(), samples.data(), samples.size(), 48'000.0);
-                coordinator.requestAnalysis();
-                const auto secondRequestAccepted
-                    = coordinator.telemetry().scheduler.submitted == submittedBeforeSecond + 1;
+                VisualizationFrame first;
+                expect(waitForFrame(
+                    coordinator, first, [expectedEnd = left.size()](const auto& frame) {
+                        return frame.stereoFieldValid && frame.meterValid
+                            && frame.stereoCapturedFrameEnd == expectedEnd;
+                    }));
+
+                const auto telemetryBeforeGap = coordinator.telemetry();
+                coordinator.skipNextMeterEndpointSequenceForTesting();
+                coordinator.captureAudioBlock(left.data(), right.data(), left.size(), 48'000.0);
 
                 VisualizationFrame second;
-                servicedSecondCapture = secondRequestAccepted
-                    && waitForFrameWithoutRequest(coordinator, second,
-                        [expectedFrameEnd = samples.size() * 2](const auto& candidate) {
-                            return candidate.meterValid
-                                && candidate.capturedFrameEnd == expectedFrameEnd;
-                        });
-                servicedSecondCapture = servicedSecondCapture
-                    && coordinator.telemetry().meterCapturedFrameEnd == samples.size() * 2;
+                expect(waitForFrame(coordinator, second,
+                    [expectedEnd = left.size() * 2, firstSequence = first.stereoSequence](
+                        const auto& frame) {
+                        return frame.stereoFieldValid && frame.meterValid
+                            && frame.stereoCapturedFrameEnd == expectedEnd
+                            && frame.stereoSequence > firstSequence;
+                    }));
+
+                const auto telemetryAfterGap = coordinator.telemetry();
+                expect(second.generation == first.generation);
+                expect(telemetryAfterGap.captureGeneration == telemetryBeforeGap.captureGeneration);
+                expect(second.stereoFieldPointCount > first.stereoFieldPointCount);
+                expect(telemetryAfterGap.stereoFieldHistoryResets
+                    == telemetryBeforeGap.stereoFieldHistoryResets);
+                expect(telemetryAfterGap.capture.consumerDiscontinuities
+                    == telemetryBeforeGap.capture.consumerDiscontinuities);
+                expect(telemetryAfterGap.meters.consumerDiscontinuities
+                    > telemetryBeforeGap.meters.consumerDiscontinuities);
             }
 
-            expect(establishedTimingWindow,
-                "The test machine could not establish the 120-vs-60 Hz timing window");
-            expect(servicedSecondCapture,
-                "A second capture inside one 60 Hz period was not serviced at 120 Hz");
-        }
+            beginTest("A 15 Hz FFT request rate still services meters at 60 Hz");
+            {
+                auto establishedTimingWindow = false;
+                auto servicedSecondCapture = false;
 
-        beginTest("Presentation-only changes do not reconfigure an unchanged FFT");
-        {
-            AnalysisCoordinator coordinator;
-            coordinator.setVisualizationActive(true);
+                for (auto attempt = 0; attempt < 4 && !establishedTimingWindow; ++attempt) {
+                    AnalysisCoordinator coordinator;
+                    coordinator.setSpectrumAnalysisConfiguration(
+                        { 1024, FftWindow::periodicHann, 15 });
+                    coordinator.setVisualizationActive(true);
 
-            VisualizationFrame initial;
-            expect(coordinator.copyLatestVisualizationFrame(initial));
-            const auto telemetryBefore = coordinator.telemetry();
+                    std::array<float, 64> samples { };
+                    samples.fill(0.25F);
+                    coordinator.captureAudioBlock(
+                        samples.data(), samples.data(), samples.size(), 48'000.0);
 
-            // Frequency spacing is intentionally absent from the worker-side
-            // configuration. Its caller therefore republishes this same FFT
-            // subset when only the presentation mapping changes.
-            coordinator.setSpectrumAnalysisConfiguration({ });
+                    const auto firstRequest = std::chrono::steady_clock::now();
+                    coordinator.requestAnalysis();
+                    while (coordinator.telemetry().jobsCompleted == 0
+                        && std::chrono::steady_clock::now() - firstRequest < 55ms) {
+                        std::this_thread::yield();
+                    }
 
-            const auto telemetryAfter = coordinator.telemetry();
-            expect(telemetryAfter.fftGeneration == telemetryBefore.fftGeneration);
-            expect(
-                telemetryAfter.fftConfigurationChanges == telemetryBefore.fftConfigurationChanges);
-            expect(telemetryAfter.scheduler.submitted == telemetryBefore.scheduler.submitted);
-            expect(!coordinator.copyLatestVisualizationFrame(initial));
-        }
+                    if (coordinator.telemetry().jobsCompleted == 0)
+                        continue;
 
-        beginTest("A saturated capture queue fast-forwards to one newest FFT window");
-        {
-            AnalysisCoordinator coordinator;
-            coordinator.setVisualizationActive(true);
+                    while (std::chrono::steady_clock::now() - firstRequest < 25ms)
+                        std::this_thread::yield();
 
-            std::array<float, StereoSampleCapture::framesPerSlot> samples { };
-            samples.fill(0.25F);
-            constexpr auto publishedBlocks = StereoSampleCapture::slotCount * 2;
-            for (std::size_t block = 0; block < publishedBlocks; ++block) {
+                    if (std::chrono::steady_clock::now() - firstRequest >= 60ms)
+                        continue;
+
+                    establishedTimingWindow = true;
+                    const auto submittedBeforeSecond = coordinator.telemetry().scheduler.submitted;
+                    coordinator.captureAudioBlock(
+                        samples.data(), samples.data(), samples.size(), 48'000.0);
+                    coordinator.requestAnalysis();
+                    const auto secondRequestAccepted
+                        = coordinator.telemetry().scheduler.submitted == submittedBeforeSecond + 1;
+
+                    VisualizationFrame second;
+                    servicedSecondCapture = secondRequestAccepted
+                        && waitForFrameWithoutRequest(coordinator, second,
+                            [expectedFrameEnd = samples.size() * 2](const auto& candidate) {
+                                return candidate.meterValid
+                                    && candidate.capturedFrameEnd == expectedFrameEnd;
+                            });
+                }
+
+                expect(establishedTimingWindow,
+                    "The test machine could not establish the 60-vs-15 Hz timing window");
+                expect(servicedSecondCapture,
+                    "The 15 Hz FFT cadence incorrectly throttled a meter-only update");
+            }
+
+            beginTest("A 120 Hz FFT request rate is not capped by a 60 Hz service gate");
+            {
+                auto establishedTimingWindow = false;
+                auto servicedSecondCapture = false;
+
+                for (auto attempt = 0; attempt < 4 && !establishedTimingWindow; ++attempt) {
+                    AnalysisCoordinator coordinator;
+                    coordinator.setSpectrumAnalysisConfiguration(
+                        { 1024, FftWindow::periodicHann, 120 });
+                    coordinator.setVisualizationActive(true);
+
+                    std::array<float, 32> samples { };
+                    samples.fill(0.25F);
+                    coordinator.captureAudioBlock(
+                        samples.data(), samples.data(), samples.size(), 48'000.0);
+
+                    const auto firstRequest = std::chrono::steady_clock::now();
+                    coordinator.requestAnalysis();
+                    while (coordinator.telemetry().jobsCompleted == 0
+                        && std::chrono::steady_clock::now() - firstRequest < 14ms) {
+                        std::this_thread::yield();
+                    }
+
+                    if (coordinator.telemetry().jobsCompleted == 0)
+                        continue;
+
+                    while (std::chrono::steady_clock::now() - firstRequest < 10ms)
+                        std::this_thread::yield();
+
+                    if (std::chrono::steady_clock::now() - firstRequest >= 14ms)
+                        continue;
+
+                    establishedTimingWindow = true;
+                    const auto submittedBeforeSecond = coordinator.telemetry().scheduler.submitted;
+                    coordinator.captureAudioBlock(
+                        samples.data(), samples.data(), samples.size(), 48'000.0);
+                    coordinator.requestAnalysis();
+                    const auto secondRequestAccepted
+                        = coordinator.telemetry().scheduler.submitted == submittedBeforeSecond + 1;
+
+                    VisualizationFrame second;
+                    servicedSecondCapture = secondRequestAccepted
+                        && waitForFrameWithoutRequest(coordinator, second,
+                            [expectedFrameEnd = samples.size() * 2](const auto& candidate) {
+                                return candidate.meterValid
+                                    && candidate.capturedFrameEnd == expectedFrameEnd;
+                            });
+                    servicedSecondCapture = servicedSecondCapture
+                        && coordinator.telemetry().meterCapturedFrameEnd == samples.size() * 2;
+                }
+
+                expect(establishedTimingWindow,
+                    "The test machine could not establish the 120-vs-60 Hz timing window");
+                expect(servicedSecondCapture,
+                    "A second capture inside one 60 Hz period was not serviced at 120 Hz");
+            }
+
+            beginTest("Presentation-only changes do not reconfigure an unchanged FFT");
+            {
+                AnalysisCoordinator coordinator;
+                coordinator.setVisualizationActive(true);
+
+                VisualizationFrame initial;
+                expect(coordinator.copyLatestVisualizationFrame(initial));
+                const auto telemetryBefore = coordinator.telemetry();
+
+                // Frequency spacing is intentionally absent from the worker-side
+                // configuration. Its caller therefore republishes this same FFT
+                // subset when only the presentation mapping changes.
+                coordinator.setSpectrumAnalysisConfiguration({ });
+
+                const auto telemetryAfter = coordinator.telemetry();
+                expect(telemetryAfter.fftGeneration == telemetryBefore.fftGeneration);
+                expect(telemetryAfter.fftConfigurationChanges
+                    == telemetryBefore.fftConfigurationChanges);
+                expect(telemetryAfter.scheduler.submitted == telemetryBefore.scheduler.submitted);
+                expect(!coordinator.copyLatestVisualizationFrame(initial));
+            }
+
+            beginTest("A saturated capture queue fast-forwards to one newest FFT window");
+            {
+                AnalysisCoordinator coordinator;
+                coordinator.setVisualizationActive(true);
+
+                std::array<float, StereoSampleCapture::framesPerSlot> samples { };
+                samples.fill(0.25F);
+                constexpr auto publishedBlocks = StereoSampleCapture::slotCount * 2;
+                for (std::size_t block = 0; block < publishedBlocks; ++block) {
+                    coordinator.captureAudioBlock(
+                        samples.data(), samples.data(), samples.size(), 48'000.0);
+                }
+
+                VisualizationFrame frame;
+                const auto receivedSpectrum = waitForFrame(coordinator, frame,
+                    [](const auto& candidate) { return candidate.spectrumValid; });
+                expect(
+                    receivedSpectrum, "The bounded backlog job did not publish its newest window");
+
+                const auto backlogTelemetry = coordinator.telemetry();
+                expect(backlogTelemetry.capture.reclaimedReadyChunks > 0);
+                expect(backlogTelemetry.backlogDiscardedFrames >= fftSize);
+                expect(backlogTelemetry.maximumJobSpectrumTransforms <= 1,
+                    "A saturated queue performed more than one display-useful transform");
+                expect(backlogTelemetry.spectrumCapturedFrameEnd == frame.capturedFrameEnd);
+                expect(backlogTelemetry.meterCapturedFrameEnd == frame.capturedFrameEnd);
+
+                const auto spectrumEndpoint = backlogTelemetry.spectrumCapturedFrameEnd;
+                constexpr std::array<float, 128> shortBlock { };
                 coordinator.captureAudioBlock(
-                    samples.data(), samples.data(), samples.size(), 48'000.0);
+                    shortBlock.data(), shortBlock.data(), shortBlock.size(), 48'000.0);
+
+                const auto receivedMeterOnlyUpdate
+                    = waitForFrame(coordinator, frame, [spectrumEndpoint](const auto& candidate) {
+                          return candidate.capturedFrameEnd > spectrumEndpoint;
+                      });
+                expect(receivedMeterOnlyUpdate);
+
+                const auto freshnessTelemetry = coordinator.telemetry();
+                expect(freshnessTelemetry.spectrumCapturedFrameEnd == spectrumEndpoint);
+                expect(freshnessTelemetry.meterCapturedFrameEnd
+                    == spectrumEndpoint + shortBlock.size());
             }
 
-            VisualizationFrame frame;
-            const auto receivedSpectrum = waitForFrame(
-                coordinator, frame, [](const auto& candidate) { return candidate.spectrumValid; });
-            expect(receivedSpectrum, "The bounded backlog job did not publish its newest window");
+            beginTest("Mono analysis publishes one honest meter channel");
+            {
+                AnalysisCoordinator coordinator;
+                coordinator.setVisualizationActive(true);
 
-            const auto backlogTelemetry = coordinator.telemetry();
-            expect(backlogTelemetry.capture.reclaimedReadyChunks > 0);
-            expect(backlogTelemetry.backlogDiscardedFrames >= fftSize);
-            expect(backlogTelemetry.maximumJobSpectrumTransforms <= 1,
-                "A saturated queue performed more than one display-useful transform");
-            expect(backlogTelemetry.spectrumCapturedFrameEnd == frame.capturedFrameEnd);
-            expect(backlogTelemetry.meterCapturedFrameEnd == frame.capturedFrameEnd);
+                std::array<float, fftSize> mono { };
+                mono.fill(0.5F);
+                coordinator.captureAudioBlock(
+                    mono.data(), nullptr, mono.size(), 48'000.0, std::uint32_t { 1 });
 
-            const auto spectrumEndpoint = backlogTelemetry.spectrumCapturedFrameEnd;
-            constexpr std::array<float, 128> shortBlock { };
-            coordinator.captureAudioBlock(
-                shortBlock.data(), shortBlock.data(), shortBlock.size(), 48'000.0);
+                VisualizationFrame frame;
+                const auto received = waitForFrame(coordinator, frame,
+                    [](const auto& candidate) { return candidate.channelCount == 1; });
+                expect(received);
+                expect(frame.channelCount == 1);
+                expectWithinAbsoluteError(frame.peakDecibels[0], -6.0206F, 0.02F);
+                expect(isDisplayFloor(frame.peakDecibels[1]));
+                expect(isDisplayFloor(frame.rmsDecibels[1]));
+                expect(frame.stereoFieldValid);
+                expect(frame.stereoMono);
+                expect(frame.stereoFieldPointCount > 0);
+                expect(!frame.stereoCorrelationValid);
+                for (std::size_t point = 0; point < frame.stereoFieldPointCount; ++point)
+                    expectWithinAbsoluteError(
+                        frame.stereoFieldPoints[point].horizontal, 0.0F, 1.0e-7F);
+            }
 
-            const auto receivedMeterOnlyUpdate
-                = waitForFrame(coordinator, frame, [spectrumEndpoint](const auto& candidate) {
-                      return candidate.capturedFrameEnd > spectrumEndpoint;
-                  });
-            expect(receivedMeterOnlyUpdate);
+            beginTest("Sample-rate changes start a clean capture generation");
+            {
+                AnalysisCoordinator coordinator;
+                coordinator.setCaptureFormat(48'000.0, 2);
+                coordinator.setVisualizationActive(true);
 
-            const auto freshnessTelemetry = coordinator.telemetry();
-            expect(freshnessTelemetry.spectrumCapturedFrameEnd == spectrumEndpoint);
-            expect(
-                freshnessTelemetry.meterCapturedFrameEnd == spectrumEndpoint + shortBlock.size());
-        }
+                std::array<float, fftSize> signal { };
+                signal.fill(0.25F);
+                coordinator.captureAudioBlock(
+                    signal.data(), signal.data(), signal.size(), 48'000.0, 2);
 
-        beginTest("Mono analysis publishes one honest meter channel");
-        {
-            AnalysisCoordinator coordinator;
-            coordinator.setVisualizationActive(true);
-
-            std::array<float, fftSize> mono { };
-            mono.fill(0.5F);
-            coordinator.captureAudioBlock(
-                mono.data(), nullptr, mono.size(), 48'000.0, std::uint32_t { 1 });
-
-            VisualizationFrame frame;
-            const auto received = waitForFrame(coordinator, frame,
-                [](const auto& candidate) { return candidate.channelCount == 1; });
-            expect(received);
-            expect(frame.channelCount == 1);
-            expectWithinAbsoluteError(frame.peakDecibels[0], -6.0206F, 0.02F);
-            expect(isDisplayFloor(frame.peakDecibels[1]));
-            expect(isDisplayFloor(frame.rmsDecibels[1]));
-            expect(frame.stereoFieldValid);
-            expect(frame.stereoMono);
-            expect(frame.stereoFieldPointCount > 0);
-            expect(!frame.stereoCorrelationValid);
-            for (std::size_t point = 0; point < frame.stereoFieldPointCount; ++point)
-                expectWithinAbsoluteError(frame.stereoFieldPoints[point].horizontal, 0.0F, 1.0e-7F);
-        }
-
-        beginTest("Sample-rate changes start a clean capture generation");
-        {
-            AnalysisCoordinator coordinator;
-            coordinator.setCaptureFormat(48'000.0, 2);
-            coordinator.setVisualizationActive(true);
-
-            std::array<float, fftSize> signal { };
-            signal.fill(0.25F);
-            coordinator.captureAudioBlock(signal.data(), signal.data(), signal.size(), 48'000.0, 2);
-
-            VisualizationFrame original;
-            expect(waitForFrame(coordinator, original, [](const auto& candidate) {
-                return candidate.spectrumValid && candidate.meterValid;
-            }));
-
-            const auto resetsBeforeFormatChange = coordinator.telemetry().loudness;
-
-            coordinator.setCaptureFormat(96'000.0, 2);
-            VisualizationFrame restarted;
-            expect(waitForFrame(
-                coordinator, restarted, [generation = original.generation](const auto& candidate) {
-                    return candidate.generation > generation && !candidate.spectrumValid
-                        && !candidate.meterValid && !candidate.stereoFieldValid
-                        && !candidate.stereoCorrelationValid;
+                VisualizationFrame original;
+                expect(waitForFrame(coordinator, original, [](const auto& candidate) {
+                    return candidate.spectrumValid && candidate.meterValid;
                 }));
 
-            constexpr std::array<float, 128> shortSignal { };
-            coordinator.captureAudioBlock(
-                shortSignal.data(), shortSignal.data(), shortSignal.size(), 96'000.0, 2);
+                const auto resetsBeforeFormatChange = coordinator.telemetry().loudness;
 
-            VisualizationFrame warming;
-            expect(waitForFrame(
-                coordinator, warming, [generation = restarted.generation](const auto& candidate) {
-                    return candidate.generation == generation && candidate.meterValid
-                        && !candidate.spectrumValid;
+                coordinator.setCaptureFormat(96'000.0, 2);
+                VisualizationFrame restarted;
+                expect(waitForFrame(coordinator, restarted,
+                    [generation = original.generation](const auto& candidate) {
+                        return candidate.generation > generation && !candidate.spectrumValid
+                            && !candidate.meterValid && !candidate.stereoFieldValid
+                            && !candidate.stereoCorrelationValid;
+                    }));
+
+                constexpr std::array<float, 128> shortSignal { };
+                coordinator.captureAudioBlock(
+                    shortSignal.data(), shortSignal.data(), shortSignal.size(), 96'000.0, 2);
+
+                VisualizationFrame warming;
+                expect(waitForFrame(coordinator, warming,
+                    [generation = restarted.generation](const auto& candidate) {
+                        return candidate.generation == generation && candidate.meterValid
+                            && !candidate.spectrumValid;
+                    }));
+                expectWithinAbsoluteError(warming.sampleRate, 96'000.0, 0.001);
+
+                const auto resetsAfterFormatChange = coordinator.telemetry().loudness;
+                expect(resetsAfterFormatChange.formatResets
+                    == resetsBeforeFormatChange.formatResets + 1);
+                expect(resetsAfterFormatChange.explicitResets
+                    == resetsBeforeFormatChange.explicitResets);
+
+                coordinator.captureAudioBlock(
+                    signal.data(), signal.data(), signal.size(), 96'000.0, 2);
+                VisualizationFrame ready;
+                expect(waitForFrame(
+                    coordinator, ready, [generation = restarted.generation](const auto& candidate) {
+                        return candidate.generation == generation && candidate.spectrumValid
+                            && candidate.meterValid;
+                    }));
+
+                while (coordinator.copyLatestVisualizationFrame(ready)) { }
+                coordinator.setCaptureFormat(96'000.0, 2);
+                expect(!coordinator.copyLatestVisualizationFrame(ready),
+                    "An identical format unnecessarily restarted capture");
+            }
+
+            beginTest("Channel-layout changes never retain a stereo spectrum beside a mono meter");
+            {
+                AnalysisCoordinator coordinator;
+                coordinator.setCaptureFormat(48'000.0, 2);
+                coordinator.setVisualizationActive(true);
+
+                std::array<float, fftSize> stereo { };
+                stereo.fill(0.25F);
+                coordinator.captureAudioBlock(
+                    stereo.data(), stereo.data(), stereo.size(), 48'000.0, 2);
+
+                VisualizationFrame original;
+                expect(waitForFrame(coordinator, original, [](const auto& candidate) {
+                    return candidate.spectrumValid && candidate.channelCount == 2;
                 }));
-            expectWithinAbsoluteError(warming.sampleRate, 96'000.0, 0.001);
 
-            const auto resetsAfterFormatChange = coordinator.telemetry().loudness;
-            expect(
-                resetsAfterFormatChange.formatResets == resetsBeforeFormatChange.formatResets + 1);
-            expect(
-                resetsAfterFormatChange.explicitResets == resetsBeforeFormatChange.explicitResets);
+                coordinator.setCaptureFormat(48'000.0, 1);
+                VisualizationFrame restarted;
+                expect(waitForFrame(coordinator, restarted,
+                    [generation = original.generation](const auto& candidate) {
+                        return candidate.generation > generation && !candidate.spectrumValid
+                            && !candidate.meterValid;
+                    }));
 
-            coordinator.captureAudioBlock(signal.data(), signal.data(), signal.size(), 96'000.0, 2);
-            VisualizationFrame ready;
-            expect(waitForFrame(
-                coordinator, ready, [generation = restarted.generation](const auto& candidate) {
-                    return candidate.generation == generation && candidate.spectrumValid
-                        && candidate.meterValid;
-                }));
-
-            while (coordinator.copyLatestVisualizationFrame(ready)) { }
-            coordinator.setCaptureFormat(96'000.0, 2);
-            expect(!coordinator.copyLatestVisualizationFrame(ready),
-                "An identical format unnecessarily restarted capture");
-        }
-
-        beginTest("Channel-layout changes never retain a stereo spectrum beside a mono meter");
-        {
-            AnalysisCoordinator coordinator;
-            coordinator.setCaptureFormat(48'000.0, 2);
-            coordinator.setVisualizationActive(true);
-
-            std::array<float, fftSize> stereo { };
-            stereo.fill(0.25F);
-            coordinator.captureAudioBlock(stereo.data(), stereo.data(), stereo.size(), 48'000.0, 2);
-
-            VisualizationFrame original;
-            expect(waitForFrame(coordinator, original, [](const auto& candidate) {
-                return candidate.spectrumValid && candidate.channelCount == 2;
-            }));
-
-            coordinator.setCaptureFormat(48'000.0, 1);
-            VisualizationFrame restarted;
-            expect(waitForFrame(
-                coordinator, restarted, [generation = original.generation](const auto& candidate) {
-                    return candidate.generation > generation && !candidate.spectrumValid
-                        && !candidate.meterValid;
-                }));
-
-            constexpr std::array<float, 128> mono { };
-            coordinator.captureAudioBlock(mono.data(), nullptr, mono.size(), 48'000.0, 1);
-            VisualizationFrame warming;
-            expect(waitForFrame(
-                coordinator, warming, [generation = restarted.generation](const auto& candidate) {
-                    return candidate.generation == generation && candidate.meterValid
-                        && candidate.channelCount == 1;
-                }));
-            expect(!warming.spectrumValid);
-        }
+                constexpr std::array<float, 128> mono { };
+                coordinator.captureAudioBlock(mono.data(), nullptr, mono.size(), 48'000.0, 1);
+                VisualizationFrame warming;
+                expect(waitForFrame(coordinator, warming,
+                    [generation = restarted.generation](const auto& candidate) {
+                        return candidate.generation == generation && candidate.meterValid
+                            && candidate.channelCount == 1;
+                    }));
+                expect(!warming.spectrumValid);
+            }
+        };
+        runConfigurationTests();
 
         beginTest("Stale input clears M/S while preserving completed Integrated Loudness");
         {
@@ -1365,7 +1569,7 @@ public:
 
             auto toneFrameCursor = std::uint64_t { 0 };
             VisualizationFrame live;
-            expect(feedLoudnessTonePeriods(coordinator, 30, -23.0, toneFrameCursor, live));
+            expect(feedLoudnessTonePeriods(coordinator, 32, -23.0, toneFrameCursor, live));
             expect(live.loudnessMomentaryValid && live.loudnessShortTermValid
                 && live.loudnessIntegratedValid);
 
@@ -1672,7 +1876,8 @@ public:
 
             coordinator.failNextFramePublicationForTesting();
             constexpr std::array<float, 64> shortChunk { };
-            for (std::size_t index = 0; index < StereoSampleCapture::slotCount + 1; ++index) {
+            for (std::size_t index = 0; index < captureCallsThroughFirstPackedOverflow<64>();
+                ++index) {
                 coordinator.captureAudioBlock(
                     shortChunk.data(), shortChunk.data(), shortChunk.size(), 48'000.0);
             }
@@ -1872,7 +2077,7 @@ private:
         right.fill(-0.125F);
 
         const auto beforeBoundary = coordinator.telemetry();
-        captureRepeated(coordinator, left, right, StereoSampleCapture::slotCount + 1);
+        captureRepeated(coordinator, left, right, captureCallsThroughFirstPackedOverflow<64>());
 
         auto boundaryGeneration = std::uint64_t { 0 };
         expect(waitForCaptureBoundaryPublication(coordinator, beforeBoundary.captureGeneration,
@@ -1933,14 +2138,15 @@ private:
         std::array<float, 64> signal { };
         signal.fill(0.2F);
         const auto beforeBoundary = coordinator.telemetry();
-        captureRepeated(coordinator, signal, signal, StereoSampleCapture::slotCount + 1);
+        captureRepeated(coordinator, signal, signal, captureCallsThroughFirstPackedOverflow<64>());
 
         auto boundaryGeneration = std::uint64_t { 0 };
         expect(waitForCaptureBoundaryPublication(coordinator, beforeBoundary.captureGeneration,
             beforeBoundary.publishedFrames, boundaryGeneration));
 
         for (std::size_t burst = 0; burst < 3; ++burst) {
-            captureRepeated(coordinator, signal, signal, StereoSampleCapture::slotCount + 1);
+            captureRepeated(
+                coordinator, signal, signal, captureCallsThroughFirstPackedOverflow<64>());
         }
         const auto capturedFrameEnd = coordinator.telemetry().capture.capturedFrames;
         expect(coordinator.telemetry().captureGeneration == boundaryGeneration,
@@ -1984,7 +2190,7 @@ private:
         const auto reachedAcquisition = acquisitionBarrier.waitUntilEntered();
         expect(reachedAcquisition, "The worker did not reach the raw acquisition seam");
 
-        captureRepeated(coordinator, silence, silence, StereoSampleCapture::slotCount - 1);
+        captureRepeated(coordinator, silence, silence, captureCallsToFillRawQueue<64>() - 1);
         std::array<float, 64> retainedLeft { };
         std::array<float, 64> retainedRight { };
         retainedLeft.fill(0.8F);
@@ -1992,7 +2198,7 @@ private:
         coordinator.captureAudioBlock(
             retainedLeft.data(), retainedRight.data(), retainedLeft.size(), 48'000.0, 2);
         captureRepeated(
-            coordinator, retainedLeft, retainedRight, StereoSampleCapture::slotCount - 1);
+            coordinator, retainedLeft, retainedRight, captureCallsToFillRawQueue<64>() - 1);
 
         const auto beforeBoundary = coordinator.telemetry();
         acquisitionBarrier.release();
@@ -2073,7 +2279,7 @@ private:
         const auto reachedAcquisition = acquisitionBarrier.waitUntilEntered();
         expect(reachedAcquisition, "The worker did not reach the meter acquisition seam");
 
-        captureRepeated(coordinator, silence, silence, StereoSampleCapture::slotCount);
+        captureRepeated(coordinator, silence, silence, captureCallsToFillRawQueue<64>());
         std::array<float, 64> finalSignal { };
         finalSignal.fill(0.5F);
         coordinator.captureAudioBlock(
@@ -2111,7 +2317,7 @@ private:
         std::array<float, 64> signal { };
         signal.fill(0.3F);
         const auto beforeBoundary = coordinator.telemetry();
-        captureRepeated(coordinator, signal, signal, StereoSampleCapture::slotCount + 1);
+        captureRepeated(coordinator, signal, signal, captureCallsThroughFirstPackedOverflow<64>());
 
         auto boundaryGeneration = std::uint64_t { 0 };
         expect(waitForCaptureBoundaryPublication(coordinator, beforeBoundary.captureGeneration,
@@ -2152,8 +2358,8 @@ private:
         std::array<float, 64> recoverySignal { };
         recoverySignal.fill(0.25F);
         const auto beforeBoundary = coordinator.telemetry();
-        captureRepeated(
-            coordinator, recoverySignal, recoverySignal, StereoSampleCapture::slotCount + 1);
+        captureRepeated(coordinator, recoverySignal, recoverySignal,
+            captureCallsThroughFirstPackedOverflow<64>());
 
         auto boundaryGeneration = std::uint64_t { 0 };
         expect(waitForCaptureBoundaryPublication(coordinator, beforeBoundary.captureGeneration,
@@ -2258,7 +2464,7 @@ private:
         std::array<float, 64> signal { };
         signal.fill(0.4F);
         const auto beforeBoundary = coordinator.telemetry();
-        captureRepeated(coordinator, signal, signal, StereoSampleCapture::slotCount + 1);
+        captureRepeated(coordinator, signal, signal, captureCallsThroughFirstPackedOverflow<64>());
 
         auto boundaryGeneration = std::uint64_t { 0 };
         expect(waitForCaptureBoundaryPublication(coordinator, beforeBoundary.captureGeneration,
@@ -2365,7 +2571,7 @@ private:
         std::array<float, 64> signal { };
         signal.fill(0.2F);
         const auto beforeBoundary = coordinator.telemetry();
-        captureRepeated(coordinator, signal, signal, StereoSampleCapture::slotCount + 1);
+        captureRepeated(coordinator, signal, signal, captureCallsThroughFirstPackedOverflow<64>());
 
         WorkerHookBarrier publicationBarrier(
             AnalysisCoordinator::WorkerTestOperation::beforeFramePublication);
@@ -2437,7 +2643,7 @@ private:
         std::array<float, 64> signal { };
         signal.fill(0.2F);
         const auto beforeBoundary = coordinator.telemetry();
-        captureRepeated(coordinator, signal, signal, StereoSampleCapture::slotCount + 1);
+        captureRepeated(coordinator, signal, signal, captureCallsThroughFirstPackedOverflow<64>());
 
         auto boundaryGeneration = std::uint64_t { 0 };
         expect(waitForCaptureBoundaryPublication(coordinator, beforeBoundary.captureGeneration,
@@ -2447,7 +2653,7 @@ private:
         coordinator.discardPendingSpectrogramColumns();
         coordinator.setSpectrumAnalysisConfiguration({ 2048, FftWindow::fiveTermFlatTop, 120 });
         coordinator.setSpectrumTemporalConfiguration(
-            { false, 75.0, SpectrumPeakHoldMode::finite, 1.0 });
+            { 0.0, 0.0, SpectrumPeakHoldMode::finite, 1.0 });
         coordinator.setSpectrogramFrequencySpacing(0.35);
 
         const auto afterConfiguration = coordinator.telemetry();
@@ -2485,7 +2691,7 @@ private:
         std::array<float, 64> signal { };
         signal.fill(0.2F);
         const auto beforeFirstBoundary = coordinator.telemetry();
-        captureRepeated(coordinator, signal, signal, StereoSampleCapture::slotCount + 1);
+        captureRepeated(coordinator, signal, signal, captureCallsThroughFirstPackedOverflow<64>());
 
         auto firstBoundaryGeneration = std::uint64_t { 0 };
         expect(waitForCaptureBoundaryPublication(coordinator, beforeFirstBoundary.captureGeneration,
@@ -2512,7 +2718,8 @@ private:
         drainRendererState(coordinator);
 
         const auto beforeSecondBoundary = coordinator.telemetry();
-        captureRepeated(coordinator, signal, signal, StereoSampleCapture::slotCount + 1, 96'000.0);
+        captureRepeated(
+            coordinator, signal, signal, captureCallsThroughFirstPackedOverflow<64>(), 96'000.0);
         auto secondBoundaryGeneration = std::uint64_t { 0 };
         expect(
             waitForCaptureBoundaryPublication(coordinator, beforeSecondBoundary.captureGeneration,

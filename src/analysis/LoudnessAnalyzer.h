@@ -10,6 +10,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <limits>
+#include <optional>
 #include <span>
 
 namespace audio_insight {
@@ -79,6 +80,7 @@ public:
         std::uint64_t measurementCompletions = 0;
         std::uint64_t integrationBlockCompletions = 0;
         bool accepted = false;
+        bool integrationResetApplied = false;
 
         [[nodiscard]] bool producedVisibleState() const noexcept
         {
@@ -134,8 +136,15 @@ public:
     LoudnessAnalyzer(const LoudnessAnalyzer&) = delete;
     LoudnessAnalyzer& operator=(const LoudnessAnalyzer&) = delete;
 
-    /** Consumes one continuous source-order raw capture chunk. */
-    [[nodiscard]] ProcessResult process(const CapturedStereoChunkView& chunk) noexcept;
+    /**
+        Consumes one continuous source-order raw capture chunk.
+
+        When the optional reset boundary lies strictly inside the chunk,
+        Integrated processing restarts at that exact captured-frame boundary.
+        K-weighting and the live M/S windows remain continuous across it.
+    */
+    [[nodiscard]] ProcessResult process(const CapturedStereoChunkView& chunk,
+        std::optional<std::uint64_t> integrationResetCapturedFrameEnd = std::nullopt) noexcept;
 
     /**
         Full capture/lifecycle reset. Every measurement, filter, and partial
