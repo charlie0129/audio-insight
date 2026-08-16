@@ -12,9 +12,6 @@ namespace audio_insight {
 namespace {
 const juce::Identifier versionProperty { "version" };
 
-const juce::Identifier displayType { "Display" };
-const juce::Identifier displayFramePacingProperty { "framePacing" };
-
 const juce::Identifier sharedAnalysisType { "SharedAnalysis" };
 const juce::Identifier fftSizeProperty { "fftSize" };
 const juce::Identifier windowProperty { "window" };
@@ -24,8 +21,8 @@ const juce::Identifier frequencySpacingProperty { "frequencySpacing" };
 const juce::Identifier spectrumType { "Spectrum" };
 const juce::Identifier spectrumFloorProperty { "floorDb" };
 const juce::Identifier spectrumCeilingProperty { "ceilingDb" };
-const juce::Identifier temporalAveragingEnabledProperty { "temporalAveragingEnabled" };
-const juce::Identifier temporalAveragingMillisecondsProperty { "temporalAveragingMilliseconds" };
+const juce::Identifier attackAveragingMillisecondsProperty { "attackAveragingMilliseconds" };
+const juce::Identifier releaseAveragingMillisecondsProperty { "releaseAveragingMilliseconds" };
 const juce::Identifier slopeProperty { "slope" };
 const juce::Identifier peakHoldModeProperty { "peakHoldMode" };
 const juce::Identifier finitePeakHoldSecondsProperty { "finitePeakHoldSeconds" };
@@ -44,7 +41,6 @@ const juce::Identifier loudnessType { "Loudness" };
 const juce::Identifier loudnessReferenceProperty { "referenceLufs" };
 
 const std::array rootProperties { versionProperty };
-const std::array displayProperties { displayFramePacingProperty };
 const std::array sharedAnalysisProperties {
     fftSizeProperty,
     windowProperty,
@@ -54,8 +50,8 @@ const std::array sharedAnalysisProperties {
 const std::array spectrumProperties {
     spectrumFloorProperty,
     spectrumCeilingProperty,
-    temporalAveragingEnabledProperty,
-    temporalAveragingMillisecondsProperty,
+    attackAveragingMillisecondsProperty,
+    releaseAveragingMillisecondsProperty,
     slopeProperty,
     peakHoldModeProperty,
     finitePeakHoldSecondsProperty,
@@ -90,7 +86,6 @@ bool hasRecognizedShape(const juce::ValueTree& tree)
     if (!hasOnlyKnownProperties(tree, rootProperties))
         return false;
 
-    auto displayCount = 0;
     auto sharedAnalysisCount = 0;
     auto spectrumCount = 0;
     auto spectrogramCount = 0;
@@ -100,11 +95,7 @@ bool hasRecognizedShape(const juce::ValueTree& tree)
         if (child.getNumChildren() != 0)
             return false;
 
-        if (child.hasType(displayType)) {
-            if (++displayCount > 1 || !hasOnlyKnownProperties(child, displayProperties)) {
-                return false;
-            }
-        } else if (child.hasType(sharedAnalysisType)) {
+        if (child.hasType(sharedAnalysisType)) {
             if (++sharedAnalysisCount > 1
                 || !hasOnlyKnownProperties(child, sharedAnalysisProperties)) {
                 return false;
@@ -179,26 +170,6 @@ std::optional<double> readNumber(const juce::ValueTree& tree, const juce::Identi
     return number;
 }
 
-std::optional<bool> readBoolean(const juce::ValueTree& tree, const juce::Identifier& property)
-{
-    if (!tree.hasProperty(property))
-        return std::nullopt;
-
-    const auto value = tree.getProperty(property);
-    if (value.isBool())
-        return static_cast<bool>(value);
-
-    if (value.isString()) {
-        const auto text = value.toString();
-        if (text == "true")
-            return true;
-        if (text == "false")
-            return false;
-    }
-
-    return std::nullopt;
-}
-
 std::optional<juce::String> readString(
     const juce::ValueTree& tree, const juce::Identifier& property)
 {
@@ -257,7 +228,7 @@ FftWindow sanitizeWindow(const FftWindow window) noexcept
         return window;
     }
 
-    return FftWindow::periodicHann;
+    return SharedAnalysisSettings::defaultWindow;
 }
 
 SpectrumSlope sanitizeSlope(const SpectrumSlope slope) noexcept
@@ -309,38 +280,6 @@ SpectrogramHistoryMode sanitizeHistoryMode(const SpectrogramHistoryMode mode) no
     return SpectrogramHistoryMode::scroll;
 }
 
-DisplayFramePacing sanitizeDisplayFramePacing(const DisplayFramePacing framePacing) noexcept
-{
-    switch (framePacing) {
-    case DisplayFramePacing::fixedMaximum:
-    case DisplayFramePacing::adaptive:
-        return framePacing;
-    }
-
-    return DisplayFramePacing::fixedMaximum;
-}
-
-const char* tokenForDisplayFramePacing(const DisplayFramePacing framePacing) noexcept
-{
-    switch (framePacing) {
-    case DisplayFramePacing::fixedMaximum:
-        return "fixedMaximum";
-    case DisplayFramePacing::adaptive:
-        return "adaptive";
-    }
-
-    return "fixedMaximum";
-}
-
-std::optional<DisplayFramePacing> parseDisplayFramePacing(const juce::String& token)
-{
-    if (token == "fixedMaximum")
-        return DisplayFramePacing::fixedMaximum;
-    if (token == "adaptive")
-        return DisplayFramePacing::adaptive;
-    return std::nullopt;
-}
-
 const char* tokenForWindow(const FftWindow window) noexcept
 {
     switch (window) {
@@ -354,7 +293,7 @@ const char* tokenForWindow(const FftWindow window) noexcept
         return "fiveTermFlatTop";
     }
 
-    return "periodicHann";
+    return "fiveTermFlatTop";
 }
 
 std::optional<FftWindow> parseWindow(const juce::String& token)
@@ -479,7 +418,7 @@ void decodeSharedAnalysis(const juce::ValueTree& tree, SharedAnalysisSettings& d
     if (const auto value = readInteger(tree, fftSizeProperty))
         destination.fftSize = *value;
     if (const auto value = readString(tree, windowProperty))
-        destination.window = parseWindow(*value).value_or(FftWindow::periodicHann);
+        destination.window = parseWindow(*value).value_or(SharedAnalysisSettings::defaultWindow);
     if (const auto value = readInteger(tree, fftSliceRateProperty))
         destination.requestedFftSliceRateHz = *value;
     if (const auto value = readNumber(tree, frequencySpacingProperty))
@@ -492,10 +431,10 @@ void decodeSpectrum(const juce::ValueTree& tree, SpectrumSettings& destination) 
         destination.floorDb = *value;
     if (const auto value = readNumber(tree, spectrumCeilingProperty))
         destination.ceilingDb = *value;
-    if (const auto value = readBoolean(tree, temporalAveragingEnabledProperty))
-        destination.temporalAveraging.enabled = *value;
-    if (const auto value = readNumber(tree, temporalAveragingMillisecondsProperty))
-        destination.temporalAveraging.milliseconds = *value;
+    if (const auto value = readNumber(tree, attackAveragingMillisecondsProperty))
+        destination.temporalAveraging.attackMilliseconds = *value;
+    if (const auto value = readNumber(tree, releaseAveragingMillisecondsProperty))
+        destination.temporalAveraging.releaseMilliseconds = *value;
     if (const auto value = readString(tree, slopeProperty))
         destination.slope = parseSlope(*value).value_or(SpectrumSlope::flat);
     if (const auto value = readString(tree, peakHoldModeProperty)) {
@@ -534,13 +473,6 @@ void decodeLoudness(const juce::ValueTree& tree, LoudnessSettings& destination) 
         destination.referenceLufs = *value;
 }
 
-void decodeDisplay(const juce::ValueTree& tree, DisplaySettings& destination) noexcept
-{
-    if (const auto value = readString(tree, displayFramePacingProperty)) {
-        destination.framePacing
-            = parseDisplayFramePacing(*value).value_or(DisplayFramePacing::fixedMaximum);
-    }
-}
 } // namespace
 
 const juce::Identifier& AnalyzerConfigurationCodec::treeType()
@@ -561,9 +493,6 @@ AnalyzerConfiguration AnalyzerConfigurationCodec::sanitize(
     constexpr std::array fftSliceRates { 15, 30, 60, 120 };
     constexpr std::array historyDurations { 2, 5, 10, 20, 30, 60 };
 
-    configuration.display.framePacing
-        = sanitizeDisplayFramePacing(configuration.display.framePacing);
-
     auto& shared = configuration.sharedAnalysis;
     shared.fftSize
         = sanitizeChoice(shared.fftSize, fftSizes, SharedAnalysisSettings::defaultFftSize);
@@ -583,10 +512,23 @@ AnalyzerConfiguration AnalyzerConfigurationCodec::sanitize(
     if (spectrum.ceilingDb - spectrum.floorDb < SpectrumSettings::minimumVisibleSpanDb)
         spectrum.floorDb = spectrum.ceilingDb - SpectrumSettings::minimumVisibleSpanDb;
 
-    spectrum.temporalAveraging.milliseconds = clampFinite(spectrum.temporalAveraging.milliseconds,
-        TemporalAveragingSettings::minimumMilliseconds,
-        TemporalAveragingSettings::maximumMilliseconds,
-        TemporalAveragingSettings::defaultMilliseconds);
+    const auto sanitizeAveragingMilliseconds
+        = [](const double value, const double minimum, const double maximum,
+              const double fallback) noexcept {
+              if (!std::isfinite(value))
+                  return fallback;
+              return value <= 0.0 ? 0.0 : std::clamp(value, minimum, maximum);
+          };
+    spectrum.temporalAveraging.attackMilliseconds
+        = sanitizeAveragingMilliseconds(spectrum.temporalAveraging.attackMilliseconds,
+            TemporalAveragingSettings::minimumAttackMilliseconds,
+            TemporalAveragingSettings::maximumAttackMilliseconds,
+            TemporalAveragingSettings::defaultAttackMilliseconds);
+    spectrum.temporalAveraging.releaseMilliseconds
+        = sanitizeAveragingMilliseconds(spectrum.temporalAveraging.releaseMilliseconds,
+            TemporalAveragingSettings::minimumReleaseMilliseconds,
+            TemporalAveragingSettings::maximumReleaseMilliseconds,
+            TemporalAveragingSettings::defaultReleaseMilliseconds);
     spectrum.slope = sanitizeSlope(spectrum.slope);
     spectrum.peakHoldMode = sanitizePeakHoldMode(spectrum.peakHoldMode);
     spectrum.finitePeakHoldSeconds = clampFinite(spectrum.finitePeakHoldSeconds,
@@ -627,11 +569,6 @@ juce::ValueTree AnalyzerConfigurationCodec::encode(const AnalyzerConfiguration& 
     juce::ValueTree tree(treeType());
     tree.setProperty(versionProperty, juce::String(schemaVersion), nullptr);
 
-    juce::ValueTree display(displayType);
-    display.setProperty(displayFramePacingProperty,
-        tokenForDisplayFramePacing(sanitized.display.framePacing), nullptr);
-    tree.addChild(display, -1, nullptr);
-
     juce::ValueTree shared(sharedAnalysisType);
     shared.setProperty(fftSizeProperty, juce::String(sanitized.sharedAnalysis.fftSize), nullptr);
     shared.setProperty(windowProperty, tokenForWindow(sanitized.sharedAnalysis.window), nullptr);
@@ -645,10 +582,10 @@ juce::ValueTree AnalyzerConfigurationCodec::encode(const AnalyzerConfiguration& 
     spectrum.setProperty(spectrumFloorProperty, encodeNumber(sanitized.spectrum.floorDb), nullptr);
     spectrum.setProperty(
         spectrumCeilingProperty, encodeNumber(sanitized.spectrum.ceilingDb), nullptr);
-    spectrum.setProperty(temporalAveragingEnabledProperty,
-        sanitized.spectrum.temporalAveraging.enabled ? "true" : "false", nullptr);
-    spectrum.setProperty(temporalAveragingMillisecondsProperty,
-        encodeNumber(sanitized.spectrum.temporalAveraging.milliseconds), nullptr);
+    spectrum.setProperty(attackAveragingMillisecondsProperty,
+        encodeNumber(sanitized.spectrum.temporalAveraging.attackMilliseconds), nullptr);
+    spectrum.setProperty(releaseAveragingMillisecondsProperty,
+        encodeNumber(sanitized.spectrum.temporalAveraging.releaseMilliseconds), nullptr);
     spectrum.setProperty(slopeProperty, tokenForSlope(sanitized.spectrum.slope), nullptr);
     spectrum.setProperty(
         peakHoldModeProperty, tokenForPeakHoldMode(sanitized.spectrum.peakHoldMode), nullptr);
@@ -693,8 +630,6 @@ std::optional<AnalyzerConfiguration> AnalyzerConfigurationCodec::decode(const ju
     }
 
     auto configuration = defaults();
-    if (const auto display = tree.getChildWithName(displayType); display.isValid())
-        decodeDisplay(display, configuration.display);
     if (const auto shared = tree.getChildWithName(sharedAnalysisType); shared.isValid())
         decodeSharedAnalysis(shared, configuration.sharedAnalysis);
     if (const auto spectrum = tree.getChildWithName(spectrumType); spectrum.isValid())
@@ -711,41 +646,4 @@ AnalyzerConfiguration AnalyzerConfigurationCodec::decodeOrDefault(const juce::Va
     return decode(tree).value_or(defaults());
 }
 
-TemporalAveragingSettings AnalyzerConfigurationCodec::migrateLegacySmoothing(
-    const double normalizedSmoothing) noexcept
-{
-    auto migrated = TemporalAveragingSettings { };
-    if (!std::isfinite(normalizedSmoothing))
-        return migrated;
-
-    if (normalizedSmoothing <= 0.0) {
-        migrated.enabled = false;
-        return migrated;
-    }
-
-    constexpr auto offsetMilliseconds = 15.0;
-    constexpr auto scaleMilliseconds = 435.0;
-    migrated.milliseconds = std::clamp(
-        offsetMilliseconds + scaleMilliseconds * normalizedSmoothing * normalizedSmoothing,
-        TemporalAveragingSettings::minimumMilliseconds,
-        TemporalAveragingSettings::maximumMilliseconds);
-
-    return migrated;
-}
-
-AnalyzerConfiguration AnalyzerConfigurationCodec::migrateLegacy(
-    const LegacySpectrumSettings& legacy) noexcept
-{
-    auto configuration = defaults();
-    if (legacy.floorDb.has_value())
-        configuration.spectrum.floorDb = *legacy.floorDb;
-    if (legacy.ceilingDb.has_value())
-        configuration.spectrum.ceilingDb = *legacy.ceilingDb;
-    if (legacy.normalizedSmoothing.has_value()) {
-        configuration.spectrum.temporalAveraging
-            = migrateLegacySmoothing(*legacy.normalizedSmoothing);
-    }
-
-    return sanitize(configuration);
-}
 } // namespace audio_insight

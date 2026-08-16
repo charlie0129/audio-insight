@@ -19,7 +19,7 @@ const auto disabledText = juce::Colour { 0xff758396 };
 const auto accent = juce::Colour { 0xff55c7e8 };
 
 constexpr int headerHeight = 52;
-constexpr int contentHeight = 1322;
+constexpr int contentHeight = 1244;
 constexpr int sectionGap = 10;
 constexpr int sectionHeaderHeight = 34;
 constexpr int rowHeight = 34;
@@ -31,7 +31,6 @@ constexpr std::array frequencySpacingMarkValues { 0.25, 0.5, 0.75 };
 constexpr std::array frequencySpacingMarkText { "0.25", "0.5", "0.75" };
 
 enum SectionIndex : std::size_t {
-    displaySection,
     sharedSection,
     spectrumSection,
     peakRmsSection,
@@ -42,7 +41,6 @@ enum SectionIndex : std::size_t {
 };
 
 constexpr std::array sectionTitles {
-    "Display",
     "Shared analysis",
     "Spectrum",
     "Peak / RMS",
@@ -80,45 +78,57 @@ void configureSlider(juce::Slider& slider, const juce::String& name,
     slider.setColour(juce::Slider::textBoxOutlineColourId, panelOutline);
 }
 
-juce::NormalisableRange<double> makeTemporalAveragingRange()
+juce::NormalisableRange<double> makeTemporalAveragingRange(const double minimumMilliseconds,
+    const double maximumMilliseconds, const double defaultMilliseconds)
 {
-    return { 0.0, TemporalAveragingSettings::maximumMilliseconds,
-        [](const double, const double, const double proportion) {
+    return { 0.0, maximumMilliseconds,
+        [minimumMilliseconds, maximumMilliseconds](
+            const double, const double, const double proportion) {
             if (proportion <= temporalAveragingOffTrackProportion) {
-                return TemporalAveragingSettings::minimumMilliseconds * proportion
-                    / temporalAveragingOffTrackProportion;
+                return minimumMilliseconds * proportion / temporalAveragingOffTrackProportion;
             }
 
             const auto enabledProportion = (proportion - temporalAveragingOffTrackProportion)
                 / (1.0 - temporalAveragingOffTrackProportion);
-            const auto enabledRatio = TemporalAveragingSettings::maximumMilliseconds
-                / TemporalAveragingSettings::minimumMilliseconds;
-            return TemporalAveragingSettings::minimumMilliseconds
-                * std::pow(enabledRatio, enabledProportion);
+            const auto enabledRatio = maximumMilliseconds / minimumMilliseconds;
+            return minimumMilliseconds * std::pow(enabledRatio, enabledProportion);
         },
-        [](const double, const double, const double value) {
-            if (value <= TemporalAveragingSettings::minimumMilliseconds) {
-                return temporalAveragingOffTrackProportion * value
-                    / TemporalAveragingSettings::minimumMilliseconds;
+        [minimumMilliseconds, maximumMilliseconds](const double, const double, const double value) {
+            if (value <= minimumMilliseconds) {
+                return temporalAveragingOffTrackProportion * value / minimumMilliseconds;
             }
 
-            const auto enabledRatio = TemporalAveragingSettings::maximumMilliseconds
-                / TemporalAveragingSettings::minimumMilliseconds;
+            const auto enabledRatio = maximumMilliseconds / minimumMilliseconds;
             const auto enabledProportion
-                = std::log(value / TemporalAveragingSettings::minimumMilliseconds)
-                / std::log(enabledRatio);
+                = std::log(value / minimumMilliseconds) / std::log(enabledRatio);
             return temporalAveragingOffTrackProportion
                 + ((1.0 - temporalAveragingOffTrackProportion) * enabledProportion);
         },
-        [](const double, const double, const double value) {
+        [minimumMilliseconds, maximumMilliseconds, defaultMilliseconds](
+            const double, const double, const double value) {
             if (!std::isfinite(value))
-                return TemporalAveragingSettings::defaultMilliseconds;
-            if (value <= TemporalAveragingSettings::minimumMilliseconds * 0.5)
+                return defaultMilliseconds;
+            if (value <= minimumMilliseconds * 0.5)
                 return 0.0;
 
-            return std::clamp(std::round(value), TemporalAveragingSettings::minimumMilliseconds,
-                TemporalAveragingSettings::maximumMilliseconds);
+            return std::clamp(std::round(value), minimumMilliseconds, maximumMilliseconds);
         } };
+}
+
+void configureTemporalAveragingSlider(juce::Slider& slider)
+{
+    slider.setNumDecimalPlacesToDisplay(0);
+    slider.textFromValueFunction = [](const double value) {
+        if (value <= 0.0)
+            return juce::String("Off");
+        return juce::String(juce::roundToInt(value)) + " ms";
+    };
+    slider.valueFromTextFunction = [](juce::String text) {
+        text = text.trim().toLowerCase();
+        if (text == "off" || text == "none" || text == "immediate")
+            return 0.0;
+        return text.getDoubleValue();
+    };
 }
 
 juce::String formatSrgbColor(const SrgbColor color)
@@ -187,42 +197,13 @@ public:
             addAndMakeVisible(reset);
         }
 
-        configureLabel(displayStatus_,
-            "Fixed maximum requests the active display maximum; macOS controls delivery.");
-        displayStatus_.setMinimumHorizontalScale(0.75F);
-        addAndMakeVisible(displayStatus_);
-
-        configureLabel(displayFramePacingLabel_, "Frame pacing");
-        addAndMakeVisible(displayFramePacingLabel_);
-
-        displayFramePacing_.addItemList({ "Fixed maximum", "Adaptive" }, 1);
-        displayFramePacing_.setSelectedId(1, juce::dontSendNotification);
-        displayFramePacing_.setName("Display frame pacing");
-        displayFramePacing_.setTitle("Display frame pacing");
-        displayFramePacing_.setDescription(
-            "Request a fixed maximum refresh rate or let macOS adapt between supported rates");
-        displayFramePacing_.setTooltip(
-            "Fixed maximum requests the active display maximum; Adaptive permits 60 Hz through "
-            "that maximum");
-        displayFramePacing_.setComponentID("settingsDisplayFramePacing");
-        displayFramePacing_.onChange = [this] {
-            if (synchronizing_)
-                return;
-
-            configuration_.display.framePacing = displayFramePacing_.getSelectedId() == 2
-                ? DisplayFramePacing::adaptive
-                : DisplayFramePacing::fixedMaximum;
-            publishSanitizedConfiguration();
-        };
-        addAndMakeVisible(displayFramePacing_);
-
         configureLabel(
             sharedStatus_, "FFT changes restart Spectrum overlap; Peak / RMS keeps running.");
         sharedStatus_.setMinimumHorizontalScale(0.8F);
         addAndMakeVisible(sharedStatus_);
 
         fftSize_.addItemList({ "1024", "2048", "4096", "8192", "16384" }, 1);
-        fftSize_.setSelectedId(3, juce::dontSendNotification);
+        fftSize_.setSelectedId(4, juce::dontSendNotification);
         fftSize_.setName("FFT size");
         fftSize_.setTitle("FFT size");
         fftSize_.setDescription("Number of samples in each Fourier transform");
@@ -240,7 +221,7 @@ public:
         addAndMakeVisible(fftSize_);
 
         window_.addItemList({ "Rectangular", "Periodic Hann", "Blackman-Harris", "Flat-top" }, 1);
-        window_.setSelectedId(2, juce::dontSendNotification);
+        window_.setSelectedId(4, juce::dontSendNotification);
         window_.setName("FFT window");
         window_.setTitle("FFT window");
         window_.setDescription("Window function applied before each Fourier transform");
@@ -311,10 +292,12 @@ public:
 
         configureLabel(floorLabel_, "Floor");
         configureLabel(ceilingLabel_, "Ceiling");
-        configureLabel(averagingLabel_, "Temporal averaging");
+        configureLabel(attackLabel_, "Attack");
+        configureLabel(releaseLabel_, "Release");
         addAndMakeVisible(floorLabel_);
         addAndMakeVisible(ceilingLabel_);
-        addAndMakeVisible(averagingLabel_);
+        addAndMakeVisible(attackLabel_);
+        addAndMakeVisible(releaseLabel_);
 
         configureSlider(
             floor_, "Spectrum floor", "Lower decibel limit of the Spectrum display", " dB");
@@ -331,24 +314,27 @@ public:
         ceiling_.addListener(this);
         addAndMakeVisible(ceiling_);
 
-        configureSlider(averaging_, "Spectrum temporal averaging",
-            "Average Spectrum power over time; Off uses each unsmoothed FFT snapshot", "");
-        averaging_.setComponentID("settingsSpectrumTemporalAveraging");
-        averaging_.setNormalisableRange(makeTemporalAveragingRange());
-        averaging_.setNumDecimalPlacesToDisplay(0);
-        averaging_.textFromValueFunction = [](const double value) {
-            if (value <= 0.0)
-                return juce::String("Off");
-            return juce::String(juce::roundToInt(value)) + " ms";
-        };
-        averaging_.valueFromTextFunction = [](juce::String text) {
-            text = text.trim().toLowerCase();
-            if (text == "off" || text == "none" || text == "immediate")
-                return 0.0;
-            return text.getDoubleValue();
-        };
-        averaging_.addListener(this);
-        addAndMakeVisible(averaging_);
+        configureSlider(attack_, "Spectrum attack",
+            "Average rising Spectrum power over time; Off follows bursts immediately", "");
+        attack_.setComponentID("settingsSpectrumAttack");
+        attack_.setNormalisableRange(
+            makeTemporalAveragingRange(TemporalAveragingSettings::minimumAttackMilliseconds,
+                TemporalAveragingSettings::maximumAttackMilliseconds,
+                TemporalAveragingSettings::defaultAttackMilliseconds));
+        configureTemporalAveragingSlider(attack_);
+        attack_.addListener(this);
+        addAndMakeVisible(attack_);
+
+        configureSlider(release_, "Spectrum release",
+            "Average falling Spectrum power over time; Off follows drops immediately", "");
+        release_.setComponentID("settingsSpectrumRelease");
+        release_.setNormalisableRange(
+            makeTemporalAveragingRange(TemporalAveragingSettings::minimumReleaseMilliseconds,
+                TemporalAveragingSettings::maximumReleaseMilliseconds,
+                TemporalAveragingSettings::defaultReleaseMilliseconds));
+        configureTemporalAveragingSlider(release_);
+        release_.addListener(this);
+        addAndMakeVisible(release_);
 
         slope_.addItemList({ "0 dB/oct", "+3 dB/oct", "+4.5 dB/oct", "+6 dB/oct" }, 1);
         slope_.setName("Spectrum slope compensation");
@@ -559,33 +545,31 @@ public:
             addAndMakeVisible(spectrogramLabels_[index]);
         }
 
-        resetButtons_[displaySection].setComponentID("settingsDisplayReset");
         resetButtons_[spectrumSection].setComponentID("settingsSpectrumReset");
         resetButtons_[sharedSection].setComponentID("settingsSharedReset");
         resetButtons_[spectrogramSection].setComponentID("settingsSpectrogramReset");
-        resetButtons_[displaySection].setExplicitFocusOrder(2);
-        displayFramePacing_.setExplicitFocusOrder(3);
-        resetButtons_[sharedSection].setExplicitFocusOrder(4);
-        fftSize_.setExplicitFocusOrder(5);
-        window_.setExplicitFocusOrder(6);
-        fftRate_.setExplicitFocusOrder(7);
-        frequencySpacing_.setExplicitFocusOrder(8);
-        resetButtons_[spectrumSection].setExplicitFocusOrder(9);
-        floor_.setExplicitFocusOrder(10);
-        ceiling_.setExplicitFocusOrder(11);
-        averaging_.setExplicitFocusOrder(12);
-        slope_.setExplicitFocusOrder(13);
-        peakHoldMode_.setExplicitFocusOrder(14);
-        peakHoldDuration_.setExplicitFocusOrder(15);
-        traceColor_.setExplicitFocusOrder(16);
-        fillOpacity_.setExplicitFocusOrder(17);
-        resetButtons_[spectrogramSection].setExplicitFocusOrder(18);
-        palette_.setExplicitFocusOrder(19);
-        colorResponse_.setExplicitFocusOrder(20);
-        colorFloor_.setExplicitFocusOrder(21);
-        colorCeiling_.setExplicitFocusOrder(22);
-        historyDuration_.setExplicitFocusOrder(23);
-        historyMode_.setExplicitFocusOrder(24);
+        resetButtons_[sharedSection].setExplicitFocusOrder(2);
+        fftSize_.setExplicitFocusOrder(3);
+        window_.setExplicitFocusOrder(4);
+        fftRate_.setExplicitFocusOrder(5);
+        frequencySpacing_.setExplicitFocusOrder(6);
+        resetButtons_[spectrumSection].setExplicitFocusOrder(7);
+        floor_.setExplicitFocusOrder(8);
+        ceiling_.setExplicitFocusOrder(9);
+        attack_.setExplicitFocusOrder(10);
+        release_.setExplicitFocusOrder(11);
+        slope_.setExplicitFocusOrder(12);
+        peakHoldMode_.setExplicitFocusOrder(13);
+        peakHoldDuration_.setExplicitFocusOrder(14);
+        traceColor_.setExplicitFocusOrder(15);
+        fillOpacity_.setExplicitFocusOrder(16);
+        resetButtons_[spectrogramSection].setExplicitFocusOrder(17);
+        palette_.setExplicitFocusOrder(18);
+        colorResponse_.setExplicitFocusOrder(19);
+        colorFloor_.setExplicitFocusOrder(20);
+        colorCeiling_.setExplicitFocusOrder(21);
+        historyDuration_.setExplicitFocusOrder(22);
+        historyMode_.setExplicitFocusOrder(23);
         resetButtons_[peakRmsSection].setEnabled(false);
         resetButtons_[stereoSection].setComponentID("settingsStereoReset");
         configureUnavailableControl(resetButtons_[stereoSection],
@@ -593,15 +577,14 @@ public:
         resetButtons_[stereoSection].setDescription(
             "Stereo is live with a fixed design and has no adjustable settings to reset");
         resetButtons_[loudnessSection].setComponentID("settingsLoudnessReset");
-        resetButtons_[loudnessSection].setExplicitFocusOrder(25);
-        loudnessReference_.setExplicitFocusOrder(26);
+        resetButtons_[loudnessSection].setExplicitFocusOrder(24);
+        loudnessReference_.setExplicitFocusOrder(25);
 
         setConfiguration(initialConfiguration);
     }
 
     ~Content() override
     {
-        displayFramePacing_.onChange = nullptr;
         fftSize_.onChange = nullptr;
         window_.onChange = nullptr;
         fftRate_.onChange = nullptr;
@@ -615,7 +598,8 @@ public:
         traceColor_.onEscapeKey = nullptr;
         floor_.removeListener(this);
         ceiling_.removeListener(this);
-        averaging_.removeListener(this);
+        attack_.removeListener(this);
+        release_.removeListener(this);
         frequencySpacing_.removeListener(this);
         peakHoldDuration_.removeListener(this);
         fillOpacity_.removeListener(this);
@@ -662,7 +646,7 @@ public:
         const auto sectionWidth = std::min(680, available.getWidth());
         auto y = available.getY();
 
-        const std::array heights { 102, 224, 322, 92, 280, 80, 124 };
+        const std::array heights { 224, 356, 92, 280, 80, 124 };
         for (auto index = std::size_t { 0 }; index < sectionAreas_.size(); ++index) {
             sectionAreas_[index] = { available.getX(), y, sectionWidth, heights[index] };
             auto header = sectionAreas_[index].reduced(10, 0).removeFromTop(sectionHeaderHeight);
@@ -671,12 +655,6 @@ public:
             sectionHeadings_[index].setBounds(header);
             y += heights[index] + sectionGap;
         }
-
-        auto display = sectionAreas_[displaySection].reduced(12, 8);
-        display.removeFromTop(sectionHeaderHeight - 8);
-        displayStatus_.setBounds(display.removeFromTop(26));
-        layoutLabeledRow(
-            display.removeFromTop(rowHeight), displayFramePacingLabel_, displayFramePacing_);
 
         auto shared = sectionAreas_[sharedSection].reduced(12, 8);
         shared.removeFromTop(sectionHeaderHeight - 8);
@@ -690,7 +668,8 @@ public:
         spectrum.removeFromTop(sectionHeaderHeight - 8);
         layoutLabeledRow(spectrum.removeFromTop(rowHeight), floorLabel_, floor_);
         layoutLabeledRow(spectrum.removeFromTop(rowHeight), ceilingLabel_, ceiling_);
-        layoutLabeledRow(spectrum.removeFromTop(rowHeight), averagingLabel_, averaging_);
+        layoutLabeledRow(spectrum.removeFromTop(rowHeight), attackLabel_, attack_);
+        layoutLabeledRow(spectrum.removeFromTop(rowHeight), releaseLabel_, release_);
         layoutLabeledRow(spectrum.removeFromTop(rowHeight), spectrumLabels_[0], slope_);
         layoutLabeledRow(spectrum.removeFromTop(rowHeight), spectrumLabels_[1], peakHoldMode_);
         layoutLabeledRow(spectrum.removeFromTop(rowHeight), spectrumLabels_[2], peakHoldDuration_);
@@ -733,12 +712,11 @@ private:
             configuration_.spectrum.floorDb = floor_.getValue();
         else if (slider == &ceiling_)
             configuration_.spectrum.ceilingDb = ceiling_.getValue();
-        else if (slider == &averaging_) {
-            const auto milliseconds = averaging_.getValue();
-            configuration_.spectrum.temporalAveraging.enabled = milliseconds > 0.0;
-            if (milliseconds > 0.0)
-                configuration_.spectrum.temporalAveraging.milliseconds = milliseconds;
-        } else if (slider == &frequencySpacing_)
+        else if (slider == &attack_)
+            configuration_.spectrum.temporalAveraging.attackMilliseconds = attack_.getValue();
+        else if (slider == &release_)
+            configuration_.spectrum.temporalAveraging.releaseMilliseconds = release_.getValue();
+        else if (slider == &frequencySpacing_)
             configuration_.sharedAnalysis.frequencySpacing = frequencySpacing_.getValue();
         else if (slider == &peakHoldDuration_)
             configuration_.spectrum.finitePeakHoldSeconds = peakHoldDuration_.getValue();
@@ -763,10 +741,7 @@ private:
         if (synchronizing_)
             return;
 
-        if (section == displaySection) {
-            configuration_.display = AnalyzerConfigurationCodec::defaults().display;
-            publishSanitizedConfiguration();
-        } else if (section == sharedSection) {
+        if (section == sharedSection) {
             configuration_.sharedAnalysis = AnalyzerConfigurationCodec::defaults().sharedAnalysis;
             publishSanitizedConfiguration();
         } else if (section == spectrumSection) {
@@ -825,14 +800,11 @@ private:
     void synchronizeControls()
     {
         const juce::ScopedValueSetter synchronizing(synchronizing_, true);
-        displayFramePacing_.setSelectedId(
-            configuration_.display.framePacing == DisplayFramePacing::adaptive ? 2 : 1,
-            juce::dontSendNotification);
         floor_.setValue(configuration_.spectrum.floorDb, juce::dontSendNotification);
         ceiling_.setValue(configuration_.spectrum.ceilingDb, juce::dontSendNotification);
-        averaging_.setValue(configuration_.spectrum.temporalAveraging.enabled
-                ? configuration_.spectrum.temporalAveraging.milliseconds
-                : 0.0,
+        attack_.setValue(configuration_.spectrum.temporalAveraging.attackMilliseconds,
+            juce::dontSendNotification);
+        release_.setValue(configuration_.spectrum.temporalAveraging.releaseMilliseconds,
             juce::dontSendNotification);
         frequencySpacing_.setValue(
             configuration_.sharedAnalysis.frequencySpacing, juce::dontSendNotification);
@@ -925,10 +897,6 @@ private:
     std::array<juce::Label, frequencySpacingMarkValues.size()> frequencySpacingMarks_;
     juce::Rectangle<int> frequencySpacingMarkArea_;
 
-    juce::Label displayStatus_;
-    juce::Label displayFramePacingLabel_;
-    juce::ComboBox displayFramePacing_;
-
     juce::Label sharedStatus_;
     juce::ComboBox fftSize_;
     juce::ComboBox window_;
@@ -937,10 +905,12 @@ private:
 
     juce::Label floorLabel_;
     juce::Label ceilingLabel_;
-    juce::Label averagingLabel_;
+    juce::Label attackLabel_;
+    juce::Label releaseLabel_;
     juce::Slider floor_;
     juce::Slider ceiling_;
-    juce::Slider averaging_;
+    juce::Slider attack_;
+    juce::Slider release_;
     juce::ComboBox slope_;
     juce::ComboBox peakHoldMode_;
     juce::Slider peakHoldDuration_;

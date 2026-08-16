@@ -32,7 +32,7 @@ public:
 
     void runTest() override
     {
-        beginTest("Display pacing publishes immediately and resets to Fixed maximum");
+        beginTest("Attack and release use physical time with Off sentinels and log spacing");
         {
             auto callbackCount = 0;
             AnalyzerConfiguration lastPublished;
@@ -45,74 +45,57 @@ public:
                 [] { });
             panel.setBounds(0, 0, 360, 720);
 
-            auto* framePacing = dynamic_cast<juce::ComboBox*>(
-                findDescendantWithId(panel, "settingsDisplayFramePacing"));
-            auto* reset
-                = dynamic_cast<juce::Button*>(findDescendantWithId(panel, "settingsDisplayReset"));
-            expect(framePacing != nullptr);
-            expect(reset != nullptr);
-            if (framePacing == nullptr || reset == nullptr)
-                return;
-
-            expectEquals(framePacing->getNumItems(), 2);
-            expectEquals(framePacing->getText(), juce::String("Fixed maximum"));
-            framePacing->setSelectedId(2, juce::sendNotificationSync);
-            expectEquals(callbackCount, 1);
-            expect(lastPublished.display.framePacing == DisplayFramePacing::adaptive);
-
-            reset->onClick();
-            expectEquals(callbackCount, 2);
-            expect(lastPublished.display.framePacing == DisplayFramePacing::fixedMaximum);
-            expectEquals(framePacing->getText(), juce::String("Fixed maximum"));
-        }
-
-        beginTest("Temporal averaging uses physical time with an Off sentinel and log spacing");
-        {
-            auto callbackCount = 0;
-            AnalyzerConfiguration lastPublished;
-            AnalyzerSettingsPanel panel(
-                AnalyzerConfigurationCodec::defaults(),
-                [&](const AnalyzerConfiguration& configuration) {
-                    ++callbackCount;
-                    lastPublished = configuration;
-                },
-                [] { });
-            panel.setBounds(0, 0, 360, 720);
+            expect(findDescendantWithId(panel, "settingsDisplayFramePacing") == nullptr);
+            expect(findDescendantWithId(panel, "settingsDisplayReset") == nullptr);
 
             auto* floor
                 = dynamic_cast<juce::Slider*>(findDescendantWithId(panel, "settingsSpectrumFloor"));
-            auto* averaging = dynamic_cast<juce::Slider*>(
-                findDescendantWithId(panel, "settingsSpectrumTemporalAveraging"));
+            auto* attack = dynamic_cast<juce::Slider*>(
+                findDescendantWithId(panel, "settingsSpectrumAttack"));
+            auto* release = dynamic_cast<juce::Slider*>(
+                findDescendantWithId(panel, "settingsSpectrumRelease"));
             auto* frequencySpacing = dynamic_cast<juce::Slider*>(
                 findDescendantWithId(panel, "settingsFrequencySpacing"));
             expect(floor != nullptr);
-            expect(averaging != nullptr);
+            expect(attack != nullptr);
+            expect(release != nullptr);
             expect(frequencySpacing != nullptr);
-            if (floor == nullptr || averaging == nullptr || frequencySpacing == nullptr)
+            if (floor == nullptr || attack == nullptr || release == nullptr
+                || frequencySpacing == nullptr) {
                 return;
-
-            expect(!floor->isScrollWheelEnabled());
-            expect(!averaging->isScrollWheelEnabled());
-            expect(!frequencySpacing->isScrollWheelEnabled());
-            expectWithinAbsoluteError(averaging->getValue(), 75.0, 1.0e-12);
-            expectEquals(averaging->getTextFromValue(75.0), juce::String("75 ms"));
-            expectEquals(averaging->getTextFromValue(0.0), juce::String("Off"));
-            auto averagingAccessibility = averaging->createAccessibilityHandler();
-            expect(averagingAccessibility != nullptr);
-            expect(averagingAccessibility != nullptr
-                && averagingAccessibility->getValueInterface() != nullptr);
-            if (averagingAccessibility != nullptr
-                && averagingAccessibility->getValueInterface() != nullptr) {
-                expectEquals(averagingAccessibility->getValueInterface()->getCurrentValueAsString(),
-                    juce::String("75 ms"));
             }
 
-            const auto enabledStart = averaging->valueToProportionOfLength(
-                TemporalAveragingSettings::minimumMilliseconds);
-            const auto enabledMidpoint = (enabledStart + 1.0) * 0.5;
-            expectWithinAbsoluteError(averaging->proportionOfLengthToValue(enabledMidpoint),
-                std::sqrt(TemporalAveragingSettings::minimumMilliseconds
-                    * TemporalAveragingSettings::maximumMilliseconds),
+            expect(!floor->isScrollWheelEnabled());
+            expect(!attack->isScrollWheelEnabled());
+            expect(!release->isScrollWheelEnabled());
+            expect(!frequencySpacing->isScrollWheelEnabled());
+            expectWithinAbsoluteError(attack->getValue(), 0.0, 1.0e-12);
+            expectWithinAbsoluteError(release->getValue(), 250.0, 1.0e-12);
+            expectEquals(attack->getTextFromValue(0.0), juce::String("Off"));
+            expectEquals(release->getTextFromValue(250.0), juce::String("250 ms"));
+            auto attackAccessibility = attack->createAccessibilityHandler();
+            expect(attackAccessibility != nullptr);
+            expect(attackAccessibility != nullptr
+                && attackAccessibility->getValueInterface() != nullptr);
+            if (attackAccessibility != nullptr
+                && attackAccessibility->getValueInterface() != nullptr) {
+                expectEquals(attackAccessibility->getValueInterface()->getCurrentValueAsString(),
+                    juce::String("Off"));
+            }
+
+            const auto attackStart = attack->valueToProportionOfLength(
+                TemporalAveragingSettings::minimumAttackMilliseconds);
+            const auto attackMidpoint = (attackStart + 1.0) * 0.5;
+            expectWithinAbsoluteError(attack->proportionOfLengthToValue(attackMidpoint),
+                std::sqrt(TemporalAveragingSettings::minimumAttackMilliseconds
+                    * TemporalAveragingSettings::maximumAttackMilliseconds),
+                1.0e-9);
+            const auto releaseStart = release->valueToProportionOfLength(
+                TemporalAveragingSettings::minimumReleaseMilliseconds);
+            const auto releaseMidpoint = (releaseStart + 1.0) * 0.5;
+            expectWithinAbsoluteError(release->proportionOfLengthToValue(releaseMidpoint),
+                std::sqrt(TemporalAveragingSettings::minimumReleaseMilliseconds
+                    * TemporalAveragingSettings::maximumReleaseMilliseconds),
                 1.0e-9);
             expectWithinAbsoluteError(frequencySpacing->getInterval(), 0.0, 1.0e-12);
 
@@ -137,28 +120,18 @@ public:
             expectEquals(callbackCount, 1);
             expectWithinAbsoluteError(lastPublished.spectrum.floorDb, -110.0, 1.0e-12);
 
-            averaging->setValue(0.0, juce::sendNotificationSync);
+            attack->setValue(25.0, juce::sendNotificationSync);
             expectEquals(callbackCount, 2);
-            expect(!lastPublished.spectrum.temporalAveraging.enabled);
-            if (averagingAccessibility != nullptr
-                && averagingAccessibility->getValueInterface() != nullptr) {
-                expectEquals(averagingAccessibility->getValueInterface()->getCurrentValueAsString(),
-                    juce::String("Off"));
-            }
-
-            averaging->setValue(25.0, juce::sendNotificationSync);
-            expectEquals(callbackCount, 3);
-            expect(lastPublished.spectrum.temporalAveraging.enabled);
-            expectWithinAbsoluteError(lastPublished.spectrum.temporalAveraging.milliseconds,
-                TemporalAveragingSettings::minimumMilliseconds, 1.0e-12);
-
-            averaging->setValue(625.0, juce::sendNotificationSync);
-            expectEquals(callbackCount, 4);
             expectWithinAbsoluteError(
-                lastPublished.spectrum.temporalAveraging.milliseconds, 625.0, 1.0e-12);
+                lastPublished.spectrum.temporalAveraging.attackMilliseconds, 25.0, 1.0e-12);
+
+            release->setValue(625.0, juce::sendNotificationSync);
+            expectEquals(callbackCount, 3);
+            expectWithinAbsoluteError(
+                lastPublished.spectrum.temporalAveraging.releaseMilliseconds, 625.0, 1.0e-12);
 
             frequencySpacing->setValue(0.401234, juce::sendNotificationSync);
-            expectEquals(callbackCount, 5);
+            expectEquals(callbackCount, 4);
             expectWithinAbsoluteError(
                 lastPublished.sharedAnalysis.frequencySpacing, 0.401234, 1.0e-12);
         }
@@ -206,8 +179,8 @@ public:
             auto configuration = AnalyzerConfigurationCodec::defaults();
             configuration.spectrum.floorDb = -140.0;
             configuration.spectrum.ceilingDb = 6.0;
-            configuration.spectrum.temporalAveraging.enabled = false;
-            configuration.spectrum.temporalAveraging.milliseconds = 500.0;
+            configuration.spectrum.temporalAveraging.attackMilliseconds = 125.0;
+            configuration.spectrum.temporalAveraging.releaseMilliseconds = 500.0;
             configuration.spectrum.slope = SpectrumSlope::db6PerOctave;
             configuration.spectrum.peakHoldMode = SpectrumPeakHoldMode::infinite;
             configuration.spectrum.finitePeakHoldSeconds = 9.0;
@@ -235,9 +208,10 @@ public:
             expectEquals(callbackCount, 1);
             expectWithinAbsoluteError(lastPublished.spectrum.floorDb, -90.0, 1.0e-12);
             expectWithinAbsoluteError(lastPublished.spectrum.ceilingDb, 0.0, 1.0e-12);
-            expect(lastPublished.spectrum.temporalAveraging.enabled);
             expectWithinAbsoluteError(
-                lastPublished.spectrum.temporalAveraging.milliseconds, 75.0, 1.0e-12);
+                lastPublished.spectrum.temporalAveraging.attackMilliseconds, 0.0, 1.0e-12);
+            expectWithinAbsoluteError(
+                lastPublished.spectrum.temporalAveraging.releaseMilliseconds, 250.0, 1.0e-12);
             expect(lastPublished.spectrum.slope == SpectrumSlope::flat);
             expect(lastPublished.spectrum.peakHoldMode == SpectrumPeakHoldMode::off);
             expectWithinAbsoluteError(lastPublished.spectrum.finitePeakHoldSeconds, 2.0, 1.0e-12);
@@ -249,7 +223,7 @@ public:
         {
             auto configuration = AnalyzerConfigurationCodec::defaults();
             configuration.sharedAnalysis.fftSize = 16384;
-            configuration.sharedAnalysis.window = FftWindow::fiveTermFlatTop;
+            configuration.sharedAnalysis.window = FftWindow::periodicHann;
             configuration.sharedAnalysis.requestedFftSliceRateHz = 120;
             configuration.sharedAnalysis.frequencySpacing = 0.25;
 
@@ -272,10 +246,10 @@ public:
 
             reset->onClick();
             expectEquals(callbackCount, 1);
-            expectEquals(lastPublished.sharedAnalysis.fftSize, 4096);
-            expect(lastPublished.sharedAnalysis.window == FftWindow::periodicHann);
+            expectEquals(lastPublished.sharedAnalysis.fftSize, 8192);
+            expect(lastPublished.sharedAnalysis.window == FftWindow::fiveTermFlatTop);
             expectEquals(lastPublished.sharedAnalysis.requestedFftSliceRateHz, 60);
-            expectWithinAbsoluteError(lastPublished.sharedAnalysis.frequencySpacing, 1.0, 1.0e-12);
+            expectWithinAbsoluteError(lastPublished.sharedAnalysis.frequencySpacing, 0.8, 1.0e-12);
         }
 
         beginTest("Every implemented analyzer section exposes only its supported controls");
@@ -297,9 +271,8 @@ public:
                 expect(component != nullptr && component->isEnabled());
             };
 
-            expectAvailable("settingsSpectrumTemporalAveraging");
-            expectAvailable("settingsDisplayFramePacing");
-            expectAvailable("settingsDisplayReset");
+            expectAvailable("settingsSpectrumAttack");
+            expectAvailable("settingsSpectrumRelease");
             expectAvailable("settingsSpectrumSlope");
             expectAvailable("settingsSpectrumPeakHoldMode");
             expectAvailable("settingsSpectrumTraceColor");
@@ -690,12 +663,12 @@ public:
             panel.setBounds(0, 0, 360, 720);
 
             auto replacement = AnalyzerConfigurationCodec::defaults();
-            replacement.display.framePacing = DisplayFramePacing::adaptive;
             replacement.sharedAnalysis.fftSize = 8192;
             replacement.sharedAnalysis.window = FftWindow::fiveTermFlatTop;
             replacement.sharedAnalysis.requestedFftSliceRateHz = 120;
             replacement.sharedAnalysis.frequencySpacing = 0.5;
-            replacement.spectrum.temporalAveraging.milliseconds = 125.0;
+            replacement.spectrum.temporalAveraging.attackMilliseconds = 125.0;
+            replacement.spectrum.temporalAveraging.releaseMilliseconds = 500.0;
             replacement.spectrum.slope = SpectrumSlope::db3PerOctave;
             replacement.spectrum.peakHoldMode = SpectrumPeakHoldMode::finite;
             replacement.spectrum.finitePeakHoldSeconds = 4.25;
@@ -711,20 +684,24 @@ public:
             panel.setConfiguration(replacement);
             expectEquals(callbackCount, 0);
             expectWithinAbsoluteError(
-                panel.getConfiguration().spectrum.temporalAveraging.milliseconds, 125.0, 1.0e-12);
+                panel.getConfiguration().spectrum.temporalAveraging.attackMilliseconds, 125.0,
+                1.0e-12);
+            expectWithinAbsoluteError(
+                panel.getConfiguration().spectrum.temporalAveraging.releaseMilliseconds, 500.0,
+                1.0e-12);
 
             auto* fftSizeControl
                 = dynamic_cast<juce::ComboBox*>(findDescendantWithId(panel, "settingsFftSize"));
-            auto* framePacing = dynamic_cast<juce::ComboBox*>(
-                findDescendantWithId(panel, "settingsDisplayFramePacing"));
             auto* window
                 = dynamic_cast<juce::ComboBox*>(findDescendantWithId(panel, "settingsFftWindow"));
             auto* fftRate = dynamic_cast<juce::ComboBox*>(
                 findDescendantWithId(panel, "settingsFftSliceRate"));
             auto* spacing = dynamic_cast<juce::Slider*>(
                 findDescendantWithId(panel, "settingsFrequencySpacing"));
-            auto* averaging = dynamic_cast<juce::Slider*>(
-                findDescendantWithId(panel, "settingsSpectrumTemporalAveraging"));
+            auto* attack = dynamic_cast<juce::Slider*>(
+                findDescendantWithId(panel, "settingsSpectrumAttack"));
+            auto* release = dynamic_cast<juce::Slider*>(
+                findDescendantWithId(panel, "settingsSpectrumRelease"));
             auto* slope = dynamic_cast<juce::ComboBox*>(
                 findDescendantWithId(panel, "settingsSpectrumSlope"));
             auto* peakHoldMode = dynamic_cast<juce::ComboBox*>(
@@ -749,14 +726,16 @@ public:
                 findDescendantWithId(panel, "settingsSpectrogramHistoryMode"));
             auto* reference = dynamic_cast<juce::Slider*>(
                 findDescendantWithId(panel, "settingsLoudnessReference"));
-            expect(framePacing != nullptr && framePacing->getText() == "Adaptive");
             expect(fftSizeControl != nullptr && fftSizeControl->getText() == "8192");
             expect(window != nullptr && window->getText() == "Flat-top");
             expect(fftRate != nullptr && fftRate->getText() == "120 Hz");
             expect(spacing != nullptr && std::abs(spacing->getValue() - 0.5) < 1.0e-12);
-            expect(averaging != nullptr);
-            if (averaging != nullptr)
-                expectWithinAbsoluteError(averaging->getValue(), 125.0, 1.0e-12);
+            expect(attack != nullptr);
+            if (attack != nullptr)
+                expectWithinAbsoluteError(attack->getValue(), 125.0, 1.0e-12);
+            expect(release != nullptr);
+            if (release != nullptr)
+                expectWithinAbsoluteError(release->getValue(), 500.0, 1.0e-12);
             expect(slope != nullptr && slope->getText() == "+3 dB/oct");
             expect(peakHoldMode != nullptr && peakHoldMode->getText() == "Finite");
             expect(peakHoldDuration != nullptr && peakHoldDuration->isEnabled());
@@ -815,8 +794,6 @@ public:
 
             constexpr std::array expectedControls {
                 ExpectedControl { "settingsClose", "Close" },
-                ExpectedControl { "settingsDisplayReset", "Display" },
-                ExpectedControl { "settingsDisplayFramePacing", "Display frame pacing" },
                 ExpectedControl { "settingsSharedReset", "Shared analysis" },
                 ExpectedControl { "settingsFftSize", "FFT size" },
                 ExpectedControl { "settingsFftWindow", "FFT window" },
@@ -825,8 +802,8 @@ public:
                 ExpectedControl { "settingsSpectrumReset", "Spectrum" },
                 ExpectedControl { "settingsSpectrumFloor", "Spectrum floor" },
                 ExpectedControl { "settingsSpectrumCeiling", "Spectrum ceiling" },
-                ExpectedControl {
-                    "settingsSpectrumTemporalAveraging", "Spectrum temporal averaging" },
+                ExpectedControl { "settingsSpectrumAttack", "Spectrum attack" },
+                ExpectedControl { "settingsSpectrumRelease", "Spectrum release" },
                 ExpectedControl { "settingsSpectrumSlope", "Spectrum slope compensation" },
                 ExpectedControl { "settingsSpectrumPeakHoldMode", "Spectrum peak hold mode" },
                 ExpectedControl { "settingsSpectrumTraceColor", "Spectrum trace colour" },

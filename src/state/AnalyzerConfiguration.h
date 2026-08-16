@@ -52,35 +52,38 @@ enum class SpectrogramHistoryMode {
     overwrite,
 };
 
-enum class DisplayFramePacing {
-    fixedMaximum,
-    adaptive,
-};
-
-struct DisplaySettings final {
-    DisplayFramePacing framePacing = DisplayFramePacing::fixedMaximum;
-};
-
 struct SharedAnalysisSettings final {
-    static constexpr int defaultFftSize = 4096;
+    static constexpr int defaultFftSize = 8192;
+    static constexpr FftWindow defaultWindow = FftWindow::fiveTermFlatTop;
     static constexpr int defaultFftSliceRateHz = 60;
     static constexpr double minimumFrequencySpacing = 0.0;
     static constexpr double maximumFrequencySpacing = 1.0;
-    static constexpr double defaultFrequencySpacing = 1.0;
+    static constexpr double defaultFrequencySpacing = 0.8;
 
     int fftSize = defaultFftSize;
-    FftWindow window = FftWindow::periodicHann;
+    FftWindow window = defaultWindow;
     int requestedFftSliceRateHz = defaultFftSliceRateHz;
     double frequencySpacing = defaultFrequencySpacing;
 };
 
 struct TemporalAveragingSettings final {
-    static constexpr double minimumMilliseconds = 25.0;
-    static constexpr double maximumMilliseconds = 2000.0;
-    static constexpr double defaultMilliseconds = 75.0;
+    static constexpr double minimumAttackMilliseconds
+        = SpectrumTemporalConfiguration::minimumAttackMilliseconds;
+    static constexpr double maximumAttackMilliseconds
+        = SpectrumTemporalConfiguration::maximumAttackMilliseconds;
+    static constexpr double defaultAttackMilliseconds
+        = SpectrumTemporalConfiguration::defaultAttackMilliseconds;
+    static constexpr double minimumReleaseMilliseconds
+        = SpectrumTemporalConfiguration::minimumReleaseMilliseconds;
+    static constexpr double maximumReleaseMilliseconds
+        = SpectrumTemporalConfiguration::maximumReleaseMilliseconds;
+    static constexpr double defaultReleaseMilliseconds
+        = SpectrumTemporalConfiguration::defaultReleaseMilliseconds;
 
-    bool enabled = true;
-    double milliseconds = defaultMilliseconds;
+    // Zero is the canonical Off value and follows the current FFT power
+    // immediately in that direction.
+    double attackMilliseconds = defaultAttackMilliseconds;
+    double releaseMilliseconds = defaultReleaseMilliseconds;
 };
 
 struct SpectrumSettings final {
@@ -149,7 +152,6 @@ struct LoudnessSettings final {
     gives those panels no persistent adjustable settings.
 */
 struct AnalyzerConfiguration final {
-    DisplaySettings display;
     SharedAnalysisSettings sharedAnalysis;
     SpectrumSettings spectrum;
     SpectrogramSettings spectrogram;
@@ -157,13 +159,6 @@ struct AnalyzerConfiguration final {
 };
 
 using AnalyzerConfigurationSnapshot = AnalyzerConfiguration;
-
-/** Values read from the pre-configuration Spectrum compatibility shims. */
-struct LegacySpectrumSettings final {
-    std::optional<double> floorDb;
-    std::optional<double> ceilingDb;
-    std::optional<double> normalizedSmoothing;
-};
 
 /**
     Strict versioned ValueTree boundary for per-instance analyzer state.
@@ -176,7 +171,7 @@ struct LegacySpectrumSettings final {
 */
 class AnalyzerConfigurationCodec final {
 public:
-    static constexpr int schemaVersion = 2;
+    static constexpr int schemaVersion = 3;
 
     [[nodiscard]] static const juce::Identifier& treeType();
     [[nodiscard]] static AnalyzerConfiguration defaults() noexcept;
@@ -189,16 +184,11 @@ public:
         Decodes a recognized current-schema tree.
 
         A disengaged result means that the tree type, version, or structural
-        shape is not this schema. A present but malformed current subtree should
-        therefore be passed to decodeOrDefault rather than treated as legacy;
-        legacy migration is only for state with no analyzer subtree at all.
+        shape is not this schema. Callers that choose decodeOrDefault restore
+        the current compiled defaults for any such tree; older analyzer schemas
+        are deliberately not migrated.
     */
     [[nodiscard]] static std::optional<AnalyzerConfiguration> decode(const juce::ValueTree& tree);
     [[nodiscard]] static AnalyzerConfiguration decodeOrDefault(const juce::ValueTree& tree);
-
-    [[nodiscard]] static TemporalAveragingSettings migrateLegacySmoothing(
-        double normalizedSmoothing) noexcept;
-    [[nodiscard]] static AnalyzerConfiguration migrateLegacy(
-        const LegacySpectrumSettings& legacy) noexcept;
 };
 } // namespace audio_insight

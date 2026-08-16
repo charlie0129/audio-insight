@@ -32,17 +32,17 @@ bool configurationsMatch(
     const auto near
         = [](const double left, const double right) { return std::abs(left - right) <= epsilon; };
 
-    return first.display.framePacing == second.display.framePacing
-        && first.sharedAnalysis.fftSize == second.sharedAnalysis.fftSize
+    return first.sharedAnalysis.fftSize == second.sharedAnalysis.fftSize
         && first.sharedAnalysis.window == second.sharedAnalysis.window
         && first.sharedAnalysis.requestedFftSliceRateHz
         == second.sharedAnalysis.requestedFftSliceRateHz
         && near(first.sharedAnalysis.frequencySpacing, second.sharedAnalysis.frequencySpacing)
         && near(first.spectrum.floorDb, second.spectrum.floorDb)
         && near(first.spectrum.ceilingDb, second.spectrum.ceilingDb)
-        && first.spectrum.temporalAveraging.enabled == second.spectrum.temporalAveraging.enabled
-        && near(first.spectrum.temporalAveraging.milliseconds,
-            second.spectrum.temporalAveraging.milliseconds)
+        && near(first.spectrum.temporalAveraging.attackMilliseconds,
+            second.spectrum.temporalAveraging.attackMilliseconds)
+        && near(first.spectrum.temporalAveraging.releaseMilliseconds,
+            second.spectrum.temporalAveraging.releaseMilliseconds)
         && first.spectrum.slope == second.spectrum.slope
         && first.spectrum.peakHoldMode == second.spectrum.peakHoldMode
         && near(first.spectrum.finitePeakHoldSeconds, second.spectrum.finitePeakHoldSeconds)
@@ -69,18 +69,18 @@ public:
         {
             const auto configuration = AnalyzerConfigurationCodec::defaults();
 
-            expect(configuration.display.framePacing == DisplayFramePacing::fixedMaximum);
-            expectEquals(configuration.sharedAnalysis.fftSize, 4096);
-            expect(configuration.sharedAnalysis.window == FftWindow::periodicHann);
+            expectEquals(configuration.sharedAnalysis.fftSize, 8192);
+            expect(configuration.sharedAnalysis.window == FftWindow::fiveTermFlatTop);
             expectEquals(configuration.sharedAnalysis.requestedFftSliceRateHz, 60);
-            expectWithinAbsoluteError(configuration.sharedAnalysis.frequencySpacing, 1.0, 1.0e-12);
+            expectWithinAbsoluteError(configuration.sharedAnalysis.frequencySpacing, 0.8, 1.0e-12);
 
             expectWithinAbsoluteError(configuration.spectrum.floorDb, -90.0, 1.0e-12);
             expectWithinAbsoluteError(configuration.spectrum.ceilingDb, 0.0, 1.0e-12);
             expectWithinAbsoluteError(SpectrumSettings::minimumVisibleSpanDb, 24.0, 1.0e-12);
-            expect(configuration.spectrum.temporalAveraging.enabled);
             expectWithinAbsoluteError(
-                configuration.spectrum.temporalAveraging.milliseconds, 75.0, 1.0e-12);
+                configuration.spectrum.temporalAveraging.attackMilliseconds, 0.0, 1.0e-12);
+            expectWithinAbsoluteError(
+                configuration.spectrum.temporalAveraging.releaseMilliseconds, 250.0, 1.0e-12);
             expect(configuration.spectrum.slope == SpectrumSlope::flat);
             expect(configuration.spectrum.peakHoldMode == SpectrumPeakHoldMode::off);
             expectWithinAbsoluteError(configuration.spectrum.finitePeakHoldSeconds, 2.0, 1.0e-12);
@@ -101,15 +101,14 @@ public:
         beginTest("Sanitization enforces choices, ranges, steps, and both minimum spans");
         {
             auto input = AnalyzerConfigurationCodec::defaults();
-            input.display.framePacing = static_cast<DisplayFramePacing>(99);
             input.sharedAnalysis.fftSize = 1000;
             input.sharedAnalysis.window = static_cast<FftWindow>(99);
             input.sharedAnalysis.requestedFftSliceRateHz = 90;
             input.sharedAnalysis.frequencySpacing = -0.25;
             input.spectrum.floorDb = 100.0;
             input.spectrum.ceilingDb = -100.0;
-            input.spectrum.temporalAveraging.enabled = false;
-            input.spectrum.temporalAveraging.milliseconds = 4000.0;
+            input.spectrum.temporalAveraging.attackMilliseconds = 2.0;
+            input.spectrum.temporalAveraging.releaseMilliseconds = 4000.0;
             input.spectrum.slope = static_cast<SpectrumSlope>(99);
             input.spectrum.peakHoldMode = static_cast<SpectrumPeakHoldMode>(99);
             input.spectrum.finitePeakHoldSeconds = 0.1;
@@ -123,16 +122,16 @@ public:
             input.loudness.referenceLufs = -22.74;
 
             const auto sanitized = AnalyzerConfigurationCodec::sanitize(input);
-            expect(sanitized.display.framePacing == DisplayFramePacing::fixedMaximum);
-            expectEquals(sanitized.sharedAnalysis.fftSize, 4096);
-            expect(sanitized.sharedAnalysis.window == FftWindow::periodicHann);
+            expectEquals(sanitized.sharedAnalysis.fftSize, 8192);
+            expect(sanitized.sharedAnalysis.window == FftWindow::fiveTermFlatTop);
             expectEquals(sanitized.sharedAnalysis.requestedFftSliceRateHz, 60);
             expectWithinAbsoluteError(sanitized.sharedAnalysis.frequencySpacing, 0.0, 1.0e-12);
             expectWithinAbsoluteError(sanitized.spectrum.floorDb, -48.0, 1.0e-12);
             expectWithinAbsoluteError(sanitized.spectrum.ceilingDb, -24.0, 1.0e-12);
-            expect(!sanitized.spectrum.temporalAveraging.enabled);
             expectWithinAbsoluteError(
-                sanitized.spectrum.temporalAveraging.milliseconds, 2000.0, 1.0e-12);
+                sanitized.spectrum.temporalAveraging.attackMilliseconds, 5.0, 1.0e-12);
+            expectWithinAbsoluteError(
+                sanitized.spectrum.temporalAveraging.releaseMilliseconds, 2000.0, 1.0e-12);
             expect(sanitized.spectrum.slope == SpectrumSlope::flat);
             expect(sanitized.spectrum.peakHoldMode == SpectrumPeakHoldMode::off);
             expectWithinAbsoluteError(sanitized.spectrum.finitePeakHoldSeconds, 0.25, 1.0e-12);
@@ -151,17 +150,21 @@ public:
             auto input = AnalyzerConfigurationCodec::defaults();
             input.sharedAnalysis.frequencySpacing = std::numeric_limits<double>::quiet_NaN();
             input.spectrum.floorDb = std::numeric_limits<double>::infinity();
-            input.spectrum.temporalAveraging.milliseconds
+            input.spectrum.temporalAveraging.attackMilliseconds
+                = std::numeric_limits<double>::quiet_NaN();
+            input.spectrum.temporalAveraging.releaseMilliseconds
                 = std::numeric_limits<double>::quiet_NaN();
             input.spectrum.fillOpacity = -std::numeric_limits<double>::infinity();
             input.spectrogram.colorResponse = std::numeric_limits<double>::quiet_NaN();
             input.loudness.referenceLufs = std::numeric_limits<double>::infinity();
 
             const auto sanitized = AnalyzerConfigurationCodec::sanitize(input);
-            expectWithinAbsoluteError(sanitized.sharedAnalysis.frequencySpacing, 1.0, 1.0e-12);
+            expectWithinAbsoluteError(sanitized.sharedAnalysis.frequencySpacing, 0.8, 1.0e-12);
             expectWithinAbsoluteError(sanitized.spectrum.floorDb, -90.0, 1.0e-12);
             expectWithinAbsoluteError(
-                sanitized.spectrum.temporalAveraging.milliseconds, 75.0, 1.0e-12);
+                sanitized.spectrum.temporalAveraging.attackMilliseconds, 0.0, 1.0e-12);
+            expectWithinAbsoluteError(
+                sanitized.spectrum.temporalAveraging.releaseMilliseconds, 250.0, 1.0e-12);
             expectWithinAbsoluteError(sanitized.spectrum.fillOpacity, 0.18, 1.0e-12);
             expectWithinAbsoluteError(sanitized.spectrogram.colorResponse, 0.0, 1.0e-12);
             expectWithinAbsoluteError(sanitized.loudness.referenceLufs, -23.0, 1.0e-12);
@@ -170,15 +173,14 @@ public:
         beginTest("The complete current schema round-trips through ValueTree XML");
         {
             auto expected = AnalyzerConfigurationCodec::defaults();
-            expected.display.framePacing = DisplayFramePacing::adaptive;
             expected.sharedAnalysis.fftSize = 16384;
             expected.sharedAnalysis.window = FftWindow::fiveTermFlatTop;
             expected.sharedAnalysis.requestedFftSliceRateHz = 120;
             expected.sharedAnalysis.frequencySpacing = 0.35;
             expected.spectrum.floorDb = -132.0;
             expected.spectrum.ceilingDb = 6.0;
-            expected.spectrum.temporalAveraging.enabled = false;
-            expected.spectrum.temporalAveraging.milliseconds = 1250.5;
+            expected.spectrum.temporalAveraging.attackMilliseconds = 125.5;
+            expected.spectrum.temporalAveraging.releaseMilliseconds = 1250.5;
             expected.spectrum.slope = SpectrumSlope::db4Point5PerOctave;
             expected.spectrum.peakHoldMode = SpectrumPeakHoldMode::infinite;
             expected.spectrum.finitePeakHoldSeconds = 9.25;
@@ -195,8 +197,8 @@ public:
             const auto encoded = AnalyzerConfigurationCodec::encode(expected);
             expect(encoded.hasType(AnalyzerConfigurationCodec::treeType()));
             expectEquals(encoded.getNumProperties(), 1);
-            expectEquals(encoded.getNumChildren(), 5);
-            expectEquals(encoded.getChildWithName("Display").getNumProperties(), 1);
+            expectEquals(encoded.getNumChildren(), 4);
+            expect(!encoded.getChildWithName("Display").isValid());
             expectEquals(encoded.getChildWithName("SharedAnalysis").getNumProperties(), 4);
             expectEquals(encoded.getChildWithName("Spectrum").getNumProperties(), 9);
             expectEquals(encoded.getChildWithName("Spectrogram").getNumProperties(), 6);
@@ -239,19 +241,6 @@ public:
             constexpr std::array historyDurations { 2, 5, 10, 20, 30, 60 };
             constexpr std::array historyModes { SpectrogramHistoryMode::scroll,
                 SpectrogramHistoryMode::overwrite };
-            constexpr std::array framePacingModes { DisplayFramePacing::fixedMaximum,
-                DisplayFramePacing::adaptive };
-
-            for (const auto choice : framePacingModes) {
-                auto configuration = AnalyzerConfigurationCodec::defaults();
-                configuration.display.framePacing = choice;
-                const auto decoded = AnalyzerConfigurationCodec::decode(
-                    AnalyzerConfigurationCodec::encode(configuration));
-                expect(decoded.has_value());
-                if (decoded.has_value())
-                    expect(decoded->display.framePacing == choice);
-            }
-
             for (const auto choice : fftSizes) {
                 auto configuration = AnalyzerConfigurationCodec::defaults();
                 configuration.sharedAnalysis.fftSize = choice;
@@ -329,14 +318,14 @@ public:
         beginTest("Recognized partial state defaults and sanitizes individual settings");
         {
             juce::ValueTree partial(AnalyzerConfigurationCodec::treeType());
-            partial.setProperty("version", "2", nullptr);
+            partial.setProperty("version", "3", nullptr);
             juce::ValueTree shared("SharedAnalysis");
             shared.setProperty("frequencySpacing", "2.5", nullptr);
             shared.setProperty("fftSize", "not-an-integer", nullptr);
             partial.addChild(shared, -1, nullptr);
             juce::ValueTree spectrum("Spectrum");
             spectrum.setProperty("floorDb", "not-a-number", nullptr);
-            spectrum.setProperty("temporalAveragingEnabled", "1", nullptr);
+            spectrum.setProperty("attackAveragingMilliseconds", "not-a-number", nullptr);
             spectrum.setProperty("slope", "unknown", nullptr);
             spectrum.setProperty("traceColorSrgb", "16777216", nullptr);
             partial.addChild(spectrum, -1, nullptr);
@@ -348,16 +337,18 @@ public:
             const auto decoded = AnalyzerConfigurationCodec::decode(partial);
             expect(decoded.has_value());
             if (decoded.has_value()) {
-                expectEquals(decoded->sharedAnalysis.fftSize, 4096);
+                expectEquals(decoded->sharedAnalysis.fftSize, 8192);
                 expectWithinAbsoluteError(decoded->sharedAnalysis.frequencySpacing, 1.0, 1.0e-12);
                 expectWithinAbsoluteError(decoded->spectrum.floorDb, -90.0, 1.0e-12);
-                expect(decoded->spectrum.temporalAveraging.enabled);
+                expectWithinAbsoluteError(
+                    decoded->spectrum.temporalAveraging.attackMilliseconds, 0.0, 1.0e-12);
+                expectWithinAbsoluteError(
+                    decoded->spectrum.temporalAveraging.releaseMilliseconds, 250.0, 1.0e-12);
                 expect(decoded->spectrum.slope == SpectrumSlope::flat);
                 expect(decoded->spectrum.traceColor == SpectrumSettings::defaultTraceColor);
                 expectEquals(decoded->spectrogram.historyDurationSeconds, 10);
                 expect(decoded->spectrogram.palette == SpectrogramPalette::blueFire);
                 expectWithinAbsoluteError(decoded->loudness.referenceLufs, -23.0, 1.0e-12);
-                expect(decoded->display.framePacing == DisplayFramePacing::fixedMaximum);
             }
         }
 
@@ -371,12 +362,11 @@ public:
             expect(!AnalyzerConfigurationCodec::decode(missingVersion).has_value());
 
             auto unknownVersion = AnalyzerConfigurationCodec::encode({ });
-            unknownVersion.setProperty("version", "3", nullptr);
+            unknownVersion.setProperty("version", "4", nullptr);
             expect(!AnalyzerConfigurationCodec::decode(unknownVersion).has_value());
 
             auto oldVersion = AnalyzerConfigurationCodec::encode({ });
-            oldVersion.setProperty("version", "1", nullptr);
-            oldVersion.removeChild(oldVersion.getChildWithName("Display"), nullptr);
+            oldVersion.setProperty("version", "2", nullptr);
             expect(!AnalyzerConfigurationCodec::decode(oldVersion).has_value());
 
             auto nonIntegerVersion = AnalyzerConfigurationCodec::encode({ });
@@ -407,53 +397,6 @@ public:
 
             expect(configurationsMatch(AnalyzerConfigurationCodec::decodeOrDefault(unknownVersion),
                 AnalyzerConfigurationCodec::defaults()));
-        }
-
-        beginTest("Legacy normalized smoothing migration uses the accepted time mapping");
-        {
-            const auto off = AnalyzerConfigurationCodec::migrateLegacySmoothing(0.0);
-            expect(!off.enabled);
-            expectWithinAbsoluteError(off.milliseconds, 75.0, 1.0e-12);
-
-            const auto currentDefault = AnalyzerConfigurationCodec::migrateLegacySmoothing(0.40);
-            expect(currentDefault.enabled);
-            expectWithinAbsoluteError(currentDefault.milliseconds, 84.6, 1.0e-12);
-
-            const auto maximumLegacyValue = AnalyzerConfigurationCodec::migrateLegacySmoothing(1.0);
-            expect(maximumLegacyValue.enabled);
-            expectWithinAbsoluteError(maximumLegacyValue.milliseconds, 450.0, 1.0e-12);
-
-            const auto minimumClamped = AnalyzerConfigurationCodec::migrateLegacySmoothing(0.01);
-            expect(minimumClamped.enabled);
-            expectWithinAbsoluteError(minimumClamped.milliseconds, 25.0, 1.0e-12);
-
-            const auto maximumClamped = AnalyzerConfigurationCodec::migrateLegacySmoothing(3.0);
-            expect(maximumClamped.enabled);
-            expectWithinAbsoluteError(maximumClamped.milliseconds, 2000.0, 1.0e-12);
-
-            const auto malformed = AnalyzerConfigurationCodec::migrateLegacySmoothing(
-                std::numeric_limits<double>::quiet_NaN());
-            expect(malformed.enabled);
-            expectWithinAbsoluteError(malformed.milliseconds, 75.0, 1.0e-12);
-        }
-
-        beginTest("Legacy floor and ceiling preserve values, clamp, and lower floor for span");
-        {
-            const auto preserved = AnalyzerConfigurationCodec::migrateLegacy(
-                LegacySpectrumSettings { -100.0, 6.0, 0.40 });
-            expectWithinAbsoluteError(preserved.spectrum.floorDb, -100.0, 1.0e-12);
-            expectWithinAbsoluteError(preserved.spectrum.ceilingDb, 6.0, 1.0e-12);
-            expectWithinAbsoluteError(
-                preserved.spectrum.temporalAveraging.milliseconds, 84.6, 1.0e-12);
-
-            const auto clampedAndSpanned = AnalyzerConfigurationCodec::migrateLegacy(
-                LegacySpectrumSettings { -20.0, -30.0, 0.0 });
-            expectWithinAbsoluteError(clampedAndSpanned.spectrum.floorDb, -48.0, 1.0e-12);
-            expectWithinAbsoluteError(clampedAndSpanned.spectrum.ceilingDb, -24.0, 1.0e-12);
-            expect(!clampedAndSpanned.spectrum.temporalAveraging.enabled);
-
-            const auto missing = AnalyzerConfigurationCodec::migrateLegacy({ });
-            expect(configurationsMatch(missing, AnalyzerConfigurationCodec::defaults()));
         }
     }
 };

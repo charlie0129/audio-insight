@@ -6,7 +6,7 @@
 
 namespace audio_insight {
 inline constexpr std::size_t minimumFftOrder = 10;
-inline constexpr std::size_t defaultFftOrder = 12;
+inline constexpr std::size_t defaultFftOrder = 13;
 inline constexpr std::size_t maximumFftOrder = 14;
 inline constexpr std::size_t fftOrder = defaultFftOrder;
 inline constexpr std::size_t fftSize = std::size_t { 1 } << defaultFftOrder;
@@ -24,7 +24,7 @@ enum class FftWindow {
 /** Immutable worker-side settings for the shared FFT analysis. */
 struct SpectrumAnalysisConfiguration final {
     std::size_t fftSize = audio_insight::fftSize;
-    FftWindow window = FftWindow::periodicHann;
+    FftWindow window = FftWindow::fiveTermFlatTop;
     int requestedSliceRateHz = 60;
 
     constexpr bool operator==(const SpectrumAnalysisConfiguration&) const noexcept = default;

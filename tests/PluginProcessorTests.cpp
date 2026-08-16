@@ -158,24 +158,18 @@ public:
 
         testCase("Parameter state round-trips", [this] {
             PluginProcessor source;
-            auto* floor = source.getParameters().getParameter("spectrumFloor");
-            auto* smoothing = source.getParameters().getParameter("spectrumSmoothing");
             auto* metrics = source.getParameters().getParameter("performanceMetrics");
-            expect(floor != nullptr);
-            expect(smoothing != nullptr);
             expect(metrics != nullptr);
+            expect(source.getParameters().getParameter("spectrumFloor") == nullptr);
+            expect(source.getParameters().getParameter("spectrumSmoothing") == nullptr);
 
-            if (floor == nullptr || smoothing == nullptr || metrics == nullptr)
+            if (metrics == nullptr)
                 return;
 
-            expectWithinAbsoluteError(smoothing->getValue(), 0.40F, 0.0001F);
             expectWithinAbsoluteError(metrics->getValue(), 0.0F, 0.0001F);
-            expect(!floor->isAutomatable());
-            expect(!smoothing->isAutomatable());
             expect(!metrics->isMetaParameter());
             expect(!metrics->isAutomatable());
 
-            floor->setValueNotifyingHost(0.375F);
             metrics->setValueNotifyingHost(1.0F);
 
             juce::MemoryBlock state;
@@ -185,29 +179,23 @@ public:
             PluginProcessor restored;
             restored.setStateInformation(state.getData(), static_cast<int>(state.getSize()));
 
-            const auto* restoredFloor = restored.getParameters().getParameter("spectrumFloor");
             const auto* restoredMetrics
                 = restored.getParameters().getParameter("performanceMetrics");
-            expect(restoredFloor != nullptr);
             expect(restoredMetrics != nullptr);
-
-            if (restoredFloor != nullptr)
-                expectWithinAbsoluteError(restoredFloor->getValue(), 0.375F, 0.0001F);
 
             if (restoredMetrics != nullptr)
                 expectWithinAbsoluteError(restoredMetrics->getValue(), 1.0F, 0.0001F);
         });
 
-        testCase("Analyzer configuration round-trips beside compatibility parameters", [this] {
+        testCase("Analyzer configuration round-trips beside the metrics parameter", [this] {
             PluginProcessor source;
             auto configuration = source.getAnalyzerConfiguration();
-            configuration.display.framePacing = DisplayFramePacing::adaptive;
-            configuration.sharedAnalysis.fftSize = 8192;
+            configuration.sharedAnalysis.fftSize = 16384;
             configuration.sharedAnalysis.frequencySpacing = 0.35;
             configuration.spectrum.floorDb = -132.0;
             configuration.spectrum.ceilingDb = 6.0;
-            configuration.spectrum.temporalAveraging.enabled = false;
-            configuration.spectrum.temporalAveraging.milliseconds = 250.0;
+            configuration.spectrum.temporalAveraging.attackMilliseconds = 25.0;
+            configuration.spectrum.temporalAveraging.releaseMilliseconds = 750.0;
             configuration.spectrogram.historyDurationSeconds = 30;
             configuration.loudness.referenceLufs = -14.5;
             source.setAnalyzerConfiguration(configuration);
@@ -231,14 +219,14 @@ public:
             PluginProcessor restored;
             restored.setStateInformation(state.getData(), static_cast<int>(state.getSize()));
             const auto actual = restored.getAnalyzerConfiguration();
-            expect(actual.display.framePacing == DisplayFramePacing::adaptive);
-            expectEquals(actual.sharedAnalysis.fftSize, 8192);
+            expectEquals(actual.sharedAnalysis.fftSize, 16384);
             expectWithinAbsoluteError(actual.sharedAnalysis.frequencySpacing, 0.35, 1.0e-12);
             expectWithinAbsoluteError(actual.spectrum.floorDb, -132.0, 1.0e-12);
             expectWithinAbsoluteError(actual.spectrum.ceilingDb, 6.0, 1.0e-12);
-            expect(!actual.spectrum.temporalAveraging.enabled);
             expectWithinAbsoluteError(
-                actual.spectrum.temporalAveraging.milliseconds, 250.0, 1.0e-12);
+                actual.spectrum.temporalAveraging.attackMilliseconds, 25.0, 1.0e-12);
+            expectWithinAbsoluteError(
+                actual.spectrum.temporalAveraging.releaseMilliseconds, 750.0, 1.0e-12);
             expectEquals(actual.spectrogram.historyDurationSeconds, 30);
             expectWithinAbsoluteError(actual.loudness.referenceLufs, -14.5, 1.0e-12);
         });
@@ -315,29 +303,12 @@ public:
             expectEquals(afterEdit.spectrogramMappingChanges, beforeEdit.spectrogramMappingChanges);
         });
 
-        testCase("Display pacing edits do not reconfigure any analyzer", [this] {
-            PluginProcessor processor;
-            const auto beforeEdit = processor.getAnalysisTelemetry();
-            auto configuration = processor.getAnalyzerConfiguration();
-            configuration.display.framePacing = DisplayFramePacing::adaptive;
-            processor.setAnalyzerConfiguration(configuration);
-            const auto afterEdit = processor.getAnalysisTelemetry();
-
-            expectEquals(afterEdit.captureGeneration, beforeEdit.captureGeneration);
-            expectEquals(afterEdit.fftGeneration, beforeEdit.fftGeneration);
-            expectEquals(afterEdit.fftConfigurationChanges, beforeEdit.fftConfigurationChanges);
-            expectEquals(afterEdit.spectrumTemporalConfigurationChanges,
-                beforeEdit.spectrumTemporalConfigurationChanges);
-            expectEquals(
-                afterEdit.spectrogramMappingGeneration, beforeEdit.spectrogramMappingGeneration);
-            expectEquals(afterEdit.spectrogramMappingChanges, beforeEdit.spectrogramMappingChanges);
-        });
-
         testCase("Temporal analyzer edits remain scoped away from the FFT generation", [this] {
             PluginProcessor processor;
             const auto beforeEdit = processor.getAnalysisTelemetry();
             auto configuration = processor.getAnalyzerConfiguration();
-            configuration.spectrum.temporalAveraging.milliseconds = 125.0;
+            configuration.spectrum.temporalAveraging.attackMilliseconds = 125.0;
+            configuration.spectrum.temporalAveraging.releaseMilliseconds = 500.0;
             configuration.spectrum.peakHoldMode = SpectrumPeakHoldMode::finite;
             processor.setAnalyzerConfiguration(configuration);
             const auto afterEdit = processor.getAnalysisTelemetry();
@@ -346,14 +317,32 @@ public:
             expectEquals(afterEdit.fftConfigurationChanges, beforeEdit.fftConfigurationChanges);
             expect(afterEdit.spectrumTemporalConfigurationChanges
                 == beforeEdit.spectrumTemporalConfigurationChanges + 1);
+            expectWithinAbsoluteError(afterEdit.configuredSpectrumAttackMilliseconds, 125.0, 0.0);
+            expectWithinAbsoluteError(afterEdit.configuredSpectrumReleaseMilliseconds, 500.0, 0.0);
         });
 
-        testCase("Fresh state uses responsive time-based averaging defaults", [this] {
+        testCase("Fresh state applies all accepted analysis defaults", [this] {
             PluginProcessor processor;
             const auto configuration = processor.getAnalyzerConfiguration();
-            expect(configuration.spectrum.temporalAveraging.enabled);
+            expectEquals(configuration.sharedAnalysis.fftSize, 8192);
+            expect(configuration.sharedAnalysis.window == FftWindow::fiveTermFlatTop);
+            expectEquals(configuration.sharedAnalysis.requestedFftSliceRateHz, 60);
+            expectWithinAbsoluteError(configuration.sharedAnalysis.frequencySpacing, 0.8, 1.0e-12);
             expectWithinAbsoluteError(
-                configuration.spectrum.temporalAveraging.milliseconds, 75.0, 1.0e-12);
+                configuration.spectrum.temporalAveraging.attackMilliseconds, 0.0, 1.0e-12);
+            expectWithinAbsoluteError(
+                configuration.spectrum.temporalAveraging.releaseMilliseconds, 250.0, 1.0e-12);
+
+            const auto telemetry = processor.getAnalysisTelemetry();
+            expect(telemetry.configuredFftSize == 8192);
+            expect(telemetry.configuredFftWindow
+                == static_cast<std::uint32_t>(FftWindow::fiveTermFlatTop));
+            expect(telemetry.requestedFftSliceRateHz == 60);
+            expectWithinAbsoluteError(telemetry.configuredSpectrumAttackMilliseconds, 0.0, 0.0);
+            expectWithinAbsoluteError(telemetry.configuredSpectrumReleaseMilliseconds, 250.0, 0.0);
+            expect(telemetry.fftConfigurationChanges == 0);
+            expect(telemetry.spectrumTemporalConfigurationChanges == 0);
+            expect(telemetry.spectrogramMappingChanges == 0);
         });
 
         testCase("Analyzer configuration listeners observe changes until removed", [this] {
@@ -415,84 +404,13 @@ public:
             restored.removeListener(&restoreHostListener);
         });
 
-        testCase("Legacy Spectrum parameters migrate only when configuration is absent", [this] {
-            PluginProcessor source;
-            auto* floor = source.getParameters().getParameter("spectrumFloor");
-            auto* ceiling = source.getParameters().getParameter("spectrumCeiling");
-            auto* smoothing = source.getParameters().getParameter("spectrumSmoothing");
-            expect(floor != nullptr);
-            expect(ceiling != nullptr);
-            expect(smoothing != nullptr);
-            if (floor == nullptr || ceiling == nullptr || smoothing == nullptr)
-                return;
-
-            floor->setValueNotifyingHost(floor->convertTo0to1(-100.0F));
-            ceiling->setValueNotifyingHost(ceiling->convertTo0to1(6.0F));
-            smoothing->setValueNotifyingHost(0.40F);
-
-            auto legacyTree = source.getParameters().copyState();
-            expect(!legacyTree.getChildWithName(AnalyzerConfigurationCodec::treeType()).isValid());
-            juce::MemoryBlock legacyState;
-            if (auto xml = legacyTree.createXml())
-                juce::AudioProcessor::copyXmlToBinary(*xml, legacyState);
-
-            PluginProcessor restored;
-            restored.setStateInformation(
-                legacyState.getData(), static_cast<int>(legacyState.getSize()));
-            const auto migrated = restored.getAnalyzerConfiguration();
-            expectWithinAbsoluteError(migrated.spectrum.floorDb, -100.0, 1.0e-12);
-            expectWithinAbsoluteError(migrated.spectrum.ceilingDb, 6.0, 1.0e-12);
-            expectWithinAbsoluteError(
-                migrated.spectrum.temporalAveraging.milliseconds, 84.6, 1.0e-5);
-
-            juce::MemoryBlock currentState;
-            restored.getStateInformation(currentState);
-            auto currentXml = juce::AudioProcessor::getXmlFromBinary(
-                currentState.getData(), static_cast<int>(currentState.getSize()));
-            expect(currentXml != nullptr);
-            if (currentXml != nullptr) {
-                const auto currentTree = juce::ValueTree::fromXml(*currentXml);
-                expect(
-                    currentTree.getChildWithName(AnalyzerConfigurationCodec::treeType()).isValid());
-            }
-        });
-
-        testCase("Current analyzer configuration wins over compatibility shims", [this] {
+        testCase("Unknown analyzer schemas restore current defaults", [this] {
             PluginProcessor source;
             auto stateTree = source.getParameters().copyState();
-            auto configuration = AnalyzerConfigurationCodec::defaults();
-            configuration.spectrum.floorDb = -144.0;
-            configuration.spectrum.temporalAveraging.milliseconds = 125.0;
-            stateTree.addChild(AnalyzerConfigurationCodec::encode(configuration), -1, nullptr);
-
-            auto floorState = stateTree.getChildWithProperty("id", "spectrumFloor");
-            auto smoothingState = stateTree.getChildWithProperty("id", "spectrumSmoothing");
-            floorState.setProperty("value", "-72", nullptr);
-            smoothingState.setProperty("value", "1", nullptr);
-
-            juce::MemoryBlock encoded;
-            if (auto xml = stateTree.createXml())
-                juce::AudioProcessor::copyXmlToBinary(*xml, encoded);
-
-            PluginProcessor restored;
-            restored.setStateInformation(encoded.getData(), static_cast<int>(encoded.getSize()));
-            const auto actual = restored.getAnalyzerConfiguration();
-            expectWithinAbsoluteError(actual.spectrum.floorDb, -144.0, 1.0e-12);
-            expectWithinAbsoluteError(
-                actual.spectrum.temporalAveraging.milliseconds, 125.0, 1.0e-12);
-        });
-
-        testCase("Malformed existing analyzer state defaults instead of legacy migration", [this] {
-            PluginProcessor source;
-            auto stateTree = source.getParameters().copyState();
-            auto floorState = stateTree.getChildWithProperty("id", "spectrumFloor");
-            auto smoothingState = stateTree.getChildWithProperty("id", "spectrumSmoothing");
-            floorState.setProperty("value", "-120", nullptr);
-            smoothingState.setProperty("value", "1", nullptr);
-
-            auto malformed = AnalyzerConfigurationCodec::encode({ });
-            malformed.setProperty("version", "999", nullptr);
-            stateTree.addChild(malformed, -1, nullptr);
+            auto oldSchema = AnalyzerConfigurationCodec::encode({ });
+            oldSchema.setProperty("version", "2", nullptr);
+            oldSchema.getChildWithName("Spectrum").setProperty("floorDb", "-144", nullptr);
+            stateTree.addChild(oldSchema, -1, nullptr);
 
             juce::MemoryBlock encoded;
             if (auto xml = stateTree.createXml())
@@ -502,8 +420,11 @@ public:
             restored.setStateInformation(encoded.getData(), static_cast<int>(encoded.getSize()));
             const auto actual = restored.getAnalyzerConfiguration();
             expectWithinAbsoluteError(actual.spectrum.floorDb, -90.0, 1.0e-12);
+            expectEquals(actual.sharedAnalysis.fftSize, 8192);
             expectWithinAbsoluteError(
-                actual.spectrum.temporalAveraging.milliseconds, 75.0, 1.0e-12);
+                actual.spectrum.temporalAveraging.attackMilliseconds, 0.0, 1.0e-12);
+            expectWithinAbsoluteError(
+                actual.spectrum.temporalAveraging.releaseMilliseconds, 250.0, 1.0e-12);
         });
 
         testCase("The legacy Metal HUD state migrates to the metrics panel", [this] {
@@ -760,7 +681,7 @@ public:
                 expect(visualization->getDashboardLayoutSplits() == initialLayout);
                 const auto renderSettings = visualization->getSpectrumSettings();
                 expectWithinAbsoluteError(renderSettings.slopeDecibelsPerOctave, 0.0F, 0.0001F);
-                expectWithinAbsoluteError(renderSettings.frequencySpacing, 1.0F, 0.0001F);
+                expectWithinAbsoluteError(renderSettings.frequencySpacing, 0.8F, 0.0001F);
                 expectWithinAbsoluteError(renderSettings.fillOpacity, 0.18F, 0.0001F);
                 expect(renderSettings.traceColourRgb == 0x55c7e8U);
             }
@@ -930,23 +851,6 @@ public:
                     }
                 } else {
                     expect(false, "Spectrum floor Settings control was not found");
-                }
-
-                if (auto* pacingControl
-                    = findDescendantWithId(*settingsPanel, "settingsDisplayFramePacing")) {
-                    if (auto* pacing = dynamic_cast<juce::ComboBox*>(pacingControl)) {
-                        pacing->setSelectedId(2, juce::sendNotificationSync);
-                        expect(processor.getAnalyzerConfiguration().display.framePacing
-                            == DisplayFramePacing::adaptive);
-                        if (visualization != nullptr) {
-                            expect(visualization->getDisplayFramePacing()
-                                == MetalDisplayFramePacing::adaptive);
-                        }
-                    } else {
-                        expect(false, "Display pacing Settings control is not a combo box");
-                    }
-                } else {
-                    expect(false, "Display pacing Settings control was not found");
                 }
 
                 metricsButton->onClick();
