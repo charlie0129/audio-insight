@@ -18,11 +18,6 @@
 #include <optional>
 
 namespace audio_insight {
-enum class MetalDisplayFramePacing : std::uint8_t {
-    fixedMaximum,
-    adaptive,
-};
-
 namespace detail {
 struct DisplayLinkFrameRateRange final {
     std::uint32_t minimumFramesPerSecond = 60;
@@ -32,7 +27,7 @@ struct DisplayLinkFrameRateRange final {
 
 /** Builds the best-effort Core Animation request for the active display. */
 [[nodiscard]] DisplayLinkFrameRateRange displayLinkFrameRateRange(
-    int displayMaximumFramesPerSecond, MetalDisplayFramePacing framePacing) noexcept;
+    int displayMaximumFramesPerSecond) noexcept;
 
 inline constexpr float maximumFrequencyAxisFrequencyHz = 20'000.0F;
 inline constexpr std::size_t maximumFrequencyAxisCandidateCount = 320;
@@ -440,7 +435,7 @@ struct StereoFieldPanelLayout final {
 struct FrequencyAxisMapping final {
     float minimumFrequencyHz = 20.0F;
     float maximumFrequencyHz = 20'000.0F;
-    float spacing = 1.0F;
+    float spacing = 0.8F;
 };
 
 enum class FrequencyAxisOrientation : std::uint8_t {
@@ -597,6 +592,10 @@ struct SpectrumFrequencyInterpolation final {
 /** Interpolates two calibrated dB values as linear power. */
 [[nodiscard]] float interpolateSpectrumPowerDecibels(
     float lowerDecibels, float upperDecibels, float upperBinWeight) noexcept;
+
+/** Snaps rising levels to the target while retaining the short release bridge. */
+[[nodiscard]] float interpolateSpectrumDisplayDecibels(
+    float displayedDecibels, float targetDecibels, float coefficient) noexcept;
 
 /** Preserves calibrated analyzer dB until final presentation-range clipping. */
 [[nodiscard]] float sanitiseSpectrumAnalysisDecibels(float decibels) noexcept;
@@ -765,7 +764,6 @@ struct MetalRenderTelemetry {
     std::uint32_t requestedMinimumFramesPerSecond = 0;
     std::uint32_t requestedPreferredFramesPerSecond = 0;
     std::uint32_t requestedMaximumFramesPerSecond = 0;
-    MetalDisplayFramePacing configuredDisplayFramePacing = MetalDisplayFramePacing::fixedMaximum;
     std::uint32_t spectrogramTextureRows = 0;
     std::uint32_t spectrogramTextureColumns = 0;
     std::uint64_t spectrogramTextureBytes = 0;
@@ -794,7 +792,7 @@ struct SpectrumRenderSettings {
     float floorDecibels = -90.0F;
     float ceilingDecibels = 0.0F;
     float slopeDecibelsPerOctave = 0.0F;
-    float frequencySpacing = 1.0F;
+    float frequencySpacing = 0.8F;
     float fillOpacity = 0.18F;
     std::uint32_t traceColourRgb = 0x55c7e8U;
 };
@@ -846,13 +844,6 @@ public:
         an empty callback before destroying any state captured by the callback.
     */
     void setEffectiveActivityCallback(EffectiveActivityCallback callback);
-
-    /**
-        Selects the best-effort Core Animation frame-rate request. This is a
-        message-thread presentation setting and does not reset analyzer state.
-    */
-    void setDisplayFramePacing(MetalDisplayFramePacing framePacing) noexcept;
-    [[nodiscard]] MetalDisplayFramePacing getDisplayFramePacing() const noexcept;
 
     /**
         Updates presentation settings without requiring the message thread.

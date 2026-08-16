@@ -68,7 +68,7 @@ public:
 
     void runTest() override
     {
-        beginTest("Display pacing requests fixed active maximum or an adaptive range");
+        beginTest("Display pacing requests the exact active-display maximum");
 
         const auto expectRange
             = [this](const detail::DisplayLinkFrameRateRange& range, const std::uint32_t minimum,
@@ -80,28 +80,17 @@ public:
                   expectEquals(static_cast<std::uint64_t>(range.maximumFramesPerSecond),
                       static_cast<std::uint64_t>(maximum));
               };
-        expectRange(detail::displayLinkFrameRateRange(0, MetalDisplayFramePacing::fixedMaximum), 60,
-            60, 60);
-        expectRange(detail::displayLinkFrameRateRange(-1, MetalDisplayFramePacing::fixedMaximum),
-            60, 60, 60);
+        expectRange(detail::displayLinkFrameRateRange(0), 60, 60, 60);
+        expectRange(detail::displayLinkFrameRateRange(-1), 60, 60, 60);
         for (const auto maximum : { 1, 30, 50, 60, 75, 90, 120, 144, 240 }) {
-            expectRange(
-                detail::displayLinkFrameRateRange(maximum, MetalDisplayFramePacing::fixedMaximum),
+            expectRange(detail::displayLinkFrameRateRange(maximum),
                 static_cast<std::uint32_t>(maximum), static_cast<std::uint32_t>(maximum),
                 static_cast<std::uint32_t>(maximum));
         }
-        expectRange(
-            detail::displayLinkFrameRateRange(50, MetalDisplayFramePacing::adaptive), 50, 50, 50);
-        expectRange(detail::displayLinkFrameRateRange(120, MetalDisplayFramePacing::adaptive), 60,
-            120, 120);
-        expectRange(detail::displayLinkFrameRateRange(144, MetalDisplayFramePacing::adaptive), 60,
-            144, 144);
-        expectRange(
-            detail::displayLinkFrameRateRange(144, static_cast<MetalDisplayFramePacing>(255)), 144,
-            144, 144);
 
         beginTest("Frequency mapping shares linear, intermediate, and logarithmic coordinates");
 
+        expectWithinAbsoluteError(detail::FrequencyAxisMapping { }.spacing, 0.8F, 0.000001F);
         const detail::FrequencyAxisMapping logarithmicMapping { 20.0F, 20'000.0F, 1.0F };
         const detail::FrequencyAxisMapping linearMapping { 20.0F, 20'000.0F, 0.0F };
         const detail::FrequencyAxisMapping intermediateMapping { 20.0F, 20'000.0F, 0.5F };
@@ -812,6 +801,20 @@ public:
         expectWithinAbsoluteError(
             detail::interpolateSpectrumPowerDecibels(-20.0F, -40.0F, 1.0F), -40.0F, 0.0F);
 
+        beginTest("Spectrum and peak-hold display levels snap upward and bridge downward");
+
+        expectWithinAbsoluteError(
+            detail::interpolateSpectrumDisplayDecibels(-60.0F, -20.0F, 0.1F), -20.0F, 0.0F);
+        expectWithinAbsoluteError(
+            detail::interpolateSpectrumDisplayDecibels(-20.0F, -60.0F, 0.25F), -30.0F, 0.0F);
+        expectWithinAbsoluteError(
+            detail::interpolateSpectrumDisplayDecibels(-20.0F, -60.0F, 0.0F), -20.0F, 0.0F);
+        expectWithinAbsoluteError(
+            detail::interpolateSpectrumDisplayDecibels(-20.0F, -60.0F, 2.0F), -60.0F, 0.0F);
+        expectWithinAbsoluteError(detail::interpolateSpectrumDisplayDecibels(
+                                      -20.0F, -60.0F, std::numeric_limits<float>::quiet_NaN()),
+            -60.0F, 0.0F);
+
         const auto compensatedSilence
             = detail::sanitiseSpectrumAnalysisDecibels(minimumSpectrumDecibels)
             + detail::spectrumSlopeCompensationDecibels(20'000.0F, 6.0F);
@@ -1209,9 +1212,6 @@ public:
         StubVisualizationDataSource dataSource;
         MetalVisualization visualization(dataSource);
         expect(!visualization.isEffectivelyRendering());
-        expect(visualization.getDisplayFramePacing() == MetalDisplayFramePacing::fixedMaximum);
-        visualization.setDisplayFramePacing(MetalDisplayFramePacing::adaptive);
-        expect(visualization.getDisplayFramePacing() == MetalDisplayFramePacing::adaptive);
 
         auto effectiveActivityChanges = 0;
         visualization.setEffectiveActivityCallback([&](bool) { ++effectiveActivityChanges; });
@@ -1290,11 +1290,6 @@ public:
             == beforeReset.requestedPreferredFramesPerSecond);
         expect(afterReset.requestedMaximumFramesPerSecond
             == beforeReset.requestedMaximumFramesPerSecond);
-        expect(afterReset.configuredDisplayFramePacing == MetalDisplayFramePacing::adaptive);
-
-        visualization.setDisplayFramePacing(static_cast<MetalDisplayFramePacing>(255));
-        expect(visualization.getDisplayFramePacing() == MetalDisplayFramePacing::fixedMaximum);
-
         visualization.resetRenderTelemetry();
         const auto afterSecondReset = visualization.getRenderTelemetry();
         expectEquals(afterSecondReset.epoch, afterReset.epoch + 1);
@@ -1352,7 +1347,7 @@ public:
         expectWithinAbsoluteError(defaultedSettings.floorDecibels, -90.0F, 0.001F);
         expectWithinAbsoluteError(defaultedSettings.ceilingDecibels, 0.0F, 0.001F);
         expectWithinAbsoluteError(defaultedSettings.slopeDecibelsPerOctave, 0.0F, 0.0001F);
-        expectWithinAbsoluteError(defaultedSettings.frequencySpacing, 1.0F, 0.0001F);
+        expectWithinAbsoluteError(defaultedSettings.frequencySpacing, 0.8F, 0.0001F);
         expectWithinAbsoluteError(defaultedSettings.fillOpacity, 0.18F, 0.0001F);
         expect(defaultedSettings.traceColourRgb == 0x55c7e8U);
 

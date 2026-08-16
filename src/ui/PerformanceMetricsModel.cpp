@@ -63,25 +63,6 @@ PerformanceMetricRow rawBoolean(std::string fieldName, std::string label, const 
         PerformanceMetricKind::raw };
 }
 
-PerformanceMetricRow rawDisplayFramePacing(const MetalDisplayFramePacing framePacing)
-{
-    auto value = std::string { "unknown" };
-    auto rawValue = value;
-    switch (framePacing) {
-    case MetalDisplayFramePacing::fixedMaximum:
-        value = "Fixed maximum";
-        rawValue = "fixedMaximum";
-        break;
-    case MetalDisplayFramePacing::adaptive:
-        value = "Adaptive";
-        rawValue = "adaptive";
-        break;
-    }
-
-    return { "metal.configuredDisplayFramePacing", "Configured display frame pacing",
-        std::move(value), { }, std::move(rawValue), { }, PerformanceMetricKind::raw };
-}
-
 PerformanceMetricRow rawDouble(std::string fieldName, std::string label, const double value,
     std::string unit, const int decimalPlaces)
 {
@@ -293,8 +274,8 @@ void appendRawSections(
     status.rows.emplace_back(rawUnsigned(
         "metal.drawableHeightPixels", "Drawable height", metal.drawableHeightPixels, "px"));
     status.rows.emplace_back(rawUnsigned("metal.configuredMaximumFramesPerSecond",
-        "Active display reported maximum", metal.configuredMaximumFramesPerSecond, "Hz"));
-    status.rows.emplace_back(rawDisplayFramePacing(metal.configuredDisplayFramePacing));
+        "Active display maximum (reported or fallback)", metal.configuredMaximumFramesPerSecond,
+        "Hz"));
     status.rows.emplace_back(rawUnsigned("metal.requestedMinimumFramesPerSecond",
         "Requested minimum frame rate", metal.requestedMinimumFramesPerSecond, "Hz"));
     status.rows.emplace_back(rawUnsigned("metal.requestedPreferredFramesPerSecond",
