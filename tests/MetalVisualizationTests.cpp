@@ -110,6 +110,98 @@ public:
                    1, std::numeric_limits<double>::quiet_NaN(), 60)
             == 0);
 
+        beginTest("Spectrogram presentation time keeps one continuous target domain");
+
+        detail::SpectrogramPresentationTimebase presentationTimebase;
+        expect(std::isnan(presentationTimebase.presentationTime(
+            9.99, 10.0, std::numeric_limits<double>::quiet_NaN())));
+        expectWithinAbsoluteError(
+            presentationTimebase.presentationTime(9.99, 10.0, 10.008), 10.008, 1.0e-12);
+        expectWithinAbsoluteError(presentationTimebase.presentationTime(
+                                      9.998, 10.008, std::numeric_limits<double>::quiet_NaN()),
+            10.016, 1.0e-12);
+        expectWithinAbsoluteError(presentationTimebase.presentationTime(
+                                      10.006, 0.0, std::numeric_limits<double>::quiet_NaN()),
+            10.024, 1.0e-12);
+        presentationTimebase.reset();
+        expect(std::isnan(presentationTimebase.presentationTime(
+            10.0, 0.0, std::numeric_limits<double>::quiet_NaN())));
+
+        beginTest("Spectrogram Scroll clock advances between whole FFT columns");
+
+        detail::SpectrogramScrollClock scrollClock;
+        const auto anchored = scrollClock.update(100, 60, 10.0, 600);
+        expect(anchored.valid);
+        expect(anchored.initializedThisUpdate);
+        expectEquals(anchored.headOffsetColumns, -1.0F);
+        expect(!anchored.underrun);
+
+        const auto halfColumn = scrollClock.update(100, 60, 10.0 + (1.0 / 120.0), 600);
+        expect(halfColumn.valid);
+        expect(!halfColumn.initializedThisUpdate);
+        expectWithinAbsoluteError(halfColumn.headOffsetColumns, -0.5F, 0.00001F);
+        expect(!halfColumn.underrun);
+
+        const auto wholeColumn = scrollClock.update(100, 60, 10.0 + (1.0 / 60.0), 600);
+        expectWithinAbsoluteError(wholeColumn.headOffsetColumns, 0.0F, 0.00001F);
+        expect(!wholeColumn.underrun);
+
+        const auto ordinaryArrival = scrollClock.update(101, 60, 10.0 + (1.0 / 60.0), 600);
+        expect(!ordinaryArrival.initializedThisUpdate);
+        expectWithinAbsoluteError(ordinaryArrival.headOffsetColumns, -1.0F, 0.00001F);
+
+        const auto burstArrival = scrollClock.update(108, 60, 10.0 + (1.0 / 60.0), 600);
+        expect(!burstArrival.initializedThisUpdate);
+        expectWithinAbsoluteError(burstArrival.headOffsetColumns, -8.0F, 0.00001F);
+        const auto afterBurstHalfColumn = scrollClock.update(108, 60, 10.0 + (3.0 / 120.0), 600);
+        expectWithinAbsoluteError(afterBurstHalfColumn.headOffsetColumns, -7.5F, 0.00001F);
+
+        const auto regressedTimestamp = scrollClock.update(108, 60, 9.0, 600);
+        expectWithinAbsoluteError(regressedTimestamp.headOffsetColumns, -7.5F, 0.00001F);
+        const auto saturatedFuture = scrollClock.update(108, 60, 100.0, 600);
+        expectEquals(saturatedFuture.headOffsetColumns, 1.0F);
+        expect(saturatedFuture.underrun);
+        const auto resumedAfterStall = scrollClock.update(109, 60, 100.0 + (1.0 / 60.0), 600);
+        expectEquals(resumedAfterStall.headOffsetColumns, -1.0F);
+        expect(resumedAfterStall.initializedThisUpdate);
+        expect(!resumedAfterStall.underrun);
+
+        detail::SpectrogramScrollClock replacedHistoryClock;
+        static_cast<void>(replacedHistoryClock.update(100, 60, 10.0, 5));
+        const auto replacedHistory = replacedHistoryClock.update(105, 60, 20.0, 5);
+        expectEquals(replacedHistory.headOffsetColumns, -1.0F);
+        expect(replacedHistory.initializedThisUpdate);
+
+        detail::SpectrogramScrollClock expiredHeadClock;
+        static_cast<void>(expiredHeadClock.update(100, 60, 10.0, 5));
+        const auto expiredHead = expiredHeadClock.update(104, 60, 10.0, 5);
+        expectEquals(expiredHead.headOffsetColumns, -1.0F);
+        expect(expiredHead.initializedThisUpdate);
+
+        detail::SpectrogramScrollClock invalidTimestampClock;
+        const auto invalidTimestampAnchor
+            = invalidTimestampClock.update(100, 60, std::numeric_limits<double>::quiet_NaN(), 600);
+        expectEquals(invalidTimestampAnchor.headOffsetColumns, -1.0F);
+        const auto firstValidTimestamp = invalidTimestampClock.update(100, 60, 10.0, 600);
+        expectEquals(firstValidTimestamp.headOffsetColumns, -1.0F);
+
+        scrollClock.reset();
+        expect(!scrollClock.update(0, 60, 10.0, 600).valid);
+        expect(!scrollClock.update(100, 0, 10.0, 600).valid);
+        expect(!scrollClock.update(100, 60, 10.0, 0).valid);
+
+        beginTest("Fractional Spectrogram mapping keeps expired and future cells black");
+
+        expect(detail::spectrogramScrollSourceColumn(0.0F, 5, 0.0F) == 0);
+        expect(detail::spectrogramScrollSourceColumn(1.0F, 5, 0.0F) == 4);
+        expect(!detail::spectrogramScrollSourceColumn(0.05F, 5, -0.5F).has_value());
+        expect(detail::spectrogramScrollSourceColumn(0.99F, 5, -0.5F) == 4);
+        expect(detail::spectrogramScrollSourceColumn(0.0F, 5, 0.5F) == 0);
+        expect(!detail::spectrogramScrollSourceColumn(0.99F, 5, 0.5F).has_value());
+        expect(
+            !detail::spectrogramScrollSourceColumn(std::numeric_limits<float>::quiet_NaN(), 5, 0.0F)
+                .has_value());
+
         beginTest("Spectrogram ring preserves timestamp gaps and both history interpretations");
 
         detail::SpectrogramHistoryRing ring;
@@ -185,25 +277,73 @@ public:
         expect(!ring.physicalColumnForScreenColumn(0, detail::SpectrogramRenderHistoryMode::scroll)
                 .has_value());
 
-        beginTest("Spectrogram upload gate publishes failure before admitting another callback");
+        beginTest("Pending Spectrogram destinations stay black until upload promotion");
+
+        detail::SpectrogramHistoryRing validityRing;
+        validityRing.configure(5);
+        for (std::uint64_t slot = 1; slot <= 5; ++slot)
+            expect(validityRing.append(slot, slot).accepted);
+
+        std::array<std::uint8_t, detail::maximumSpectrogramHistoryColumnCount> renderValidity { };
+        renderValidity.fill(0x7f);
+        const std::array<std::uint32_t, detail::maximumSpectrogramColumnsDrainedPerFrame>
+            maskedColumns { 0, 4, 4, 99 };
+        detail::copySpectrogramRenderValidity(validityRing, renderValidity.data(),
+            renderValidity.size(), maskedColumns.data(), 4, false);
+        expect(renderValidity[0] == 0);
+        expect(renderValidity[1] == 1);
+        expect(renderValidity[3] == 1);
+        expect(renderValidity[4] == 0);
+        detail::copySpectrogramRenderValidity(
+            validityRing, renderValidity.data(), renderValidity.size(), nullptr, 0, true);
+        expect(std::all_of(renderValidity.begin(), renderValidity.end(),
+            [](const auto value) { return value == 0; }));
+
+        beginTest("Spectrogram upload settlement promotes only matching revisions");
+
+        detail::PendingSpectrogramUpload pendingUpload;
+        pendingUpload.begin(7, 3, 4, maskedColumns.data(), 4);
+        expect(pendingUpload.isActive());
+        expect(pendingUpload.destinationCount() == 4);
+        expect(pendingUpload.destinations()[0] == 0);
+        expect(pendingUpload.resolve(detail::SpectrogramUploadCompletion { 7, true }, 3, 4)
+            == detail::SpectrogramUploadResolution::promote);
+        expect(!pendingUpload.isActive());
+
+        pendingUpload.begin(8, 3, 4, maskedColumns.data(), 2);
+        expect(pendingUpload.resolve(detail::SpectrogramUploadCompletion { 8, false }, 3, 4)
+            == detail::SpectrogramUploadResolution::clearHistory);
+        pendingUpload.begin(9, 3, 4, maskedColumns.data(), 2);
+        expect(pendingUpload.resolve(detail::SpectrogramUploadCompletion { 9, false }, 5, 4)
+            == detail::SpectrogramUploadResolution::stale);
+        pendingUpload.begin(10, 3, 4, maskedColumns.data(), 2);
+        expect(pendingUpload.resolve(detail::SpectrogramUploadCompletion { 11, true }, 3, 4)
+            == detail::SpectrogramUploadResolution::clearHistory);
+
+        beginTest("Spectrogram upload gate publishes completion before admitting another callback");
 
         detail::SpectrogramUploadGate uploadGate;
         expect(!uploadGate.isUploadInFlight());
-        expect(!uploadGate.consumeFailure());
+        expect(!uploadGate.consumeCompletion().has_value());
 
-        uploadGate.beginUpload();
+        uploadGate.beginUpload(1);
         expect(uploadGate.isUploadInFlight());
-        expect(!uploadGate.consumeFailure());
-        uploadGate.completeUpload(true);
+        expect(!uploadGate.consumeCompletion().has_value());
+        uploadGate.completeUpload(1, true);
         expect(!uploadGate.isUploadInFlight());
-        expect(!uploadGate.consumeFailure());
+        const auto success = uploadGate.consumeCompletion();
+        expect(success.has_value());
+        expect(success.has_value() && success->transaction == 1 && success->succeeded);
+        expect(!uploadGate.consumeCompletion().has_value());
 
-        uploadGate.beginUpload();
+        uploadGate.beginUpload(2);
         expect(uploadGate.isUploadInFlight());
-        uploadGate.completeUpload(false);
+        uploadGate.completeUpload(2, false);
         expect(!uploadGate.isUploadInFlight());
-        expect(uploadGate.consumeFailure());
-        expect(!uploadGate.consumeFailure());
+        const auto failure = uploadGate.consumeCompletion();
+        expect(failure.has_value());
+        expect(failure.has_value() && failure->transaction == 2 && !failure->succeeded);
+        expect(!uploadGate.consumeCompletion().has_value());
 
         beginTest("Spectrogram invalidation scopes distinguish clears from reallocations");
 
@@ -1072,6 +1212,11 @@ public:
         expect(afterReset.spectrogramTextureReallocations == 0);
         expect(afterReset.spectrogramTextureAllocationFailures == 0);
         expect(afterReset.spectrogramUploadBackpressureDrops == 0);
+        expect(afterReset.spectrogramUploadDeferrals == 0);
+        expect(afterReset.spectrogramScrollClockInitializations == 0);
+        expect(afterReset.spectrogramScrollUnderrunFrames == 0);
+        expectWithinAbsoluteError(afterReset.spectrogramScrollHeadOffsetColumns,
+            beforeReset.spectrogramScrollHeadOffsetColumns, 0.000001);
         expect(afterReset.spectrogramUploadCommands == 0);
         expect(afterReset.spectrogramUploadBytes == 0);
         expect(afterReset.spectrogramLastColumnSequence == 0);

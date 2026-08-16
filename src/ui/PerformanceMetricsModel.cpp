@@ -384,8 +384,18 @@ void appendRawSections(
         "History texture allocation failures", metal.spectrogramTextureAllocationFailures,
         "failures"));
     spectrogramRender.rows.emplace_back(rawUnsigned("metal.spectrogramUploadBackpressureDrops",
-        "Callbacks skipped for an outstanding history upload",
+        "Full frames skipped for an outstanding history upload",
         metal.spectrogramUploadBackpressureDrops, "drops"));
+    spectrogramRender.rows.emplace_back(rawUnsigned("metal.spectrogramUploadDeferrals",
+        "History upload deferrals", metal.spectrogramUploadDeferrals, "callbacks"));
+    spectrogramRender.rows.emplace_back(rawUnsigned("metal.spectrogramScrollClockInitializations",
+        "Fractional Scroll clock initializations", metal.spectrogramScrollClockInitializations,
+        "initializations"));
+    spectrogramRender.rows.emplace_back(rawDouble("metal.spectrogramScrollHeadOffsetColumns",
+        "Fractional Scroll head offset from newest accepted column",
+        metal.spectrogramScrollHeadOffsetColumns, "columns", 3));
+    spectrogramRender.rows.emplace_back(rawUnsigned("metal.spectrogramScrollUnderrunFrames",
+        "Fractional Scroll underrun frames", metal.spectrogramScrollUnderrunFrames, "frames"));
     spectrogramRender.rows.emplace_back(rawUnsigned("metal.spectrogramUploadCommands",
         "History column copy commands", metal.spectrogramUploadCommands, "commands"));
     spectrogramRender.rows.emplace_back(rawUnsigned("metal.spectrogramUploadBytes",
@@ -1049,6 +1059,16 @@ void buildRates(const PerformanceMetricsSnapshot& current,
     addMetal("metal.spectrogramUploadBackpressureDrops", "Spectrogram upload-backpressure drops",
         "drops/s", current.metal.spectrogramUploadBackpressureDrops,
         previous.metal.spectrogramUploadBackpressureDrops);
+    addMetal("metal.spectrogramUploadDeferrals", "Spectrogram history upload deferrals",
+        "deferrals/s", current.metal.spectrogramUploadDeferrals,
+        previous.metal.spectrogramUploadDeferrals);
+    addMetal("metal.spectrogramScrollClockInitializations",
+        "Spectrogram fractional Scroll clock initializations", "initializations/s",
+        current.metal.spectrogramScrollClockInitializations,
+        previous.metal.spectrogramScrollClockInitializations);
+    addMetal("metal.spectrogramScrollUnderrunFrames", "Spectrogram fractional Scroll underruns",
+        "frames/s", current.metal.spectrogramScrollUnderrunFrames,
+        previous.metal.spectrogramScrollUnderrunFrames);
     addMetal("metal.spectrogramUploadCommands", "Spectrogram column copy commands", "commands/s",
         current.metal.spectrogramUploadCommands, previous.metal.spectrogramUploadCommands);
     addMetal("metal.spectrogramUploadBytes", "Spectrogram upload throughput", "bytes/s",

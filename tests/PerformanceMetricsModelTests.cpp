@@ -44,7 +44,7 @@ consteval std::size_t aggregateFieldCount()
 // separately because the view model expands them into individual rows.
 static_assert(aggregateFieldCount<PresentedFrameIntervalSample>() == 2);
 static_assert(aggregateFieldCount<FrameLatencySample>() == 9);
-static_assert(aggregateFieldCount<MetalRenderTelemetry>() == 96);
+static_assert(aggregateFieldCount<MetalRenderTelemetry>() == 100);
 static_assert(aggregateFieldCount<StereoSampleCapture::Telemetry>() == 9);
 static_assert(aggregateFieldCount<StereoMeterAccumulator::Telemetry>() == 7);
 static_assert(aggregateFieldCount<AudioCallbackBlockTelemetry>() == 5);
@@ -98,6 +98,9 @@ constexpr auto expectedRawFieldNames = std::to_array<std::string_view>({
     "metal.spectrogramTextureReallocations",
     "metal.spectrogramTextureAllocationFailures",
     "metal.spectrogramUploadBackpressureDrops",
+    "metal.spectrogramUploadDeferrals",
+    "metal.spectrogramScrollClockInitializations",
+    "metal.spectrogramScrollUnderrunFrames",
     "metal.spectrogramUploadCommands",
     "metal.spectrogramUploadBytes",
     "metal.spectrogramLastColumnSequence",
@@ -134,6 +137,7 @@ constexpr auto expectedRawFieldNames = std::to_array<std::string_view>({
     "metal.spectrogramTextureBytes",
     "metal.stereoLastPointCount",
     "metal.backingScale",
+    "metal.spectrogramScrollHeadOffsetColumns",
     "metal.stereoCorrelation",
     "metal.metalAvailable",
     "metal.renderingRequested",
@@ -336,7 +340,7 @@ constexpr auto expectedRawFieldNames = std::to_array<std::string_view>({
     "analysis.peakRmsUserResets",
     "analysis.spectrumUserClears",
 });
-static_assert(expectedRawFieldNames.size() == 280);
+static_assert(expectedRawFieldNames.size() == 284);
 
 const PerformanceMetricRate* findRate(
     const PerformanceMetricsViewModel& view, const std::string_view sourceFieldName)
@@ -591,45 +595,70 @@ public:
             }
         });
 
-        testCase(
-            "Spectrogram upload backpressure is observable and copy commands are explicit", [this] {
-                PerformanceMetricsModel model;
-                PerformanceMetricsSnapshot snapshot;
-                snapshot.metal.epoch = 6;
-                static_cast<void>(model.update(snapshot, 20.0));
+        testCase("Fractional Spectrogram motion and upload pressure remain distinct", [this] {
+            PerformanceMetricsModel model;
+            PerformanceMetricsSnapshot snapshot;
+            snapshot.metal.epoch = 6;
+            static_cast<void>(model.update(snapshot, 20.0));
 
-                snapshot.metal.spectrogramUploadBackpressureDrops = 9;
-                snapshot.metal.spectrogramUploadCommands = 12;
-                const auto view = model.update(snapshot, 22.0);
+            snapshot.metal.spectrogramUploadBackpressureDrops = 9;
+            snapshot.metal.spectrogramUploadDeferrals = 8;
+            snapshot.metal.spectrogramScrollClockInitializations = 2;
+            snapshot.metal.spectrogramScrollUnderrunFrames = 6;
+            snapshot.metal.spectrogramScrollHeadOffsetColumns = -0.375;
+            snapshot.metal.spectrogramUploadCommands = 12;
+            const auto view = model.update(snapshot, 22.0);
 
-                const auto* dropRate = findRate(view, "metal.spectrogramUploadBackpressureDrops");
-                expect(dropRate != nullptr && dropRate->available);
-                if (dropRate != nullptr) {
-                    expectWithinAbsoluteError(dropRate->value, 4.5, 1.0e-12);
-                    expectEquals(
-                        dropRate->label, std::string("Spectrogram upload-backpressure drops"));
-                }
+            const auto* dropRate = findRate(view, "metal.spectrogramUploadBackpressureDrops");
+            expect(dropRate != nullptr && dropRate->available);
+            if (dropRate != nullptr) {
+                expectWithinAbsoluteError(dropRate->value, 4.5, 1.0e-12);
+                expectEquals(dropRate->label, std::string("Spectrogram upload-backpressure drops"));
+            }
 
-                const auto* commandRate = findRate(view, "metal.spectrogramUploadCommands");
-                expect(commandRate != nullptr && commandRate->available);
-                if (commandRate != nullptr) {
-                    expectWithinAbsoluteError(commandRate->value, 6.0, 1.0e-12);
-                    expectEquals(
-                        commandRate->label, std::string("Spectrogram column copy commands"));
-                }
+            const auto* commandRate = findRate(view, "metal.spectrogramUploadCommands");
+            expect(commandRate != nullptr && commandRate->available);
+            if (commandRate != nullptr) {
+                expectWithinAbsoluteError(commandRate->value, 6.0, 1.0e-12);
+                expectEquals(commandRate->label, std::string("Spectrogram column copy commands"));
+            }
 
-                const auto* dropRow = findRawRow(view, "metal.spectrogramUploadBackpressureDrops");
-                expect(dropRow != nullptr);
-                if (dropRow != nullptr) {
-                    expectEquals(dropRow->label,
-                        std::string("Callbacks skipped for an outstanding history upload"));
-                }
+            const auto* deferralRate = findRate(view, "metal.spectrogramUploadDeferrals");
+            expect(deferralRate != nullptr && deferralRate->available);
+            if (deferralRate != nullptr)
+                expectWithinAbsoluteError(deferralRate->value, 4.0, 1.0e-12);
 
-                const auto* commandRow = findRawRow(view, "metal.spectrogramUploadCommands");
-                expect(commandRow != nullptr);
-                if (commandRow != nullptr)
-                    expectEquals(commandRow->label, std::string("History column copy commands"));
-            });
+            const auto* initializationRate
+                = findRate(view, "metal.spectrogramScrollClockInitializations");
+            expect(initializationRate != nullptr && initializationRate->available);
+            if (initializationRate != nullptr)
+                expectWithinAbsoluteError(initializationRate->value, 1.0, 1.0e-12);
+
+            const auto* underrunRate = findRate(view, "metal.spectrogramScrollUnderrunFrames");
+            expect(underrunRate != nullptr && underrunRate->available);
+            if (underrunRate != nullptr)
+                expectWithinAbsoluteError(underrunRate->value, 3.0, 1.0e-12);
+
+            const auto* dropRow = findRawRow(view, "metal.spectrogramUploadBackpressureDrops");
+            expect(dropRow != nullptr);
+            if (dropRow != nullptr) {
+                expectEquals(dropRow->label,
+                    std::string("Full frames skipped for an outstanding history upload"));
+            }
+
+            const auto* offsetRow = findRawRow(view, "metal.spectrogramScrollHeadOffsetColumns");
+            expect(offsetRow != nullptr);
+            if (offsetRow != nullptr) {
+                expectEquals(offsetRow->value, std::string("-0.375"));
+                expectEquals(offsetRow->rawValue, std::string("-0.375"));
+                expectEquals(offsetRow->unit, std::string("columns"));
+            }
+
+            const auto* commandRow = findRawRow(view, "metal.spectrogramUploadCommands");
+            expect(commandRow != nullptr);
+            if (commandRow != nullptr)
+                expectEquals(commandRow->label, std::string("History column copy commands"));
+        });
 
         testCase("Renderer Stereo telemetry has one group and live rates", [this] {
             PerformanceMetricsModel model;

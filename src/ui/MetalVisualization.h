@@ -70,6 +70,53 @@ struct SpectrogramRingAdvance final {
     bool discardedPreviousSpan = false;
 };
 
+struct SpectrogramScrollClockUpdate final {
+    float headOffsetColumns = 0.0F;
+    bool valid = false;
+    bool initializedThisUpdate = false;
+    bool underrun = false;
+};
+
+/**
+    Advances the Scroll-mode display head from display target time rather than
+    from discrete FFT-column arrivals.
+
+    The first column is held one timeline slot ahead of the display head. At a
+    120 Hz display and the default 60 Hz FFT cadence this produces two evenly
+    spaced half-column movements instead of one whole-column jump. Ordinary
+    later column bursts move only the stored-data frontier; an exhausted
+    cushion or expired display head deliberately starts a fresh anchor.
+*/
+class SpectrogramScrollClock final {
+public:
+    void reset() noexcept;
+
+    [[nodiscard]] SpectrogramScrollClockUpdate update(std::uint64_t latestTimelineSlot,
+        std::uint32_t requestedSliceRateHz, double targetPresentationTimestampSeconds,
+        std::uint32_t historyColumnCount) noexcept;
+
+private:
+    double headOffsetColumns_ = 0.0;
+    double previousTargetPresentationTimestampSeconds_ = 0.0;
+    std::uint64_t latestObservedTimelineSlot_ = 0;
+    std::uint32_t requestedSliceRateHz_ = 0;
+    bool initialized_ = false;
+};
+
+/** Keeps fallback display-link timestamps in the presentation-target time domain. */
+class SpectrogramPresentationTimebase final {
+public:
+    void reset() noexcept;
+    [[nodiscard]] double presentationTime(double callbackHostTimeSeconds,
+        double targetTimestampSeconds, double targetPresentationTimestampSeconds) noexcept;
+
+private:
+    double presentationLeadFromTargetSeconds_ = 0.0;
+    double presentationLeadFromCallbackSeconds_ = 0.0;
+    bool hasTargetLead_ = false;
+    bool hasCallbackLead_ = false;
+};
+
 /** Fixed-capacity logical state for the renderer-owned circular history texture. */
 class SpectrogramHistoryRing final {
 public:
@@ -93,6 +140,10 @@ public:
     {
         return timelineSpan_;
     }
+    [[nodiscard]] std::uint64_t latestTimelineSlot() const noexcept
+    {
+        return hasTimeline_ ? lastTimelineSlot_ : 0;
+    }
     [[nodiscard]] bool isColumnValid(std::uint32_t physicalColumn) const noexcept;
     [[nodiscard]] const std::array<std::uint8_t, maximumSpectrogramHistoryColumnCount>&
     validity() const noexcept
@@ -112,6 +163,11 @@ private:
     bool hasTimeline_ = false;
 };
 
+struct SpectrogramUploadCompletion final {
+    std::uint64_t transaction = 0;
+    bool succeeded = false;
+};
+
 /** Serializes upload-bearing command buffers without blocking the display callback. */
 class SpectrogramUploadGate final {
 public:
@@ -120,31 +176,84 @@ public:
         return uploadInFlight_.load(std::memory_order_acquire);
     }
 
-    void beginUpload() noexcept
+    void beginUpload(std::uint64_t transaction) noexcept
     {
+        jassert(transaction != 0);
         jassert(!uploadInFlight_.load(std::memory_order_relaxed));
+        jassert(completedTransaction_.load(std::memory_order_relaxed) == 0);
+        inFlightTransaction_.store(transaction, std::memory_order_relaxed);
         uploadInFlight_.store(true, std::memory_order_release);
     }
 
-    void completeUpload(bool succeeded) noexcept
+    void completeUpload(std::uint64_t transaction, bool succeeded) noexcept
     {
-        if (!succeeded)
-            uploadFailed_.store(true, std::memory_order_release);
+        jassert(transaction != 0);
+        jassert(inFlightTransaction_.load(std::memory_order_relaxed) == transaction);
+        completionSucceeded_.store(succeeded, std::memory_order_relaxed);
+        completedTransaction_.store(transaction, std::memory_order_release);
+        inFlightTransaction_.store(0, std::memory_order_relaxed);
 
-        // The release of the gate follows failure publication. A callback
+        // The release of the gate follows completion publication. A callback
         // which observes the open gate with acquire semantics must therefore
-        // also observe and consume that failure before touching ring state.
+        // also observe and consume that result before starting another upload.
         uploadInFlight_.store(false, std::memory_order_release);
     }
 
-    [[nodiscard]] bool consumeFailure() noexcept
+    [[nodiscard]] std::optional<SpectrogramUploadCompletion> consumeCompletion() noexcept
     {
-        return uploadFailed_.exchange(false, std::memory_order_acq_rel);
+        if (isUploadInFlight())
+            return std::nullopt;
+
+        const auto transaction = completedTransaction_.exchange(0, std::memory_order_acq_rel);
+        if (transaction == 0)
+            return std::nullopt;
+
+        return SpectrogramUploadCompletion { transaction,
+            completionSucceeded_.load(std::memory_order_acquire) };
     }
 
 private:
     std::atomic<bool> uploadInFlight_ { false };
-    std::atomic<bool> uploadFailed_ { false };
+    std::atomic<std::uint64_t> inFlightTransaction_ { 0 };
+    std::atomic<std::uint64_t> completedTransaction_ { 0 };
+    std::atomic<bool> completionSucceeded_ { false };
+};
+
+enum class SpectrogramUploadResolution : std::uint8_t {
+    none,
+    promote,
+    clearHistory,
+    stale,
+};
+
+/** Main-thread record of texture destinations masked by later frames until completion. */
+class PendingSpectrogramUpload final {
+public:
+    void begin(std::uint64_t transaction, std::uint64_t historyRevision,
+        std::uint64_t textureRevision, const std::uint32_t* destinations,
+        std::size_t destinationCount) noexcept;
+    [[nodiscard]] SpectrogramUploadResolution resolve(
+        const std::optional<SpectrogramUploadCompletion>& completion,
+        std::uint64_t currentHistoryRevision, std::uint64_t currentTextureRevision) noexcept;
+    [[nodiscard]] bool isActive() const noexcept
+    {
+        return transaction_ != 0;
+    }
+    [[nodiscard]] const std::uint32_t* destinations() const noexcept
+    {
+        return destinations_.data();
+    }
+    [[nodiscard]] std::size_t destinationCount() const noexcept
+    {
+        return destinationCount_;
+    }
+
+private:
+    std::array<std::uint32_t, maximumSpectrogramColumnsDrainedPerFrame> destinations_ { };
+    std::size_t destinationCount_ = 0;
+    std::uint64_t transaction_ = 0;
+    std::uint64_t historyRevision_ = 0;
+    std::uint64_t textureRevision_ = 0;
 };
 
 [[nodiscard]] std::uint32_t calculateSpectrogramHistoryColumnCount(
@@ -162,6 +271,13 @@ private:
 /** Converts the top-origin quad coordinate used by Metal vertices to low-to-high row order. */
 [[nodiscard]] float spectrogramFrequencyCoordinate(float topOriginCoordinate) noexcept;
 [[nodiscard]] float spectrogramLogicalPixelWidth(float backingScale) noexcept;
+void copySpectrogramRenderValidity(const SpectrogramHistoryRing& ring, std::uint8_t* destination,
+    std::size_t destinationSize, const std::uint32_t* maskedColumns, std::size_t maskedColumnCount,
+    bool forceBlack) noexcept;
+/** Maps a normalized Scroll-mode pixel to the shifted logical history column. */
+[[nodiscard]] std::optional<std::uint32_t> spectrogramScrollSourceColumn(
+    float normalizedHorizontalCoordinate, std::uint32_t historyColumnCount,
+    float headOffsetColumns) noexcept;
 
 inline constexpr std::array<int, 4> spectrumDecibelTickSteps { 6, 12, 24, 48 };
 inline constexpr float minimumSpectrumDecibelLabelSpacing = 28.0F;
@@ -579,6 +695,9 @@ struct MetalRenderTelemetry {
     std::uint64_t spectrogramTextureReallocations = 0;
     std::uint64_t spectrogramTextureAllocationFailures = 0;
     std::uint64_t spectrogramUploadBackpressureDrops = 0;
+    std::uint64_t spectrogramUploadDeferrals = 0;
+    std::uint64_t spectrogramScrollClockInitializations = 0;
+    std::uint64_t spectrogramScrollUnderrunFrames = 0;
     // One command per encoded column copy; completion success is counted
     // separately by spectrogramColumnsUploaded.
     std::uint64_t spectrogramUploadCommands = 0;
@@ -632,6 +751,7 @@ struct MetalRenderTelemetry {
     std::uint64_t spectrogramTextureBytes = 0;
     std::uint32_t stereoLastPointCount = 0;
     double backingScale = 1.0;
+    double spectrogramScrollHeadOffsetColumns = 0.0;
     double stereoCorrelation = 0.0;
     double loudnessMomentaryLufs = 0.0;
     double loudnessShortTermLufs = 0.0;

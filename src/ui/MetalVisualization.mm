@@ -1034,6 +1034,144 @@ SpectrogramPaletteColour interpolatePalette(
 }
 } // namespace
 
+void SpectrogramScrollClock::reset() noexcept
+{
+    headOffsetColumns_ = 0.0;
+    previousTargetPresentationTimestampSeconds_ = 0.0;
+    latestObservedTimelineSlot_ = 0;
+    requestedSliceRateHz_ = 0;
+    initialized_ = false;
+}
+
+void SpectrogramPresentationTimebase::reset() noexcept
+{
+    presentationLeadFromTargetSeconds_ = 0.0;
+    presentationLeadFromCallbackSeconds_ = 0.0;
+    hasTargetLead_ = false;
+    hasCallbackLead_ = false;
+}
+
+double SpectrogramPresentationTimebase::presentationTime(const double callbackHostTimeSeconds,
+    const double targetTimestampSeconds, const double targetPresentationTimestampSeconds) noexcept
+{
+    const auto callbackIsValid
+        = std::isfinite(callbackHostTimeSeconds) && callbackHostTimeSeconds > 0.0;
+    const auto targetIsValid
+        = std::isfinite(targetTimestampSeconds) && targetTimestampSeconds > 0.0;
+    const auto presentationIsValid = std::isfinite(targetPresentationTimestampSeconds)
+        && targetPresentationTimestampSeconds > 0.0;
+
+    if (presentationIsValid) {
+        if (targetIsValid) {
+            presentationLeadFromTargetSeconds_
+                = targetPresentationTimestampSeconds - targetTimestampSeconds;
+            hasTargetLead_ = std::isfinite(presentationLeadFromTargetSeconds_);
+        }
+
+        if (callbackIsValid) {
+            presentationLeadFromCallbackSeconds_
+                = targetPresentationTimestampSeconds - callbackHostTimeSeconds;
+            hasCallbackLead_ = std::isfinite(presentationLeadFromCallbackSeconds_);
+        }
+
+        return targetPresentationTimestampSeconds;
+    }
+
+    if (targetIsValid && hasTargetLead_) {
+        const auto estimate = targetTimestampSeconds + presentationLeadFromTargetSeconds_;
+        if (std::isfinite(estimate) && estimate > 0.0)
+            return estimate;
+    }
+
+    if (callbackIsValid && hasCallbackLead_) {
+        const auto estimate = callbackHostTimeSeconds + presentationLeadFromCallbackSeconds_;
+        if (std::isfinite(estimate) && estimate > 0.0)
+            return estimate;
+    }
+
+    return std::numeric_limits<double>::quiet_NaN();
+}
+
+SpectrogramScrollClockUpdate SpectrogramScrollClock::update(const std::uint64_t latestTimelineSlot,
+    const std::uint32_t requestedSliceRateHz, const double targetPresentationTimestampSeconds,
+    const std::uint32_t historyColumnCount) noexcept
+{
+    if (latestTimelineSlot == 0 || requestedSliceRateHz == 0 || historyColumnCount == 0
+        || historyColumnCount > maximumSpectrogramHistoryColumnCount) {
+        return { };
+    }
+
+    const auto timestampIsValid = std::isfinite(targetPresentationTimestampSeconds)
+        && targetPresentationTimestampSeconds > 0.0;
+    const auto needsInitialization = !initialized_ || requestedSliceRateHz != requestedSliceRateHz_
+        || latestTimelineSlot < latestObservedTimelineSlot_;
+
+    if (needsInitialization) {
+        headOffsetColumns_ = -1.0;
+        previousTargetPresentationTimestampSeconds_
+            = timestampIsValid ? targetPresentationTimestampSeconds : 0.0;
+        latestObservedTimelineSlot_ = latestTimelineSlot;
+        requestedSliceRateHz_ = requestedSliceRateHz;
+        initialized_ = true;
+        return { -1.0F, true, true, false };
+    }
+
+    auto nextOffset = static_cast<long double>(headOffsetColumns_);
+    if (latestTimelineSlot > latestObservedTimelineSlot_) {
+        const auto timelineAdvance = latestTimelineSlot - latestObservedTimelineSlot_;
+        latestObservedTimelineSlot_ = latestTimelineSlot;
+
+        // Once the display has exhausted its one-column cushion, the next
+        // accepted slice is a recovery boundary rather than an ordinary
+        // frontier update. A gap large enough to replace the complete ring is
+        // likewise a new visible span. Re-anchor both cases instead of
+        // leaving either saturation point absorbing at steady analysis rate.
+        if (headOffsetColumns_ >= 1.0 || timelineAdvance >= historyColumnCount) {
+            headOffsetColumns_ = -1.0;
+            previousTargetPresentationTimestampSeconds_
+                = timestampIsValid ? targetPresentationTimestampSeconds : 0.0;
+            return { -1.0F, true, true, false };
+        }
+
+        nextOffset -= static_cast<long double>(timelineAdvance);
+        if (nextOffset <= -static_cast<long double>(historyColumnCount)) {
+            headOffsetColumns_ = -1.0;
+            previousTargetPresentationTimestampSeconds_
+                = timestampIsValid ? targetPresentationTimestampSeconds : 0.0;
+            return { -1.0F, true, true, false };
+        }
+    }
+
+    if (timestampIsValid) {
+        if (previousTargetPresentationTimestampSeconds_ > 0.0
+            && targetPresentationTimestampSeconds > previousTargetPresentationTimestampSeconds_) {
+            const auto elapsedSeconds = static_cast<long double>(
+                targetPresentationTimestampSeconds - previousTargetPresentationTimestampSeconds_);
+            nextOffset += elapsedSeconds * static_cast<long double>(requestedSliceRateHz);
+        }
+
+        if (targetPresentationTimestampSeconds > previousTargetPresentationTimestampSeconds_) {
+            previousTargetPresentationTimestampSeconds_ = targetPresentationTimestampSeconds;
+        }
+    }
+
+    const auto historyLimit = static_cast<long double>(historyColumnCount);
+    if (!std::isfinite(nextOffset))
+        nextOffset = std::signbit(nextOffset) ? -historyLimit : 1.0L;
+
+    constexpr auto phaseEpsilon = 1.0e-9L;
+    if (std::abs(nextOffset) < phaseEpsilon)
+        nextOffset = 0.0L;
+
+    // Let the display head enter at most one future cell while analysis is
+    // delayed. Holding there preserves retained history during a prolonged
+    // transport or capture stall and lets the next accepted column resume the
+    // clock immediately.
+    headOffsetColumns_ = static_cast<double>(std::clamp(nextOffset, -historyLimit, 1.0L));
+    const auto underrun = headOffsetColumns_ >= 1.0;
+    return { static_cast<float>(headOffsetColumns_), true, false, underrun };
+}
+
 void SpectrogramHistoryRing::configure(const std::uint32_t columnCount) noexcept
 {
     const auto bounded = std::min<std::uint32_t>(
@@ -1135,6 +1273,97 @@ std::optional<std::uint32_t> SpectrogramHistoryRing::physicalColumnForScreenColu
 bool SpectrogramHistoryRing::isColumnValid(const std::uint32_t physicalColumn) const noexcept
 {
     return physicalColumn < columnCount_ && validity_[physicalColumn] != 0;
+}
+
+void PendingSpectrogramUpload::begin(const std::uint64_t transaction,
+    const std::uint64_t historyRevision, const std::uint64_t textureRevision,
+    const std::uint32_t* const destinations, const std::size_t destinationCount) noexcept
+{
+    jassert(transaction != 0 && historyRevision != 0 && textureRevision != 0);
+    jassert(!isActive());
+    jassert(destinations != nullptr || destinationCount == 0);
+
+    destinationCount_ = std::min(destinationCount, destinations_.size());
+    if (destinations != nullptr) {
+        std::copy_n(destinations, destinationCount_, destinations_.begin());
+    }
+    transaction_ = transaction;
+    historyRevision_ = historyRevision;
+    textureRevision_ = textureRevision;
+}
+
+SpectrogramUploadResolution PendingSpectrogramUpload::resolve(
+    const std::optional<SpectrogramUploadCompletion>& completion,
+    const std::uint64_t currentHistoryRevision, const std::uint64_t currentTextureRevision) noexcept
+{
+    if (!isActive()) {
+        if (!completion.has_value())
+            return SpectrogramUploadResolution::none;
+
+        return completion->succeeded ? SpectrogramUploadResolution::stale
+                                     : SpectrogramUploadResolution::clearHistory;
+    }
+
+    auto resolution = SpectrogramUploadResolution::clearHistory;
+    if (completion.has_value() && completion->transaction == transaction_) {
+        const auto revisionsMatch = historyRevision_ == currentHistoryRevision
+            && textureRevision_ == currentTextureRevision;
+        resolution = !revisionsMatch ? SpectrogramUploadResolution::stale
+            : completion->succeeded  ? SpectrogramUploadResolution::promote
+                                     : SpectrogramUploadResolution::clearHistory;
+    }
+
+    destinationCount_ = 0;
+    transaction_ = 0;
+    historyRevision_ = 0;
+    textureRevision_ = 0;
+    return resolution;
+}
+
+void copySpectrogramRenderValidity(const SpectrogramHistoryRing& ring,
+    std::uint8_t* const destination, const std::size_t destinationSize,
+    const std::uint32_t* const maskedColumns, const std::size_t maskedColumnCount,
+    const bool forceBlack) noexcept
+{
+    if (destination == nullptr || destinationSize < maximumSpectrogramHistoryColumnCount)
+        return;
+
+    if (forceBlack) {
+        std::memset(destination, 0, maximumSpectrogramHistoryColumnCount);
+        return;
+    }
+
+    std::memcpy(destination, ring.validity().data(), maximumSpectrogramHistoryColumnCount);
+    if (maskedColumns == nullptr)
+        return;
+
+    const auto boundedMaskCount
+        = std::min(maskedColumnCount, maximumSpectrogramColumnsDrainedPerFrame);
+    for (std::size_t index = 0; index < boundedMaskCount; ++index) {
+        if (maskedColumns[index] < ring.columnCount())
+            destination[maskedColumns[index]] = 0;
+    }
+}
+
+std::optional<std::uint32_t> spectrogramScrollSourceColumn(
+    const float normalizedHorizontalCoordinate, const std::uint32_t historyColumnCount,
+    const float headOffsetColumns) noexcept
+{
+    if (!std::isfinite(normalizedHorizontalCoordinate) || !std::isfinite(headOffsetColumns)
+        || historyColumnCount == 0 || historyColumnCount > maximumSpectrogramHistoryColumnCount) {
+        return std::nullopt;
+    }
+
+    constexpr auto maximumNormalizedCoordinate = 1.0F - (1.0F / 65'536.0F);
+    const auto boundedCoordinate
+        = std::clamp(normalizedHorizontalCoordinate, 0.0F, maximumNormalizedCoordinate);
+    const auto shiftedPosition
+        = (boundedCoordinate * static_cast<float>(historyColumnCount)) + headOffsetColumns;
+    if (shiftedPosition < 0.0F || shiftedPosition >= static_cast<float>(historyColumnCount)) {
+        return std::nullopt;
+    }
+
+    return static_cast<std::uint32_t>(std::floor(shiftedPosition));
 }
 
 std::uint32_t calculateSpectrogramHistoryColumnCount(
@@ -1714,6 +1943,9 @@ struct AtomicRenderTelemetry {
     std::atomic<std::uint64_t> spectrogramTextureReallocations { 0 };
     std::atomic<std::uint64_t> spectrogramTextureAllocationFailures { 0 };
     std::atomic<std::uint64_t> spectrogramUploadBackpressureDrops { 0 };
+    std::atomic<std::uint64_t> spectrogramUploadDeferrals { 0 };
+    std::atomic<std::uint64_t> spectrogramScrollClockInitializations { 0 };
+    std::atomic<std::uint64_t> spectrogramScrollUnderrunFrames { 0 };
     std::atomic<std::uint64_t> spectrogramUploadCommands { 0 };
     std::atomic<std::uint64_t> spectrogramUploadBytes { 0 };
     std::atomic<std::uint64_t> spectrogramLastColumnSequence { 0 };
@@ -1761,6 +1993,7 @@ struct AtomicRenderTelemetry {
     std::atomic<std::uint64_t> spectrogramTextureBytes { 0 };
     std::atomic<std::uint32_t> stereoLastPointCount { 0 };
     std::atomic<double> backingScale { 1.0 };
+    std::atomic<double> spectrogramScrollHeadOffsetColumns { 0.0 };
     std::atomic<double> stereoCorrelation { 0.0 };
     std::atomic<double> loudnessMomentaryLufs { 0.0 };
     std::atomic<double> loudnessShortTermLufs { 0.0 };
@@ -1897,7 +2130,7 @@ struct SpectrogramShaderUniforms final {
     float colorFloorDecibels = -120.0F;
     float colorCeilingDecibels = 0.0F;
     float colorResponse = 0.0F;
-    std::uint32_t reserved = 0;
+    float scrollHeadOffsetColumns = 0.0F;
 };
 
 static_assert(sizeof(SpectrogramShaderUniforms) <= spectrogramUniformBufferBytes);
@@ -1925,6 +2158,7 @@ struct SpectrogramUpload final {
 
 struct PreparedSpectrogramUploads final {
     std::array<SpectrogramUpload, maximumSpectrogramColumnsDrainedPerFrame> uploads { };
+    std::array<std::uint32_t, maximumSpectrogramColumnsDrainedPerFrame> destinations { };
     std::size_t count = 0;
 };
 
@@ -2418,7 +2652,7 @@ struct SpectrogramUniforms
     float colorFloorDecibels;
     float colorCeilingDecibels;
     float colorResponse;
-    uint reserved;
+    float scrollHeadOffsetColumns;
 };
 
 struct StereoPointInstance
@@ -2503,9 +2737,18 @@ fragment half4 audioInsightSpectrogramFragment(
     if (uniforms.historyColumnCount == 0 || uniforms.frequencyRowCount == 0)
         return half4(0.0h, 0.0h, 0.0h, 1.0h);
 
-    const float boundedX = clamp(input.textureCoordinate.x, 0.0f, 1.0f);
-    const uint screenColumn = min(uint(boundedX * float(uniforms.historyColumnCount)),
-                                  uniforms.historyColumnCount - 1);
+    constexpr float maximumNormalizedCoordinate = 1.0f - (1.0f / 65536.0f);
+    const float boundedX
+        = clamp(input.textureCoordinate.x, 0.0f, maximumNormalizedCoordinate);
+    const float shiftedScreenPosition
+        = boundedX * float(uniforms.historyColumnCount)
+        + (uniforms.historyMode == 0 ? uniforms.scrollHeadOffsetColumns : 0.0f);
+    if (shiftedScreenPosition < 0.0f
+        || shiftedScreenPosition >= float(uniforms.historyColumnCount)) {
+        return half4(0.0h, 0.0h, 0.0h, 1.0h);
+    }
+
+    const uint screenColumn = uint(floor(shiftedScreenPosition));
     uint physicalColumn = screenColumn;
 
     if (uniforms.historyMode == 0) {
@@ -3051,6 +3294,12 @@ public:
             = telemetry->spectrogramTextureAllocationFailures.load(std::memory_order_relaxed);
         result.spectrogramUploadBackpressureDrops
             = telemetry->spectrogramUploadBackpressureDrops.load(std::memory_order_relaxed);
+        result.spectrogramUploadDeferrals
+            = telemetry->spectrogramUploadDeferrals.load(std::memory_order_relaxed);
+        result.spectrogramScrollClockInitializations
+            = telemetry->spectrogramScrollClockInitializations.load(std::memory_order_relaxed);
+        result.spectrogramScrollUnderrunFrames
+            = telemetry->spectrogramScrollUnderrunFrames.load(std::memory_order_relaxed);
         result.spectrogramUploadCommands
             = telemetry->spectrogramUploadCommands.load(std::memory_order_relaxed);
         result.spectrogramUploadBytes
@@ -3106,6 +3355,8 @@ public:
         result.stereoLastPointCount
             = telemetry->stereoLastPointCount.load(std::memory_order_relaxed);
         result.backingScale = telemetry->backingScale.load(std::memory_order_relaxed);
+        result.spectrogramScrollHeadOffsetColumns
+            = telemetry->spectrogramScrollHeadOffsetColumns.load(std::memory_order_relaxed);
         result.stereoCorrelation = telemetry->stereoCorrelation.load(std::memory_order_relaxed);
         result.loudnessMomentaryLufs
             = telemetry->loudnessMomentaryLufs.load(std::memory_order_relaxed);
@@ -3385,18 +3636,13 @@ public:
         const auto telemetry = callbackTelemetry;
         const auto targetTimestamp = update.targetTimestamp;
         const auto targetPresentationTimestamp = update.targetPresentationTimestamp;
+        const auto scrollTargetTimestamp = spectrogramPresentationTimebase.presentationTime(
+            callbackHostTime, targetTimestamp, targetPresentationTimestamp);
         const auto presentationSequence = recordDisplayLinkCallback(
             *telemetry, callbackHostTime, targetTimestamp, targetPresentationTimestamp);
-
-        // CPU ring validity becomes speculative as soon as a column is staged.
-        // Do not drain, mutate, or render that state from another callback until
-        // the upload-bearing command buffer has completed successfully or
-        // published its failure for the next callback to consume.
-        if (sharedState->spectrogramUploadGate.isUploadInFlight()) {
-            telemetry->spectrogramUploadBackpressureDrops.fetch_add(1, std::memory_order_relaxed);
-            telemetry->skippedPresentations.fetch_add(1, std::memory_order_relaxed);
-            return;
-        }
+        const auto spectrogramUploadDrainDeferred = resolvePendingSpectrogramUpload(*telemetry);
+        const auto forceBlackSpectrogram
+            = spectrogramUploadDrainDeferred && !pendingSpectrogramUpload.isActive();
 
         const auto admission = acquireRenderBuffer();
 
@@ -3462,8 +3708,40 @@ public:
         const auto loudnessSettings = getLoudnessSettings();
         telemetry->loudnessReferenceLufs.store(
             loudnessSettings.referenceLufs, std::memory_order_relaxed);
-        const auto preparedSpectrogramUploads
-            = prepareSpectrogramUploads(slot, spectrogramSettings, *telemetry);
+        PreparedSpectrogramUploads preparedSpectrogramUploads;
+        if (!spectrogramUploadDrainDeferred) {
+            preparedSpectrogramUploads
+                = prepareSpectrogramUploads(slot, spectrogramSettings, *telemetry);
+        }
+        const auto scrollSliceRate = spectrogramHistorySignature.has_value()
+            ? spectrogramHistorySignature->requestedSliceRateHz
+            : static_cast<std::uint32_t>(std::max(0, spectrogramSettings.requestedSliceRateHz));
+        auto spectrogramScrollClockUpdate = SpectrogramScrollClockUpdate { };
+        if (spectrogramSettings.historyMode == SpectrogramRenderHistoryMode::scroll) {
+            spectrogramScrollClockUpdate
+                = spectrogramScrollClock.update(spectrogramHistoryRing.latestTimelineSlot(),
+                    scrollSliceRate, scrollTargetTimestamp, spectrogramHistoryRing.columnCount());
+        } else {
+            spectrogramScrollClock.reset();
+        }
+        telemetry->spectrogramScrollHeadOffsetColumns.store(spectrogramScrollClockUpdate.valid
+                ? static_cast<double>(spectrogramScrollClockUpdate.headOffsetColumns)
+                : 0.0,
+            std::memory_order_relaxed);
+        if (spectrogramScrollClockUpdate.initializedThisUpdate) {
+            telemetry->spectrogramScrollClockInitializations.fetch_add(
+                1, std::memory_order_relaxed);
+        }
+        const auto* maskedSpectrogramColumns
+            = spectrogramUploadDrainDeferred && pendingSpectrogramUpload.isActive()
+            ? pendingSpectrogramUpload.destinations()
+            : nullptr;
+        const auto maskedSpectrogramColumnCount
+            = spectrogramUploadDrainDeferred && pendingSpectrogramUpload.isActive()
+            ? pendingSpectrogramUpload.destinationCount()
+            : 0;
+        writeSpectrogramGpuState(slot, spectrogramSettings, spectrogramScrollClockUpdate,
+            maskedSpectrogramColumns, maskedSpectrogramColumnCount, forceBlackSpectrogram);
         updateInterpolatedDisplayValues(callbackTime);
 
         const auto boundsSize = view.bounds.size;
@@ -3500,7 +3778,8 @@ public:
             = encodeSpectrogramUploads(commandBuffer, slot, preparedSpectrogramUploads, *telemetry);
         if (!spectrogramUploadsEncoded) {
             clearSpectrogramHistory(telemetry.get());
-            writeSpectrogramGpuState(slot, spectrogramSettings);
+            spectrogramScrollClockUpdate = { };
+            writeSpectrogramGpuState(slot, spectrogramSettings, spectrogramScrollClockUpdate);
         }
 
         id<MTLRenderCommandEncoder> encoder =
@@ -3679,10 +3958,18 @@ public:
         const auto commandContainsSpectrogramUploads
             = spectrogramUploadsEncoded && preparedSpectrogramUploads.count != 0;
         const auto commandSpectrogramUploadCount = preparedSpectrogramUploads.count;
+        auto spectrogramUploadTransaction = std::uint64_t { 0 };
+        if (commandContainsSpectrogramUploads) {
+            spectrogramUploadTransaction = allocateSpectrogramUploadTransaction();
+            pendingSpectrogramUpload.begin(spectrogramUploadTransaction, spectrogramHistoryRevision,
+                spectrogramTextureRevision, preparedSpectrogramUploads.destinations.data(),
+                preparedSpectrogramUploads.count);
+        }
         [commandBuffer addCompletedHandler:^(id<MTLCommandBuffer> completedBuffer) {
             const auto commandSucceeded = completedBuffer.status != MTLCommandBufferStatusError;
             if (commandContainsSpectrogramUploads)
-                completionState->spectrogramUploadGate.completeUpload(commandSucceeded);
+                completionState->spectrogramUploadGate.completeUpload(
+                    spectrogramUploadTransaction, commandSucceeded);
 
             // The GPU has finished reading this submission's shared vertex
             // buffer. Presentation may be delayed by several refresh periods,
@@ -3750,7 +4037,7 @@ public:
 
         submission->setCpuReadyTimestamp(hostTimeNanoseconds(CACurrentMediaTime()));
         if (commandContainsSpectrogramUploads)
-            sharedState->spectrogramUploadGate.beginUpload();
+            sharedState->spectrogramUploadGate.beginUpload(spectrogramUploadTransaction);
         [commandBuffer commit];
 
         // CAMetalDisplayLink owns the drawable's presentation timing. Timed presentation APIs
@@ -3778,6 +4065,10 @@ public:
         const auto cpuNanoseconds = nanosecondsBetween(callbackTime, Clock::now());
         telemetry->lastCpuEncodeNanoseconds.store(cpuNanoseconds, std::memory_order_relaxed);
         updateMaximum(telemetry->maximumCpuEncodeNanoseconds, cpuNanoseconds);
+        if (spectrogramSettings.historyMode == SpectrogramRenderHistoryMode::scroll
+            && spectrogramScrollClockUpdate.underrun) {
+            telemetry->spectrogramScrollUnderrunFrames.fetch_add(1, std::memory_order_relaxed);
+        }
         telemetry->submittedFrames.fetch_add(1, std::memory_order_relaxed);
     }
 
@@ -3855,9 +4146,15 @@ private:
     bool hasDisplayFrame = false;
 
     SpectrogramHistoryRing spectrogramHistoryRing;
+    SpectrogramScrollClock spectrogramScrollClock;
+    SpectrogramPresentationTimebase spectrogramPresentationTimebase;
+    PendingSpectrogramUpload pendingSpectrogramUpload;
     std::optional<SpectrogramHistorySignature> spectrogramHistorySignature;
     std::uint32_t spectrogramTextureRowCount = 0;
     std::uint32_t spectrogramTextureColumnCount = 0;
+    std::uint64_t spectrogramHistoryRevision = 1;
+    std::uint64_t spectrogramTextureRevision = 1;
+    std::uint64_t nextSpectrogramUploadTransaction = 0;
 
     Clock::time_point previousInterpolationTime;
     Clock::time_point stereoSnapshotAcceptedTime;
@@ -4458,6 +4755,9 @@ private:
             std::memory_order_relaxed);
         destination.backingScale.store(sourceTelemetry.backingScale.load(std::memory_order_relaxed),
             std::memory_order_relaxed);
+        destination.spectrogramScrollHeadOffsetColumns.store(
+            sourceTelemetry.spectrogramScrollHeadOffsetColumns.load(std::memory_order_relaxed),
+            std::memory_order_relaxed);
         destination.stereoCorrelation.store(
             sourceTelemetry.stereoCorrelation.load(std::memory_order_relaxed),
             std::memory_order_relaxed);
@@ -4511,12 +4811,46 @@ private:
         previousTargetPresentationTimestamp = 0.0;
     }
 
+    static void advanceNonzeroRevision(std::uint64_t& revision) noexcept
+    {
+        ++revision;
+        if (revision == 0)
+            revision = 1;
+    }
+
+    [[nodiscard]] std::uint64_t allocateSpectrogramUploadTransaction() noexcept
+    {
+        advanceNonzeroRevision(nextSpectrogramUploadTransaction);
+        return nextSpectrogramUploadTransaction;
+    }
+
+    [[nodiscard]] bool resolvePendingSpectrogramUpload(AtomicRenderTelemetry& telemetry) noexcept
+    {
+        if (sharedState->spectrogramUploadGate.isUploadInFlight()) {
+            jassert(pendingSpectrogramUpload.isActive());
+            telemetry.spectrogramUploadDeferrals.fetch_add(1, std::memory_order_relaxed);
+            return true;
+        }
+
+        const auto completion = sharedState->spectrogramUploadGate.consumeCompletion();
+        const auto resolution = pendingSpectrogramUpload.resolve(
+            completion, spectrogramHistoryRevision, spectrogramTextureRevision);
+        if (resolution == SpectrogramUploadResolution::clearHistory)
+            clearSpectrogramHistory(&telemetry);
+
+        return false;
+    }
+
     void clearSpectrogramHistory(AtomicRenderTelemetry* const telemetry) noexcept
     {
+        advanceNonzeroRevision(spectrogramHistoryRevision);
         spectrogramHistoryRing.clear();
+        spectrogramScrollClock.reset();
         spectrogramHistorySignature.reset();
-        if (telemetry != nullptr)
+        if (telemetry != nullptr) {
+            telemetry->spectrogramScrollHeadOffsetColumns.store(0.0, std::memory_order_relaxed);
             telemetry->spectrogramHistoryClears.fetch_add(1, std::memory_order_relaxed);
+        }
     }
 
     bool ensureSpectrogramHistoryTexture(const std::uint32_t rowCount,
@@ -4543,6 +4877,8 @@ private:
         descriptor.usage = MTLTextureUsageShaderRead;
         id<MTLTexture> replacement = [view.device newTextureWithDescriptor:descriptor];
         if (replacement == nil) {
+            advanceNonzeroRevision(spectrogramHistoryRevision);
+            advanceNonzeroRevision(spectrogramTextureRevision);
             [spectrogramHistoryTexture release];
             spectrogramHistoryTexture = nil;
             spectrogramTextureRowCount = 0;
@@ -4556,6 +4892,8 @@ private:
         }
 
         replacement.label = @"Audio Insight circular Spectrogram dB history";
+        advanceNonzeroRevision(spectrogramHistoryRevision);
+        advanceNonzeroRevision(spectrogramTextureRevision);
         [spectrogramHistoryTexture release];
         spectrogramHistoryTexture = replacement;
         spectrogramTextureRowCount = rowCount;
@@ -4569,11 +4907,14 @@ private:
         return true;
     }
 
-    void writeSpectrogramGpuState(
-        RenderBufferSlot& slot, const SpectrogramRenderSettings& settings) const noexcept
+    void writeSpectrogramGpuState(RenderBufferSlot& slot, const SpectrogramRenderSettings& settings,
+        const SpectrogramScrollClockUpdate& scrollClockUpdate,
+        const std::uint32_t* const maskedColumns = nullptr, const std::size_t maskedColumnCount = 0,
+        const bool forceBlack = false) const noexcept
     {
-        std::memcpy(slot.spectrogramValidityBuffer.contents,
-            spectrogramHistoryRing.validity().data(), maximumSpectrogramHistoryColumnCount);
+        copySpectrogramRenderValidity(spectrogramHistoryRing,
+            static_cast<std::uint8_t*>(slot.spectrogramValidityBuffer.contents),
+            maximumSpectrogramHistoryColumnCount, maskedColumns, maskedColumnCount, forceBlack);
         const SpectrogramShaderUniforms uniforms {
             spectrogramHistoryRing.columnCount(),
             spectrogramTextureRowCount,
@@ -4584,7 +4925,7 @@ private:
             settings.colorFloorDecibels,
             settings.colorCeilingDecibels,
             settings.colorResponse,
-            0,
+            scrollClockUpdate.valid ? scrollClockUpdate.headOffsetColumns : 0.0F,
         };
         std::memcpy(slot.spectrogramUniformBuffer.contents, &uniforms, sizeof(uniforms));
     }
@@ -4595,8 +4936,7 @@ private:
         PreparedSpectrogramUploads prepared;
         const auto pendingConfigurationClear
             = spectrogramConfigurationClearPending.exchange(false, std::memory_order_acq_rel);
-        const auto previousUploadFailed = sharedState->spectrogramUploadGate.consumeFailure();
-        if (pendingConfigurationClear || previousUploadFailed)
+        if (pendingConfigurationClear)
             clearSpectrogramHistory(&telemetry);
 
         SpectrogramColumn column;
@@ -4674,12 +5014,11 @@ private:
                 staging[row] = static_cast<_Float16>(decibels);
             }
 
+            prepared.destinations[prepared.count] = advance.writeColumn;
             prepared.uploads[prepared.count++] = { static_cast<NSUInteger>(sourceOffset),
                 static_cast<NSUInteger>(advance.writeColumn),
                 static_cast<NSUInteger>(column.rowCount) };
         }
-
-        writeSpectrogramGpuState(slot, settings);
         return prepared;
     }
 
@@ -4728,6 +5067,7 @@ private:
         hasDisplayFrame = false;
         stereoSnapshotAcceptedTime = { };
         clearSpectrogramHistory(callbackTelemetry.get());
+        spectrogramPresentationTimebase.reset();
         spectrogramConfigurationClearPending.store(false, std::memory_order_relaxed);
         previousInterpolationTime = { };
         resetTelemetryTimingAtCallbackBoundary();
