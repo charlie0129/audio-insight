@@ -46,6 +46,18 @@ float spectrumSlopeDecibelsPerOctave(const SpectrumSlope slope) noexcept
     return 0.0F;
 }
 
+MetalDisplayFramePacing metalDisplayFramePacing(const DisplayFramePacing framePacing) noexcept
+{
+    switch (framePacing) {
+    case DisplayFramePacing::fixedMaximum:
+        return MetalDisplayFramePacing::fixedMaximum;
+    case DisplayFramePacing::adaptive:
+        return MetalDisplayFramePacing::adaptive;
+    }
+
+    return MetalDisplayFramePacing::fixedMaximum;
+}
+
 detail::SpectrogramRenderPalette spectrogramRenderPalette(const SpectrogramPalette palette) noexcept
 {
     switch (palette) {
@@ -531,6 +543,7 @@ void PluginEditor::componentVisibilityChanged()
 void PluginEditor::updateAnalyzerRenderSettings(const AnalyzerConfiguration& configuration) noexcept
 {
     const auto sanitized = AnalyzerConfigurationCodec::sanitize(configuration);
+    visualization.setDisplayFramePacing(metalDisplayFramePacing(sanitized.display.framePacing));
     visualization.setSpectrumSettings(SpectrumRenderSettings {
         static_cast<float>(sanitized.spectrum.floorDb),
         static_cast<float>(sanitized.spectrum.ceilingDb),

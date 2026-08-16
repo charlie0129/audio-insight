@@ -63,6 +63,25 @@ PerformanceMetricRow rawBoolean(std::string fieldName, std::string label, const 
         PerformanceMetricKind::raw };
 }
 
+PerformanceMetricRow rawDisplayFramePacing(const MetalDisplayFramePacing framePacing)
+{
+    auto value = std::string { "unknown" };
+    auto rawValue = value;
+    switch (framePacing) {
+    case MetalDisplayFramePacing::fixedMaximum:
+        value = "Fixed maximum";
+        rawValue = "fixedMaximum";
+        break;
+    case MetalDisplayFramePacing::adaptive:
+        value = "Adaptive";
+        rawValue = "adaptive";
+        break;
+    }
+
+    return { "metal.configuredDisplayFramePacing", "Configured display frame pacing",
+        std::move(value), { }, std::move(rawValue), { }, PerformanceMetricKind::raw };
+}
+
 PerformanceMetricRow rawDouble(std::string fieldName, std::string label, const double value,
     std::string unit, const int decimalPlaces)
 {
@@ -274,7 +293,14 @@ void appendRawSections(
     status.rows.emplace_back(rawUnsigned(
         "metal.drawableHeightPixels", "Drawable height", metal.drawableHeightPixels, "px"));
     status.rows.emplace_back(rawUnsigned("metal.configuredMaximumFramesPerSecond",
-        "Configured maximum frame rate", metal.configuredMaximumFramesPerSecond, "Hz"));
+        "Active display reported maximum", metal.configuredMaximumFramesPerSecond, "Hz"));
+    status.rows.emplace_back(rawDisplayFramePacing(metal.configuredDisplayFramePacing));
+    status.rows.emplace_back(rawUnsigned("metal.requestedMinimumFramesPerSecond",
+        "Requested minimum frame rate", metal.requestedMinimumFramesPerSecond, "Hz"));
+    status.rows.emplace_back(rawUnsigned("metal.requestedPreferredFramesPerSecond",
+        "Requested preferred frame rate", metal.requestedPreferredFramesPerSecond, "Hz"));
+    status.rows.emplace_back(rawUnsigned("metal.requestedMaximumFramesPerSecond",
+        "Requested maximum frame rate", metal.requestedMaximumFramesPerSecond, "Hz"));
     status.rows.emplace_back(
         rawDouble("metal.backingScale", "Backing scale", metal.backingScale, "x", 2));
     status.rows.emplace_back(

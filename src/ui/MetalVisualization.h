@@ -18,7 +18,22 @@
 #include <optional>
 
 namespace audio_insight {
+enum class MetalDisplayFramePacing : std::uint8_t {
+    fixedMaximum,
+    adaptive,
+};
+
 namespace detail {
+struct DisplayLinkFrameRateRange final {
+    std::uint32_t minimumFramesPerSecond = 60;
+    std::uint32_t preferredFramesPerSecond = 60;
+    std::uint32_t maximumFramesPerSecond = 60;
+};
+
+/** Builds the best-effort Core Animation request for the active display. */
+[[nodiscard]] DisplayLinkFrameRateRange displayLinkFrameRateRange(
+    int displayMaximumFramesPerSecond, MetalDisplayFramePacing framePacing) noexcept;
+
 inline constexpr float maximumFrequencyAxisFrequencyHz = 20'000.0F;
 inline constexpr std::size_t maximumFrequencyAxisCandidateCount = 320;
 inline constexpr std::size_t maximumFrequencyAxisTickCount = 64;
@@ -745,7 +760,12 @@ struct MetalRenderTelemetry {
 
     std::uint32_t drawableWidthPixels = 0;
     std::uint32_t drawableHeightPixels = 0;
+    // Reported by the active NSScreen; actual cadence remains timestamp-derived.
     std::uint32_t configuredMaximumFramesPerSecond = 0;
+    std::uint32_t requestedMinimumFramesPerSecond = 0;
+    std::uint32_t requestedPreferredFramesPerSecond = 0;
+    std::uint32_t requestedMaximumFramesPerSecond = 0;
+    MetalDisplayFramePacing configuredDisplayFramePacing = MetalDisplayFramePacing::fixedMaximum;
     std::uint32_t spectrogramTextureRows = 0;
     std::uint32_t spectrogramTextureColumns = 0;
     std::uint64_t spectrogramTextureBytes = 0;
@@ -826,6 +846,13 @@ public:
         an empty callback before destroying any state captured by the callback.
     */
     void setEffectiveActivityCallback(EffectiveActivityCallback callback);
+
+    /**
+        Selects the best-effort Core Animation frame-rate request. This is a
+        message-thread presentation setting and does not reset analyzer state.
+    */
+    void setDisplayFramePacing(MetalDisplayFramePacing framePacing) noexcept;
+    [[nodiscard]] MetalDisplayFramePacing getDisplayFramePacing() const noexcept;
 
     /**
         Updates presentation settings without requiring the message thread.

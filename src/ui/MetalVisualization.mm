@@ -55,7 +55,9 @@ class MetalRenderBackend;
 - (void)attachRenderBackend:(audio_insight::detail::MetalRenderBackend*)backend;
 - (void)detachRenderBackend;
 - (void)setDisplayLinkPaused:(BOOL)shouldBePaused;
-- (void)setDisplayLinkMaximumFramesPerSecond:(NSInteger)maximumFramesPerSecond;
+- (void)setDisplayLinkMinimumFramesPerSecond:(NSInteger)minimumFramesPerSecond
+                    preferredFramesPerSecond:(NSInteger)preferredFramesPerSecond
+                      maximumFramesPerSecond:(NSInteger)maximumFramesPerSecond;
 - (BOOL)hasDisplayLink;
 - (BOOL)performSpectrumClearAccessibilityAction;
 - (BOOL)performPeakRmsClearAccessibilityAction;
@@ -84,6 +86,36 @@ class MetalRenderBackend;
 @end
 
 namespace audio_insight::detail {
+namespace {
+constexpr auto fallbackDisplayMaximumFramesPerSecond = 60;
+
+MetalDisplayFramePacing sanitizeMetalDisplayFramePacing(
+    const MetalDisplayFramePacing framePacing) noexcept
+{
+    switch (framePacing) {
+    case MetalDisplayFramePacing::fixedMaximum:
+    case MetalDisplayFramePacing::adaptive:
+        return framePacing;
+    }
+
+    return MetalDisplayFramePacing::fixedMaximum;
+}
+} // namespace
+
+DisplayLinkFrameRateRange displayLinkFrameRateRange(
+    const int displayMaximumFramesPerSecond, const MetalDisplayFramePacing framePacing) noexcept
+{
+    const auto maximum = static_cast<std::uint32_t>(displayMaximumFramesPerSecond > 0
+            ? displayMaximumFramesPerSecond
+            : fallbackDisplayMaximumFramesPerSecond);
+
+    if (sanitizeMetalDisplayFramePacing(framePacing) == MetalDisplayFramePacing::adaptive) {
+        return { std::min(std::uint32_t { 60 }, maximum), maximum, maximum };
+    }
+
+    return { maximum, maximum, maximum };
+}
+
 float mapFrequencyToUnit(const FrequencyAxisMapping& mapping, const float frequencyHz) noexcept
 {
     if (!std::isfinite(mapping.minimumFrequencyHz) || !std::isfinite(mapping.maximumFrequencyHz)
@@ -1988,6 +2020,11 @@ struct AtomicRenderTelemetry {
     std::atomic<std::uint32_t> drawableWidthPixels { 0 };
     std::atomic<std::uint32_t> drawableHeightPixels { 0 };
     std::atomic<std::uint32_t> configuredMaximumFramesPerSecond { 0 };
+    std::atomic<std::uint32_t> requestedMinimumFramesPerSecond { 0 };
+    std::atomic<std::uint32_t> requestedPreferredFramesPerSecond { 0 };
+    std::atomic<std::uint32_t> requestedMaximumFramesPerSecond { 0 };
+    std::atomic<std::uint32_t> configuredDisplayFramePacing { static_cast<std::uint32_t>(
+        MetalDisplayFramePacing::fixedMaximum) };
     std::atomic<std::uint32_t> spectrogramTextureRows { 0 };
     std::atomic<std::uint32_t> spectrogramTextureColumns { 0 };
     std::atomic<std::uint64_t> spectrogramTextureBytes { 0 };
@@ -2926,6 +2963,21 @@ public:
         effectiveActivityCallback = std::move(callback);
     }
 
+    void setDisplayFramePacing(const MetalDisplayFramePacing framePacing) noexcept
+    {
+        assertMessageThread();
+        const auto sanitized = sanitizeMetalDisplayFramePacing(framePacing);
+        packedDisplayFramePacing.store(
+            static_cast<std::uint32_t>(sanitized), std::memory_order_release);
+        applyDisplayFramePacing(activeDisplayMaximumFramesPerSecond);
+    }
+
+    [[nodiscard]] MetalDisplayFramePacing getDisplayFramePacing() const noexcept
+    {
+        return sanitizeMetalDisplayFramePacing(static_cast<MetalDisplayFramePacing>(
+            packedDisplayFramePacing.load(std::memory_order_acquire)));
+    }
+
     void setSpectrumSettings(SpectrumRenderSettings settings) noexcept
     {
         // The ordered analysis stream owns Spectrogram mapping invalidation.
@@ -3346,6 +3398,15 @@ public:
             = telemetry->drawableHeightPixels.load(std::memory_order_relaxed);
         result.configuredMaximumFramesPerSecond
             = telemetry->configuredMaximumFramesPerSecond.load(std::memory_order_relaxed);
+        result.requestedMinimumFramesPerSecond
+            = telemetry->requestedMinimumFramesPerSecond.load(std::memory_order_relaxed);
+        result.requestedPreferredFramesPerSecond
+            = telemetry->requestedPreferredFramesPerSecond.load(std::memory_order_relaxed);
+        result.requestedMaximumFramesPerSecond
+            = telemetry->requestedMaximumFramesPerSecond.load(std::memory_order_relaxed);
+        result.configuredDisplayFramePacing
+            = sanitizeMetalDisplayFramePacing(static_cast<MetalDisplayFramePacing>(
+                telemetry->configuredDisplayFramePacing.load(std::memory_order_relaxed)));
         result.spectrogramTextureRows
             = telemetry->spectrogramTextureRows.load(std::memory_order_relaxed);
         result.spectrogramTextureColumns
@@ -4114,6 +4175,9 @@ private:
     mutable FrequencyAxisTickCache spectrogramFrequencyTickCache;
     juce::String initializationError;
     bool metalReady = false;
+    std::atomic<std::uint32_t> packedDisplayFramePacing { static_cast<std::uint32_t>(
+        MetalDisplayFramePacing::fixedMaximum) };
+    int activeDisplayMaximumFramesPerSecond = fallbackDisplayMaximumFramesPerSecond;
     std::atomic<std::uint64_t> packedSpectrumSettings { 0 };
     std::atomic<std::uint32_t> packedSpectrogramSettings { 0 };
     std::atomic<std::uint32_t> packedLoudnessSettings { 0 };
@@ -4741,6 +4805,18 @@ private:
         destination.configuredMaximumFramesPerSecond.store(
             sourceTelemetry.configuredMaximumFramesPerSecond.load(std::memory_order_relaxed),
             std::memory_order_relaxed);
+        destination.requestedMinimumFramesPerSecond.store(
+            sourceTelemetry.requestedMinimumFramesPerSecond.load(std::memory_order_relaxed),
+            std::memory_order_relaxed);
+        destination.requestedPreferredFramesPerSecond.store(
+            sourceTelemetry.requestedPreferredFramesPerSecond.load(std::memory_order_relaxed),
+            std::memory_order_relaxed);
+        destination.requestedMaximumFramesPerSecond.store(
+            sourceTelemetry.requestedMaximumFramesPerSecond.load(std::memory_order_relaxed),
+            std::memory_order_relaxed);
+        destination.configuredDisplayFramePacing.store(
+            sourceTelemetry.configuredDisplayFramePacing.load(std::memory_order_relaxed),
+            std::memory_order_relaxed);
         destination.spectrogramTextureRows.store(
             sourceTelemetry.spectrogramTextureRows.load(std::memory_order_relaxed),
             std::memory_order_relaxed);
@@ -5157,12 +5233,40 @@ private:
             return;
 
         auto* screen = view.window.screen;
-        const auto maximumFps
+        const auto reportedMaximum
             = screen != nil ? std::max<NSInteger>(1, screen.maximumFramesPerSecond) : 60;
-        [view setDisplayLinkMaximumFramesPerSecond:maximumFps];
+        activeDisplayMaximumFramesPerSecond = reportedMaximum > std::numeric_limits<int>::max()
+            ? std::numeric_limits<int>::max()
+            : static_cast<int>(reportedMaximum);
         loadPublishedTelemetry()->configuredMaximumFramesPerSecond.store(
-            static_cast<std::uint32_t>(maximumFps), std::memory_order_relaxed);
+            static_cast<std::uint32_t>(activeDisplayMaximumFramesPerSecond),
+            std::memory_order_relaxed);
+        applyDisplayFramePacing(activeDisplayMaximumFramesPerSecond);
         updateBackingScale(true);
+    }
+
+    void applyDisplayFramePacing(const int displayMaximumFramesPerSecond) noexcept
+    {
+        const auto framePacing = getDisplayFramePacing();
+        const auto range = displayLinkFrameRateRange(displayMaximumFramesPerSecond, framePacing);
+        const auto telemetry = loadPublishedTelemetry();
+        telemetry->requestedMinimumFramesPerSecond.store(
+            range.minimumFramesPerSecond, std::memory_order_relaxed);
+        telemetry->requestedPreferredFramesPerSecond.store(
+            range.preferredFramesPerSecond, std::memory_order_relaxed);
+        telemetry->requestedMaximumFramesPerSecond.store(
+            range.maximumFramesPerSecond, std::memory_order_relaxed);
+        telemetry->configuredDisplayFramePacing.store(
+            static_cast<std::uint32_t>(framePacing), std::memory_order_relaxed);
+
+        if (view != nil) {
+            [view setDisplayLinkMinimumFramesPerSecond:static_cast<NSInteger>(
+                                                           range.minimumFramesPerSecond)
+                              preferredFramesPerSecond:static_cast<NSInteger>(
+                                                           range.preferredFramesPerSecond)
+                                maximumFramesPerSecond:static_cast<NSInteger>(
+                                                           range.maximumFramesPerSecond)];
+        }
     }
 
     void updateBackingScale(const bool mayRebuildDensityDependentResources)
@@ -6923,14 +7027,19 @@ NSString* makeDashboardAccessibilityString(const juce::String& value)
         metalDisplayLink.paused = shouldBePaused;
 }
 
-- (void)setDisplayLinkMaximumFramesPerSecond:(NSInteger)maximumFramesPerSecond
+- (void)setDisplayLinkMinimumFramesPerSecond:(NSInteger)minimumFramesPerSecond
+                    preferredFramesPerSecond:(NSInteger)preferredFramesPerSecond
+                      maximumFramesPerSecond:(NSInteger)maximumFramesPerSecond
 {
     if (metalDisplayLink == nil)
         return;
 
+    const auto minimum = static_cast<float>(std::max<NSInteger>(1, minimumFramesPerSecond));
+    const auto preferred = static_cast<float>(std::max<NSInteger>(1, preferredFramesPerSecond));
     const auto maximum = static_cast<float>(std::max<NSInteger>(1, maximumFramesPerSecond));
-    const auto minimum = std::min(60.0F, maximum);
-    metalDisplayLink.preferredFrameRateRange = CAFrameRateRangeMake(minimum, maximum, maximum);
+    const auto boundedMinimum = std::min(minimum, maximum);
+    metalDisplayLink.preferredFrameRateRange = CAFrameRateRangeMake(
+        boundedMinimum, maximum, std::clamp(preferred, boundedMinimum, maximum));
 }
 
 - (BOOL)hasDisplayLink
@@ -7080,6 +7189,16 @@ juce::String MetalVisualization::getInitializationError() const
 void MetalVisualization::setEffectiveActivityCallback(EffectiveActivityCallback callback)
 {
     impl->backend->setEffectiveActivityCallback(std::move(callback));
+}
+
+void MetalVisualization::setDisplayFramePacing(const MetalDisplayFramePacing framePacing) noexcept
+{
+    impl->backend->setDisplayFramePacing(framePacing);
+}
+
+MetalDisplayFramePacing MetalVisualization::getDisplayFramePacing() const noexcept
+{
+    return impl->backend->getDisplayFramePacing();
 }
 
 void MetalVisualization::setSpectrumSettings(SpectrumRenderSettings settings) noexcept

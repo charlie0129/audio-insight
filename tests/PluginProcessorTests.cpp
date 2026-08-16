@@ -932,6 +932,23 @@ public:
                     expect(false, "Spectrum floor Settings control was not found");
                 }
 
+                if (auto* pacingControl
+                    = findDescendantWithId(*settingsPanel, "settingsDisplayFramePacing")) {
+                    if (auto* pacing = dynamic_cast<juce::ComboBox*>(pacingControl)) {
+                        pacing->setSelectedId(2, juce::sendNotificationSync);
+                        expect(processor.getAnalyzerConfiguration().display.framePacing
+                            == DisplayFramePacing::adaptive);
+                        if (visualization != nullptr) {
+                            expect(visualization->getDisplayFramePacing()
+                                == MetalDisplayFramePacing::adaptive);
+                        }
+                    } else {
+                        expect(false, "Display pacing Settings control is not a combo box");
+                    }
+                } else {
+                    expect(false, "Display pacing Settings control was not found");
+                }
+
                 metricsButton->onClick();
                 expect(!settingsButton->getToggleState());
                 expect(!settingsPanel->isVisible());

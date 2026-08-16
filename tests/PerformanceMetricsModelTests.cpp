@@ -44,7 +44,7 @@ consteval std::size_t aggregateFieldCount()
 // separately because the view model expands them into individual rows.
 static_assert(aggregateFieldCount<PresentedFrameIntervalSample>() == 2);
 static_assert(aggregateFieldCount<FrameLatencySample>() == 9);
-static_assert(aggregateFieldCount<MetalRenderTelemetry>() == 100);
+static_assert(aggregateFieldCount<MetalRenderTelemetry>() == 104);
 static_assert(aggregateFieldCount<StereoSampleCapture::Telemetry>() == 9);
 static_assert(aggregateFieldCount<StereoMeterAccumulator::Telemetry>() == 7);
 static_assert(aggregateFieldCount<AudioCallbackBlockTelemetry>() == 5);
@@ -132,6 +132,10 @@ constexpr auto expectedRawFieldNames = std::to_array<std::string_view>({
     "metal.drawableWidthPixels",
     "metal.drawableHeightPixels",
     "metal.configuredMaximumFramesPerSecond",
+    "metal.requestedMinimumFramesPerSecond",
+    "metal.requestedPreferredFramesPerSecond",
+    "metal.requestedMaximumFramesPerSecond",
+    "metal.configuredDisplayFramePacing",
     "metal.spectrogramTextureRows",
     "metal.spectrogramTextureColumns",
     "metal.spectrogramTextureBytes",
@@ -340,7 +344,7 @@ constexpr auto expectedRawFieldNames = std::to_array<std::string_view>({
     "analysis.peakRmsUserResets",
     "analysis.spectrumUserClears",
 });
-static_assert(expectedRawFieldNames.size() == 284);
+static_assert(expectedRawFieldNames.size() == 288);
 
 const PerformanceMetricRate* findRate(
     const PerformanceMetricsViewModel& view, const std::string_view sourceFieldName)
@@ -385,6 +389,30 @@ public:
 
     void runTest() override
     {
+        testCase("Display pacing request is explicit in raw telemetry", [this] {
+            PerformanceMetricsModel model;
+            PerformanceMetricsSnapshot snapshot;
+            snapshot.metal.configuredMaximumFramesPerSecond = 144;
+            snapshot.metal.configuredDisplayFramePacing = MetalDisplayFramePacing::fixedMaximum;
+            snapshot.metal.requestedMinimumFramesPerSecond = 144;
+            snapshot.metal.requestedPreferredFramesPerSecond = 144;
+            snapshot.metal.requestedMaximumFramesPerSecond = 144;
+
+            const auto view = model.update(snapshot, 1.0);
+            const auto* pacing = findRawRow(view, "metal.configuredDisplayFramePacing");
+            const auto* minimum = findRawRow(view, "metal.requestedMinimumFramesPerSecond");
+            const auto* preferred = findRawRow(view, "metal.requestedPreferredFramesPerSecond");
+            const auto* maximum = findRawRow(view, "metal.requestedMaximumFramesPerSecond");
+            expect(pacing != nullptr && pacing->value == "Fixed maximum");
+            expect(pacing != nullptr && pacing->rawValue == "fixedMaximum");
+            expect(minimum != nullptr && minimum->rawValue == "144");
+            expect(preferred != nullptr && preferred->rawValue == "144");
+            expect(maximum != nullptr && maximum->rawValue == "144");
+            expect(view.report.find(
+                       "metal.configuredDisplayFramePacing = fixedMaximum (display: Fixed maximum)")
+                != std::string::npos);
+        });
+
         testCase("Exact presented-frame history produces 120 Hz statistics", [this] {
             PerformanceMetricsModel model;
             PerformanceMetricsSnapshot snapshot;
