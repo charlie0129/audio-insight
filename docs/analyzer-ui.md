@@ -349,6 +349,10 @@ Spectrum remains the dominant real-time FFT visualization.
 - Omit `X FREQUENCY`, `Y LEVEL`, and `dBFS` axis-title chrome. Values are
   calibrated internally as dBFS even though compact ticks say `dB`.
 - Display 20 Hz through `min(20 kHz, Nyquist)`.
+- When either visible endpoint falls between FFT-bin centres, interpolate the
+  two bracketing bins in linear power and clip the trace and fill to that exact
+  endpoint. This removes a decorative empty edge without claiming finer FFT
+  resolution than the selected transform provides.
 - Select vertical tick steps from 6, 12, 24, or 48 dB according to panel height,
   retaining at least 28 logical points between labels.
 - Use the shared continuous frequency transform.

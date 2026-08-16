@@ -596,6 +596,50 @@ public:
             detail::spectrumSlopeCompensationDecibels(2'000.0F, 6.0F), 6.0F, 1.0e-6F);
         expectWithinAbsoluteError(
             detail::spectrumSlopeCompensationDecibels(500.0F, 6.0F), -6.0F, 1.0e-6F);
+
+        beginTest("Spectrum clips non-bin-centred endpoints using power interpolation");
+
+        constexpr std::array endpointFftSizes { 1024U, 2048U, 4096U, 8192U, 16384U };
+        for (const auto fftSize : endpointFftSizes) {
+            const auto binFrequency = 48'000.0 / static_cast<double>(fftSize);
+            const auto binCount = static_cast<std::size_t>(fftSize / 2U) + 1;
+            const auto lowerEndpoint
+                = detail::spectrumFrequencyInterpolation(20.0, binFrequency, binCount);
+            const auto upperEndpoint
+                = detail::spectrumFrequencyInterpolation(20'000.0, binFrequency, binCount);
+            expect(lowerEndpoint.valid);
+            expect(upperEndpoint.valid);
+            expectWithinAbsoluteError((static_cast<double>(lowerEndpoint.lowerBin)
+                                          + static_cast<double>(lowerEndpoint.upperBinWeight))
+                    * binFrequency,
+                20.0, 1.0e-4);
+            expectWithinAbsoluteError((static_cast<double>(upperEndpoint.lowerBin)
+                                          + static_cast<double>(upperEndpoint.upperBinWeight))
+                    * binFrequency,
+                20'000.0, 1.0e-4);
+        }
+
+        const auto exactBin
+            = detail::spectrumFrequencyInterpolation(23.4375, 23.4375, std::size_t { 1025 });
+        expect(exactBin.valid);
+        expectEquals(exactBin.lowerBin, std::size_t { 1 });
+        expectEquals(exactBin.upperBin, std::size_t { 1 });
+        expectWithinAbsoluteError(exactBin.upperBinWeight, 0.0F, 0.0F);
+        expect(!detail::spectrumFrequencyInterpolation(-1.0, 10.0, 100).valid);
+        expect(!detail::spectrumFrequencyInterpolation(1'001.0, 10.0, 100).valid);
+        expect(!detail::spectrumFrequencyInterpolation(20.0, 0.0, 100).valid);
+
+        const auto powerInterpolated
+            = detail::interpolateSpectrumPowerDecibels(-20.0F, -40.0F, 0.5F);
+        const auto expectedPowerInterpolation = static_cast<float>(
+            10.0 * std::log10((std::pow(10.0, -2.0) + std::pow(10.0, -4.0)) * 0.5));
+        expectWithinAbsoluteError(powerInterpolated, expectedPowerInterpolation, 1.0e-5F);
+        expect(std::abs(powerInterpolated - (-30.0F)) > 1.0F);
+        expectWithinAbsoluteError(
+            detail::interpolateSpectrumPowerDecibels(-20.0F, -40.0F, 0.0F), -20.0F, 0.0F);
+        expectWithinAbsoluteError(
+            detail::interpolateSpectrumPowerDecibels(-20.0F, -40.0F, 1.0F), -40.0F, 0.0F);
+
         const auto compensatedSilence
             = detail::sanitiseSpectrumAnalysisDecibels(minimumSpectrumDecibels)
             + detail::spectrumSlopeCompensationDecibels(20'000.0F, 6.0F);

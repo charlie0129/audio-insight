@@ -935,6 +935,65 @@ float spectrumSlopeCompensationDecibels(
     return slopeDecibelsPerOctave * std::log2(frequencyHz / 1'000.0F);
 }
 
+SpectrumFrequencyInterpolation spectrumFrequencyInterpolation(
+    const double frequencyHz, const double binFrequencyHz, const std::size_t binCount) noexcept
+{
+    SpectrumFrequencyInterpolation result;
+    if (!std::isfinite(frequencyHz) || frequencyHz < 0.0 || !std::isfinite(binFrequencyHz)
+        || binFrequencyHz <= 0.0 || binCount == 0) {
+        return result;
+    }
+
+    const auto lastBin = binCount - 1;
+    const auto maximumFrequency = static_cast<double>(lastBin) * binFrequencyHz;
+    const auto tolerance = std::max(binFrequencyHz * 1.0e-6,
+        std::max(1.0, maximumFrequency)
+            * (4.0 * static_cast<double>(std::numeric_limits<float>::epsilon())));
+    if (frequencyHz > maximumFrequency + tolerance)
+        return result;
+
+    const auto fractionalBin
+        = std::clamp(frequencyHz / binFrequencyHz, 0.0, static_cast<double>(lastBin));
+    const auto lowerBin = static_cast<std::size_t>(std::floor(fractionalBin));
+    const auto fractionalWeight = fractionalBin - static_cast<double>(lowerBin);
+    constexpr auto exactBinTolerance = 1.0e-9;
+
+    result.lowerBin = lowerBin;
+    result.upperBin
+        = fractionalWeight <= exactBinTolerance || lowerBin == lastBin ? lowerBin : lowerBin + 1;
+    result.upperBinWeight
+        = result.upperBin == lowerBin ? 0.0F : static_cast<float>(fractionalWeight);
+    result.valid = true;
+    return result;
+}
+
+float interpolateSpectrumPowerDecibels(
+    const float lowerDecibels, const float upperDecibels, const float upperBinWeight) noexcept
+{
+    const auto lower = sanitiseSpectrumAnalysisDecibels(lowerDecibels);
+    const auto upper = sanitiseSpectrumAnalysisDecibels(upperDecibels);
+    const auto weight
+        = std::clamp(std::isfinite(upperBinWeight) ? upperBinWeight : 0.0F, 0.0F, 1.0F);
+    if (weight <= 0.0F)
+        return lower;
+    if (weight >= 1.0F)
+        return upper;
+
+    // Factor out the larger value before converting to power so unusually
+    // large finite analyzer values cannot overflow pow().
+    const auto reference = std::max(lower, upper);
+    const auto lowerPower = std::pow(10.0, static_cast<double>(lower - reference) / 10.0);
+    const auto upperPower = std::pow(10.0, static_cast<double>(upper - reference) / 10.0);
+    const auto interpolatedPower = ((1.0 - static_cast<double>(weight)) * lowerPower)
+        + (static_cast<double>(weight) * upperPower);
+    if (!std::isfinite(interpolatedPower) || interpolatedPower <= 0.0)
+        return minimumSpectrumDecibels;
+
+    const auto decibels = static_cast<double>(reference) + (10.0 * std::log10(interpolatedPower));
+    return std::isfinite(decibels) ? std::max(minimumSpectrumDecibels, static_cast<float>(decibels))
+                                   : minimumSpectrumDecibels;
+}
+
 float sanitiseSpectrumAnalysisDecibels(const float decibels) noexcept
 {
     return std::isfinite(decibels) ? std::max(decibels, minimumSpectrumDecibels)
@@ -5264,37 +5323,61 @@ private:
         const auto spectrumHeldColour = simd_make_float4(traceRed, traceGreen, traceBlue, 0.62F);
         std::array<simd_float2, maximumSpectrumBinCount> spectrumPoints;
         std::size_t pointCount = 0;
-        auto binFrequency = 0.0F;
-        auto firstBin = std::size_t { 0 };
-        auto finalBin = std::size_t { 0 };
+        auto binFrequency = 0.0;
         const auto canRenderSpectrum = spectrumPlot.width() > 0.0F && spectrumPlot.height() > 0.0F
             && hasDisplayFrame && targetFrame.spectrumValid && targetFrame.sampleRate > 0.0
             && detail::hasSupportedSpectrumMetadata(targetFrame);
 
-        if (canRenderSpectrum) {
-            binFrequency = static_cast<float>(
-                targetFrame.sampleRate / static_cast<double>(targetFrame.spectrumFftSize));
-            firstBin = std::max<std::size_t>(
-                1, static_cast<std::size_t>(std::ceil(minimumSpectrumFrequency / binFrequency)));
-            finalBin = std::min<std::size_t>(targetFrame.spectrumBinCount - 1,
-                static_cast<std::size_t>(std::floor(maximumFrequency / binFrequency)));
-        }
+        if (canRenderSpectrum)
+            binFrequency
+                = targetFrame.sampleRate / static_cast<double>(targetFrame.spectrumFftSize);
 
         const auto buildSpectrumPoints = [&](const auto& decibels) noexcept {
             pointCount = 0;
-            if (!canRenderSpectrum || binFrequency <= 0.0F || firstBin > finalBin)
+            if (!canRenderSpectrum || binFrequency <= 0.0)
                 return;
 
-            for (auto bin = firstBin; bin <= finalBin && pointCount < spectrumPoints.size();
-                ++bin) {
-                const auto frequency
-                    = std::max(minimumSpectrumFrequency, static_cast<float>(bin) * binFrequency);
-                const auto compensatedDecibels = decibels[bin]
+            const auto appendPoint = [&](const float frequency,
+                                         const float pointDecibels) noexcept {
+                if (pointCount >= spectrumPoints.size())
+                    return;
+
+                const auto compensatedDecibels = pointDecibels
                     + spectrumSlopeCompensationDecibels(frequency, settings.slopeDecibelsPerOctave);
                 spectrumPoints[pointCount++] = simd_make_float2(frequencyToX(frequency),
                     decibelsToY(
                         compensatedDecibels, settings.floorDecibels, settings.ceilingDecibels));
+            };
+            const auto appendInterpolatedPoint
+                = [&](const float frequency, const auto& interpolation) noexcept {
+                      appendPoint(frequency,
+                          interpolateSpectrumPowerDecibels(decibels[interpolation.lowerBin],
+                              decibels[interpolation.upperBin], interpolation.upperBinWeight));
+                  };
+
+            const auto lowerEndpoint
+                = spectrumFrequencyInterpolation(static_cast<double>(minimumSpectrumFrequency),
+                    binFrequency, targetFrame.spectrumBinCount);
+            const auto upperEndpoint = spectrumFrequencyInterpolation(
+                static_cast<double>(maximumFrequency), binFrequency, targetFrame.spectrumBinCount);
+            if (!lowerEndpoint.valid || !upperEndpoint.valid)
+                return;
+
+            // Endpoint samples plus only the bin centres strictly between
+            // them keep the curve clipped to the exact visible range without
+            // duplicating an endpoint that happens to land on a bin centre.
+            appendInterpolatedPoint(minimumSpectrumFrequency, lowerEndpoint);
+            const auto firstInteriorBin = lowerEndpoint.lowerBin + 1;
+            const auto onePastFinalInteriorBin = upperEndpoint.lowerBin == upperEndpoint.upperBin
+                ? upperEndpoint.lowerBin
+                : upperEndpoint.upperBin;
+            for (auto bin = firstInteriorBin;
+                bin < onePastFinalInteriorBin && pointCount < spectrumPoints.size(); ++bin) {
+                const auto frequency = static_cast<float>(static_cast<double>(bin) * binFrequency);
+                appendPoint(frequency, decibels[bin]);
             }
+
+            appendInterpolatedPoint(maximumFrequency, upperEndpoint);
         };
         const auto appendThickTrace
             = [&](const float halfWidth, const simd_float4 colour) noexcept {

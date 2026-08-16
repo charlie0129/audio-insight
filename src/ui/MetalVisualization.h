@@ -343,6 +343,13 @@ struct SpectrumDecibelTicks final {
     int displayedStep = spectrumDecibelTickSteps.back();
 };
 
+struct SpectrumFrequencyInterpolation final {
+    std::size_t lowerBin = 0;
+    std::size_t upperBin = 0;
+    float upperBinWeight = 0.0F;
+    bool valid = false;
+};
+
 /**
     Maps frequency to [0, 1] using the accepted linear/logarithmic blend.
 
@@ -451,6 +458,14 @@ struct SpectrumDecibelTicks final {
 /** Presentation-only slope adjustment referenced to 1 kHz. */
 [[nodiscard]] float spectrumSlopeCompensationDecibels(
     float frequencyHz, float slopeDecibelsPerOctave) noexcept;
+
+/** Locates the FFT-bin centres bracketing one visible Spectrum frequency. */
+[[nodiscard]] SpectrumFrequencyInterpolation spectrumFrequencyInterpolation(
+    double frequencyHz, double binFrequencyHz, std::size_t binCount) noexcept;
+
+/** Interpolates two calibrated dB values as linear power. */
+[[nodiscard]] float interpolateSpectrumPowerDecibels(
+    float lowerDecibels, float upperDecibels, float upperBinWeight) noexcept;
 
 /** Preserves calibrated analyzer dB until final presentation-range clipping. */
 [[nodiscard]] float sanitiseSpectrumAnalysisDecibels(float decibels) noexcept;
