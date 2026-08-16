@@ -6,34 +6,25 @@
 
 #import <AppKit/AppKit.h>
 
-#include <cmath>
 #include <utility>
 
 namespace audio_insight {
 bool detail::RedundantMouseMoveCoalescer::shouldForward(const bool isInEditorScope,
-    const bool bypass, const void* const target, const std::uint64_t modifierFlags,
-    const double timestampSeconds) noexcept
+    const bool bypass, const void* const target, const std::uint64_t modifierFlags) noexcept
 {
     if (!isInEditorScope || bypass || target == nullptr) {
         reset();
         return true;
     }
 
-    const auto timestampIsValid = std::isfinite(timestampSeconds) && timestampSeconds >= 0.0;
-    const auto elapsedSinceForward = timestampIsValid && hasPreviousForwardTimestamp_
-        ? timestampSeconds - previousForwardTimestampSeconds_
-        : 0.0;
-    const auto heartbeatIsDue = !timestampIsValid || !hasPreviousForwardTimestamp_
-        || elapsedSinceForward < 0.0 || elapsedSinceForward >= heartbeatIntervalSeconds;
-    const auto shouldForward = !hasPreviousMove_ || previousTarget_ != target
-        || previousModifierFlags_ != modifierFlags || heartbeatIsDue;
+    // Do not add a time-based heartbeat here. In SoundSource, one forwarded
+    // move can block on several synchronous WindowServer queries long enough
+    // that every subsequently delivered move would become heartbeat-eligible.
+    const auto shouldForward
+        = !hasPreviousMove_ || previousTarget_ != target || previousModifierFlags_ != modifierFlags;
     previousTarget_ = target;
     previousModifierFlags_ = modifierFlags;
     hasPreviousMove_ = true;
-    if (shouldForward) {
-        previousForwardTimestampSeconds_ = timestampIsValid ? timestampSeconds : 0.0;
-        hasPreviousForwardTimestamp_ = timestampIsValid;
-    }
     return shouldForward;
 }
 
@@ -41,9 +32,7 @@ void detail::RedundantMouseMoveCoalescer::reset() noexcept
 {
     previousTarget_ = nullptr;
     previousModifierFlags_ = 0;
-    previousForwardTimestampSeconds_ = 0.0;
     hasPreviousMove_ = false;
-    hasPreviousForwardTimestamp_ = false;
 }
 
 class EditorMouseMoveFilter::Impl final {
@@ -142,10 +131,12 @@ private:
         ++telemetry_.mouseMovedEvents;
 
         const auto layoutEditBypass = bypassProvider_ && bypassProvider_();
-        const auto pressedButtonBypass = NSEvent.pressedMouseButtons != 0;
+        // Pressed movement arrives as one of AppKit's dragged event types,
+        // none of which this monitor observes. Avoid a redundant process-wide
+        // pressed-button query on the already problematic passive path.
         const auto tabletBypass = event.subtype == NSEventSubtypeTabletPoint
             || event.subtype == NSEventSubtypeTabletProximity;
-        const auto bypass = layoutEditBypass || pressedButtonBypass || tabletBypass;
+        const auto bypass = layoutEditBypass || tabletBypass;
 
         if (layoutEditBypass)
             ++telemetry_.layoutEditBypassedMouseMovedEvents;
@@ -156,7 +147,7 @@ private:
         auto* const target = editor_.getComponentAt(juce::Point<float> {
             static_cast<float>(localPoint.x), static_cast<float>(localPoint.y) });
         const auto shouldForward = coalescer_.shouldForward(
-            true, bypass, target, static_cast<std::uint64_t>(event.modifierFlags), event.timestamp);
+            true, bypass, target, static_cast<std::uint64_t>(event.modifierFlags));
 
         if (bypass || target == nullptr)
             previousTarget_ = nullptr;

@@ -735,10 +735,12 @@ authorize fake values, background work, or speculative resource allocation.
 - Diagnosed SoundSource mouse-motion stalls as synchronous host AppKit/window-
   server work triggered by JUCE passive mouse handling, starving the main-thread
   display link. Audio Insight now coalesces redundant same-target passive moves
-  within the owning editor/window, with a bounded 15 Hz pointer-position
-  heartbeat, while preserving component transitions, modifier changes,
-  controls, drags, wheels, tablet input, popups, and all layout-edit
-  interaction.
+  within the owning editor/window while preserving component transitions,
+  modifier changes, controls, drags, wheels, tablet input, popups, and all
+  layout-edit interaction. Same-target passive coordinates remain coalesced
+  until one of those state boundaries because even a low-rate heartbeat can
+  sustain SoundSource's synchronous WindowServer overload; project components
+  do not consume continuous passive `mouseMove` callbacks.
 - Kept analysis-backlog recovery scoped: it resets Spectrum temporal state, but
   a `resetEpoch` change alone no longer hard-clears Spectrogram history.
   Timestamp advancement represents missing or coalesced intervals as black gap

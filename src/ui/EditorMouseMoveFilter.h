@@ -15,18 +15,14 @@ namespace detail {
 /** Pure decision state for coalescing redundant same-target mouse moves. */
 class RedundantMouseMoveCoalescer final {
 public:
-    static constexpr double heartbeatIntervalSeconds = 1.0 / 15.0;
-
     [[nodiscard]] bool shouldForward(bool isInEditorScope, bool bypass, const void* target,
-        std::uint64_t modifierFlags, double timestampSeconds) noexcept;
+        std::uint64_t modifierFlags) noexcept;
     void reset() noexcept;
 
 private:
     const void* previousTarget_ = nullptr;
     std::uint64_t previousModifierFlags_ = 0;
-    double previousForwardTimestampSeconds_ = 0.0;
     bool hasPreviousMove_ = false;
-    bool hasPreviousForwardTimestamp_ = false;
 };
 } // namespace detail
 
