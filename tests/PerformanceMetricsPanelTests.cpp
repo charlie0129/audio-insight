@@ -318,6 +318,28 @@ public:
             expect(lastMetric != nullptr && content != nullptr
                 && lastMetric->getBottom() <= content->getHeight());
 
+            if (viewport != nullptr && content != nullptr) {
+                expect(content->hitTest(20, 20));
+
+                const auto eventTime = juce::Time::getCurrentTime();
+                const auto targetPoint = juce::Point<float> { 20.0F, 20.0F };
+                const juce::MouseEvent wheelEvent(juce::Desktop::getInstance().getMainMouseSource(),
+                    targetPoint, juce::ModifierKeys { }, juce::MouseInputSource::defaultPressure,
+                    juce::MouseInputSource::defaultOrientation,
+                    juce::MouseInputSource::defaultRotation, juce::MouseInputSource::defaultTiltX,
+                    juce::MouseInputSource::defaultTiltY, content, content, eventTime, targetPoint,
+                    eventTime, 0, false);
+                constexpr juce::MouseWheelDetails wheel {
+                    0.0F,
+                    -1.0F,
+                    false,
+                    false,
+                    false,
+                };
+                content->mouseWheelMove(wheelEvent, wheel);
+                expect(viewport->getViewPositionY() > 0);
+            }
+
             if (firstMetric != nullptr) {
                 auto* label = dynamic_cast<juce::Label*>(firstMetric);
                 expect(label != nullptr);

@@ -228,7 +228,7 @@ public:
     {
         setName("All performance metrics");
         setComponentID("performanceMetricsContent");
-        setInterceptsMouseClicks(false, true);
+        setInterceptsMouseClicks(true, true);
 
         graphAccessibilityLabel_.setComponentID("presentedFramePacingGraphAccessibility");
         graphAccessibilityLabel_.setDescription(
