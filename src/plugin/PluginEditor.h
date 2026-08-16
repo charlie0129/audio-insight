@@ -87,6 +87,7 @@ private:
     bool editorIsAttached = false;
     bool editorComponentIsVisible = false;
     bool mainControlsRequestedVisible = true;
+    bool aboutKeepsVisualizationVisible = false;
     std::atomic<bool> shuttingDown { false };
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR(PluginEditor)

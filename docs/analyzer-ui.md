@@ -180,7 +180,7 @@ legacy control's response curve, keeping the initial amount within the requested
 `0.3–0.5` range without retaining an ambiguous unitless control or duplicating it
 in the toolbar.
 
-### Settings and Metrics exclusivity
+### Utility-panel exclusivity
 
 Settings and Metrics do not coexist:
 
@@ -201,8 +201,33 @@ logical points for the preview. The compact preview keeps the five-tile
 topology, but may suppress secondary labels and layout editing. Metrics' own
 vblank-paced graphs and throttled numeric/table updates continue normally.
 
-About remains a separate full-content utility view and may continue to pause the
-canvas while visible.
+About is mutually exclusive in presentation with Settings and Metrics, but it
+does not change either panel's underlying state. Opening About temporarily hides
+the current utility presentation. Closing it reveals the then-current Settings,
+Metrics, or dashboard state, including a legitimate Metrics request or other
+state change observed while About was open; it does not roll state back to an
+entry snapshot.
+
+When the dashboard is active as About opens, show About as a right-side sibling
+panel with a compact live Metal preview. Prefer 50% of the content width, clamp
+the panel to 360–700 logical points, and always leave at least 320 logical points
+for Metal. This presentation keeps sample capture, analysis, history
+accumulation, display-link callbacks, and Metal submission active, without
+advancing a capture/lifecycle generation or resetting Spectrogram history,
+Spectrum averaging or peak holds, Peak/RMS holds or OVER latches, Stereo state,
+or Loudness integration.
+
+If About opens while narrow-width, full-content Settings has already paused the
+dashboard, show About full-content as well and preserve that existing paused
+lifecycle; do not reactivate and immediately reset analysis merely to provide a
+preview. About's body scrolls vertically as needed in either presentation, while
+its title and Close control remain fixed and reachable.
+
+Closing About applies Settings' presentation rule at the editor's current
+width. Consequently, resizing across Settings' 1080-logical-point side/full
+threshold while About is open can legitimately cross the existing Settings
+lifecycle boundary when Settings is revealed. That transition belongs to the
+current Settings state and width, not to an About state rollback.
 
 ## Saved settings and host automation
 
@@ -670,7 +695,11 @@ The accepted lifecycle policy applies to every panel:
 - on reactivation, advance the capture/lifecycle generation, discard stale
   snapshots, reset temporal state, and warm up from current audio.
 
-Opening a side Settings or Metrics panel while the canvas remains visible does
-not make the editor inactive. Full-content Settings and About views cover and
-pause the canvas; Metrics always retains its compact live preview. No analyzer
-retains or reconstructs an inactive interval.
+Opening side Settings, Metrics, or side-panel About while the live Metal preview
+remains visible does not make the editor inactive. About opened from already
+paused full-content Settings remains full-content and paused, so that switch
+also causes no lifecycle transition. Closing About reveals the current
+underlying utility state; if Settings is then full-content because its state or
+the editor width changed while About was open, the normal Settings lifecycle
+boundary applies. No analyzer retains or reconstructs a genuinely inactive
+interval.

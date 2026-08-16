@@ -3,6 +3,7 @@
 #include "PluginEditor.h"
 
 #include <algorithm>
+#include <cmath>
 #include <functional>
 #include <utility>
 
@@ -84,8 +85,15 @@ public:
           sponsorLink("Sponsor development", juce::URL { sponsorUrl })
     {
         setName("About and legal information");
+        setComponentID("aboutPanel");
         setOpaque(true);
         setFocusContainerType(juce::Component::FocusContainerType::keyboardFocusContainer);
+
+        scrollableContent.setComponentID("aboutScrollableContent");
+        contentViewport.setComponentID("aboutViewport");
+        contentViewport.setScrollBarsShown(true, false);
+        contentViewport.setViewedComponent(&scrollableContent, false);
+        addAndMakeVisible(contentViewport);
 
         titleLabel.setText("Audio Insight - About & Legal", juce::dontSendNotification);
         titleLabel.setFont(juce::Font { juce::FontOptions { 23.0F, juce::Font::bold } });
@@ -111,7 +119,8 @@ public:
         legalLabel.setJustificationType(juce::Justification::topLeft);
         legalLabel.setMinimumHorizontalScale(0.92F);
         legalLabel.setInterceptsMouseClicks(false, false);
-        addAndMakeVisible(legalLabel);
+        legalLabel.setComponentID("aboutLegalText");
+        scrollableContent.addAndMakeVisible(legalLabel);
 
         sponsorMessage.setText(
             "If Audio Insight is useful to you, consider sponsoring its development.",
@@ -120,7 +129,8 @@ public:
         sponsorMessage.setColour(juce::Label::textColourId, secondaryText);
         sponsorMessage.setJustificationType(juce::Justification::centredLeft);
         sponsorMessage.setInterceptsMouseClicks(false, false);
-        addAndMakeVisible(sponsorMessage);
+        sponsorMessage.setComponentID("aboutSponsorMessage");
+        scrollableContent.addAndMakeVisible(sponsorMessage);
 
         sourceLink.setFont(
             juce::Font { juce::FontOptions { 13.0F } }, false, juce::Justification::centredLeft);
@@ -128,7 +138,8 @@ public:
         sourceLink.setTooltip("Open the Audio Insight source repository in your browser");
         sourceLink.setWantsKeyboardFocus(true);
         sourceLink.setExplicitFocusOrder(2);
-        addAndMakeVisible(sourceLink);
+        sourceLink.setComponentID("aboutSourceLink");
+        scrollableContent.addAndMakeVisible(sourceLink);
 
         sponsorLink.setFont(
             juce::Font { juce::FontOptions { 13.0F } }, false, juce::Justification::centredRight);
@@ -136,9 +147,11 @@ public:
         sponsorLink.setTooltip("Open the Audio Insight sponsorship page in your browser");
         sponsorLink.setWantsKeyboardFocus(true);
         sponsorLink.setExplicitFocusOrder(3);
-        addAndMakeVisible(sponsorLink);
+        sponsorLink.setComponentID("aboutSponsorLink");
+        scrollableContent.addAndMakeVisible(sponsorLink);
 
         closeButton.setTooltip("Return to the visualization");
+        closeButton.setComponentID("aboutClose");
         closeButton.setWantsKeyboardFocus(true);
         closeButton.setExplicitFocusOrder(1);
         closeButton.onClick = [this] {
@@ -196,16 +209,33 @@ public:
         titleLabel.setBounds(titleRow);
 
         content.removeFromTop(14);
+        contentViewport.setBounds(content);
 
-        auto linkRow = content.removeFromBottom(26);
+        const auto scrollBarWidth = contentViewport.getScrollBarThickness();
+        const auto scrollableWidth = std::max(1, content.getWidth() - scrollBarWidth);
+        juce::AttributedString legalText;
+        legalText.append(legalLabel.getText(), legalLabel.getFont(), secondaryText);
+        legalText.setJustification(juce::Justification::topLeft);
+        legalText.setWordWrap(juce::AttributedString::byWord);
+        juce::TextLayout legalLayout;
+        legalLayout.createLayout(legalText, static_cast<float>(scrollableWidth));
+
+        constexpr int legalBottomSpacing = 6;
+        constexpr int sponsorMessageHeight = 42;
+        constexpr int linkRowHeight = 26;
+        const auto legalHeight = std::max(1, juce::roundToInt(std::ceil(legalLayout.getHeight())));
+        const auto requiredContentHeight
+            = legalHeight + legalBottomSpacing + sponsorMessageHeight + linkRowHeight;
+        scrollableContent.setSize(
+            scrollableWidth, std::max(content.getHeight(), requiredContentHeight));
+
+        auto scrollBounds = scrollableContent.getLocalBounds();
+        auto linkRow = scrollBounds.removeFromBottom(linkRowHeight);
         sourceLink.setBounds(linkRow.removeFromLeft(std::min(210, linkRow.getWidth() / 2)));
         sponsorLink.setBounds(linkRow);
-
-        auto sponsorRow = content.removeFromBottom(42);
-        sponsorMessage.setBounds(sponsorRow);
-
-        content.removeFromBottom(6);
-        legalLabel.setBounds(content);
+        sponsorMessage.setBounds(scrollBounds.removeFromBottom(sponsorMessageHeight));
+        scrollBounds.removeFromBottom(legalBottomSpacing);
+        legalLabel.setBounds(scrollBounds);
     }
 
 private:
@@ -219,6 +249,8 @@ private:
 
     std::function<void()> closeAction;
     juce::Label titleLabel;
+    juce::Component scrollableContent;
+    juce::Viewport contentViewport;
     juce::Label legalLabel;
     juce::Label sponsorMessage;
     juce::HyperlinkButton sourceLink;
@@ -321,6 +353,7 @@ PluginEditor::PluginEditor(PluginProcessor& processorToUse, VisualizationDataSou
     };
     addAndMakeVisible(metricsButton);
 
+    aboutButton.setComponentID("aboutToggle");
     aboutButton.setTooltip("Show license, source, third-party, and sponsorship information");
     aboutButton.onClick = [this] { setAboutVisible(true); };
     addAndMakeVisible(aboutButton);
@@ -402,8 +435,9 @@ void PluginEditor::resized()
     const auto settingsPresentation = utilityState.settingsPresentation(bounds.getWidth());
     const auto settingsIsVisible
         = !aboutIsVisible && !editingLayout && settingsPresentation != SettingsPresentation::closed;
-    const auto dashboardIsVisible
-        = !aboutIsVisible && utilityState.shouldRenderDashboard(bounds.getWidth());
+    const auto dashboardIsVisible = aboutIsVisible
+        ? aboutKeepsVisualizationVisible
+        : utilityState.shouldRenderDashboard(bounds.getWidth());
     const auto metricsAreVisible
         = !aboutIsVisible && !editingLayout && utilityState.isMetricsVisible();
 
@@ -433,8 +467,24 @@ void PluginEditor::resized()
         metricsPanel.setBounds(panelBounds);
     }
 
+    if (aboutIsVisible && aboutKeepsVisualizationVisible) {
+        constexpr int minimumVisualizationWidth = 320;
+        constexpr int preferredMinimumAboutWidth = 360;
+        constexpr int maximumAboutWidth = 700;
+        constexpr int dividerWidth = 1;
+
+        const auto availableAboutWidth
+            = std::max(1, bounds.getWidth() - minimumVisualizationWidth - dividerWidth);
+        const auto minimumAboutWidth = std::min(preferredMinimumAboutWidth, availableAboutWidth);
+        const auto aboutWidth = std::clamp(juce::roundToInt(bounds.getWidth() * 0.5F),
+            minimumAboutWidth, std::min(maximumAboutWidth, availableAboutWidth));
+        aboutOverlay->setBounds(bounds.removeFromRight(aboutWidth));
+        bounds.removeFromRight(dividerWidth);
+    } else if (aboutIsVisible) {
+        aboutOverlay->setBounds(bounds);
+    }
+
     visualization.setBounds(bounds);
-    aboutOverlay->setBounds(getLocalBounds());
     updateRenderingState();
 }
 
@@ -525,7 +575,9 @@ void PluginEditor::updateRenderingState()
 
     const auto aboutIsVisible = aboutOverlay != nullptr && aboutOverlay->isVisible();
     const auto contentWidth = getWidth();
-    const auto dashboardShouldRender = utilityState.shouldRenderDashboard(contentWidth);
+    const auto dashboardShouldRender = aboutIsVisible
+        ? aboutKeepsVisualizationVisible
+        : utilityState.shouldRenderDashboard(contentWidth);
     const auto editorIsActive
         = !shuttingDown.load(std::memory_order_acquire) && editorIsShowing && editorIsAttached;
     if (editorIsActive && !isTimerRunning())
@@ -533,7 +585,7 @@ void PluginEditor::updateRenderingState()
     else if (!editorIsActive && isTimerRunning())
         stopTimer();
 
-    const auto shouldRender = editorIsActive && !aboutIsVisible && dashboardShouldRender;
+    const auto shouldRender = editorIsActive && dashboardShouldRender;
     visualization.setRenderingActive(shouldRender);
     metricsPanel.setPollingActive(shouldRender && metricsPanel.isVisible());
 }
@@ -639,7 +691,7 @@ void PluginEditor::setAboutVisible(bool shouldBeVisible)
         return;
 
     if (shouldBeVisible) {
-        visualization.setVisible(false);
+        aboutKeepsVisualizationVisible = utilityState.shouldRenderDashboard(getWidth());
         metricsPanel.setVisible(false);
         settingsPanel.setVisible(false);
         setMainControlsVisible(false);
@@ -648,10 +700,14 @@ void PluginEditor::setAboutVisible(bool shouldBeVisible)
         aboutOverlay->focusInitialControl();
     } else {
         aboutOverlay->setVisible(false);
+        aboutKeepsVisualizationVisible = false;
         setMainControlsVisible(true);
+        updateUtilityPresentation();
 
         if (aboutButton.isShowing())
             aboutButton.grabKeyboardFocus();
+
+        return;
     }
 
     resized();

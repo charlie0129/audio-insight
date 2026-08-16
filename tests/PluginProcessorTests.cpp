@@ -666,6 +666,19 @@ public:
             auto* metricsPanel = editor->findChildWithID("performanceMetricsPanel");
             auto* settingsControl = editor->findChildWithID("analyzerSettingsToggle");
             auto* settingsPanel = editor->findChildWithID("analyzerSettingsPanel");
+            auto* aboutControl = editor->findChildWithID("aboutToggle");
+            auto* aboutPanel = editor->findChildWithID("aboutPanel");
+            auto* aboutCloseControl
+                = aboutPanel != nullptr ? findDescendantWithId(*aboutPanel, "aboutClose") : nullptr;
+            auto* aboutViewportComponent = aboutPanel != nullptr
+                ? findDescendantWithId(*aboutPanel, "aboutViewport")
+                : nullptr;
+            auto* aboutScrollableContent = aboutPanel != nullptr
+                ? findDescendantWithId(*aboutPanel, "aboutScrollableContent")
+                : nullptr;
+            auto* aboutSponsorLink = aboutPanel != nullptr
+                ? findDescendantWithId(*aboutPanel, "aboutSponsorLink")
+                : nullptr;
             auto* editLayoutControl = editor->findChildWithID("dashboardLayoutEditToggle");
             auto* doneLayoutControl = editor->findChildWithID("dashboardLayoutDone");
             auto* cancelLayoutControl = editor->findChildWithID("dashboardLayoutCancel");
@@ -675,6 +688,12 @@ public:
             expect(metricsPanel != nullptr);
             expect(settingsControl != nullptr);
             expect(settingsPanel != nullptr);
+            expect(aboutControl != nullptr);
+            expect(aboutPanel != nullptr);
+            expect(aboutCloseControl != nullptr);
+            expect(aboutViewportComponent != nullptr);
+            expect(aboutScrollableContent != nullptr);
+            expect(aboutSponsorLink != nullptr);
             expect(editLayoutControl != nullptr);
             expect(doneLayoutControl != nullptr);
             expect(cancelLayoutControl != nullptr);
@@ -682,9 +701,13 @@ public:
             expect(visualizationComponent != nullptr);
             expect(metricsPanel != nullptr && metricsPanel->isVisible());
             expect(settingsPanel != nullptr && !settingsPanel->isVisible());
+            expect(aboutPanel != nullptr && !aboutPanel->isVisible());
 
             auto* metricsButton = dynamic_cast<juce::Button*>(metricsControl);
             auto* settingsButton = dynamic_cast<juce::Button*>(settingsControl);
+            auto* aboutButton = dynamic_cast<juce::Button*>(aboutControl);
+            auto* aboutCloseButton = dynamic_cast<juce::Button*>(aboutCloseControl);
+            auto* aboutViewport = dynamic_cast<juce::Viewport*>(aboutViewportComponent);
             auto* editLayoutButton = dynamic_cast<juce::Button*>(editLayoutControl);
             auto* doneLayoutButton = dynamic_cast<juce::Button*>(doneLayoutControl);
             auto* cancelLayoutButton = dynamic_cast<juce::Button*>(cancelLayoutControl);
@@ -692,6 +715,9 @@ public:
             auto* visualization = dynamic_cast<MetalVisualization*>(visualizationComponent);
             expect(metricsButton != nullptr);
             expect(settingsButton != nullptr);
+            expect(aboutButton != nullptr);
+            expect(aboutCloseButton != nullptr);
+            expect(aboutViewport != nullptr);
             expect(editLayoutButton != nullptr);
             expect(doneLayoutButton != nullptr);
             expect(cancelLayoutButton != nullptr);
@@ -720,7 +746,10 @@ public:
             }
 
             if (settingsButton != nullptr && settingsPanel != nullptr && metricsPanel != nullptr
-                && metricsButton != nullptr) {
+                && metricsButton != nullptr && aboutButton != nullptr && aboutPanel != nullptr
+                && aboutCloseButton != nullptr && aboutViewport != nullptr
+                && aboutScrollableContent != nullptr && aboutSponsorLink != nullptr
+                && visualizationComponent != nullptr) {
                 settingsButton->onClick();
                 expect(settingsButton->getToggleState());
                 expect(settingsPanel->isVisible());
@@ -729,6 +758,130 @@ public:
                 expect(metricsButton->getDescription().containsIgnoreCase("temporarily hidden"));
                 if (metrics != nullptr)
                     expectWithinAbsoluteError(metrics->getValue(), 1.0F, 0.0001F);
+
+                aboutButton->onClick();
+                expect(aboutPanel->isVisible());
+                expect(!settingsPanel->isVisible());
+                expect(!metricsPanel->isVisible());
+                expect(visualizationComponent->isVisible());
+                expect(!aboutButton->isVisible());
+                expect(metricsButton->getToggleState());
+                expect(aboutPanel->getBounds() == juce::Rectangle<int>(600, 52, 600, 748));
+                expect(
+                    visualizationComponent->getBounds() == juce::Rectangle<int>(0, 52, 599, 748));
+
+                aboutCloseButton->onClick();
+                expect(!aboutPanel->isVisible());
+                expect(settingsButton->getToggleState());
+                expect(settingsPanel->isVisible());
+                expect(!metricsPanel->isVisible());
+                expect(visualizationComponent->isVisible());
+                expect(metricsButton->getToggleState());
+
+                aboutButton->onClick();
+                expect(aboutPanel->isVisible());
+                expect(!settingsPanel->isVisible());
+                expect(!metricsPanel->isVisible());
+                expect(visualizationComponent->isVisible());
+
+                editor->setSize(720, 420);
+                expect(aboutPanel->getBounds() == juce::Rectangle<int>(360, 52, 360, 368),
+                    "Unexpected minimum-size About bounds: " + aboutPanel->getBounds().toString());
+                expect(visualizationComponent->getBounds() == juce::Rectangle<int>(0, 52, 359, 368),
+                    "Unexpected minimum-size Metal bounds: "
+                        + visualizationComponent->getBounds().toString());
+                expect(aboutCloseButton->isVisible()
+                        && aboutPanel->getLocalBounds().contains(aboutCloseButton->getBounds()),
+                    "About Close is not reachable at minimum size");
+                expect(aboutScrollableContent->getHeight() > aboutViewport->getViewHeight(),
+                    "About content does not overflow its minimum-size viewport: content="
+                        + juce::String(aboutScrollableContent->getHeight())
+                        + ", view=" + juce::String(aboutViewport->getViewHeight()));
+                expect(aboutSponsorLink->getBottom() <= aboutScrollableContent->getHeight(),
+                    "The final About link lies outside the scrollable content");
+                expectEquals(aboutViewport->getViewPositionY(), 0,
+                    "The newly opened About viewport did not begin at the top");
+
+                const auto eventTime = juce::Time::getCurrentTime();
+                const auto targetPoint = juce::Point<float> { 20.0F, 20.0F };
+                const juce::MouseEvent wheelEvent(juce::Desktop::getInstance().getMainMouseSource(),
+                    targetPoint, juce::ModifierKeys { }, juce::MouseInputSource::defaultPressure,
+                    juce::MouseInputSource::defaultOrientation,
+                    juce::MouseInputSource::defaultRotation, juce::MouseInputSource::defaultTiltX,
+                    juce::MouseInputSource::defaultTiltY, aboutScrollableContent,
+                    aboutScrollableContent, eventTime, targetPoint, eventTime, 0, false);
+                constexpr juce::MouseWheelDetails wheel {
+                    0.0F,
+                    -1.0F,
+                    false,
+                    false,
+                    false,
+                };
+                aboutScrollableContent->mouseWheelMove(wheelEvent, wheel);
+                expect(aboutViewport->getViewPositionY() > 0,
+                    "A downward wheel event did not scroll the minimum-size About viewport");
+
+                editor->setSize(2000, 800);
+                expect(aboutPanel->getBounds() == juce::Rectangle<int>(1300, 52, 700, 748));
+                expect(
+                    visualizationComponent->getBounds() == juce::Rectangle<int>(0, 52, 1299, 748));
+
+                editor->setSize(1200, 800);
+                settingsButton->onClick();
+                expect(!settingsButton->getToggleState());
+                expect(!settingsPanel->isVisible());
+                expect(metricsButton->getToggleState());
+                aboutCloseButton->onClick();
+                expect(!aboutPanel->isVisible());
+                expect(!settingsButton->getToggleState());
+                expect(!settingsPanel->isVisible());
+                expect(metricsPanel->isVisible());
+                expect(visualizationComponent->isVisible());
+                expect(aboutButton->isVisible());
+                expect(metricsButton->getToggleState());
+                if (metrics != nullptr)
+                    expectWithinAbsoluteError(metrics->getValue(), 1.0F, 0.0001F);
+
+                aboutButton->onClick();
+                expect(aboutPanel->isVisible());
+                expect(!settingsPanel->isVisible());
+                expect(!metricsPanel->isVisible());
+                expect(visualizationComponent->isVisible());
+                aboutCloseButton->onClick();
+                expect(!aboutPanel->isVisible());
+                expect(!settingsPanel->isVisible());
+                expect(metricsPanel->isVisible());
+                expect(visualizationComponent->isVisible());
+                expect(metricsButton->getToggleState());
+
+                aboutButton->onClick();
+                metricsButton->onClick();
+                expect(!metricsButton->getToggleState());
+                if (metrics != nullptr)
+                    expectWithinAbsoluteError(metrics->getValue(), 0.0F, 0.0001F);
+                aboutCloseButton->onClick();
+                expect(!aboutPanel->isVisible());
+                expect(!settingsPanel->isVisible());
+                expect(!metricsPanel->isVisible());
+                expect(visualizationComponent->isVisible());
+
+                aboutButton->onClick();
+                expect(aboutPanel->isVisible());
+                aboutCloseButton->onClick();
+                expect(!aboutPanel->isVisible());
+                expect(!settingsPanel->isVisible());
+                expect(!metricsPanel->isVisible());
+                expect(visualizationComponent->isVisible());
+
+                aboutButton->onClick();
+                settingsButton->onClick();
+                expect(settingsButton->getToggleState());
+                aboutCloseButton->onClick();
+                expect(!aboutPanel->isVisible());
+                expect(settingsPanel->isVisible());
+                expect(!metricsPanel->isVisible());
+                expect(visualizationComponent->isVisible());
+                expect(!metricsButton->getToggleState());
 
                 editor->setSize(1079, 800);
                 expect(settingsPanel->isVisible());
@@ -772,6 +925,30 @@ public:
                 expect(!metricsPanel->isVisible());
                 if (metrics != nullptr)
                     expectWithinAbsoluteError(metrics->getValue(), 0.0F, 0.0001F);
+
+                editor->setSize(720, 420);
+                settingsButton->onClick();
+                expect(settingsButton->getToggleState());
+                expect(settingsPanel->isVisible());
+                expect(settingsPanel->getBounds() == juce::Rectangle<int>(0, 52, 720, 368));
+                expect(!visualizationComponent->isVisible());
+                aboutButton->onClick();
+                expect(aboutPanel->isVisible());
+                expect(!settingsPanel->isVisible());
+                expect(!metricsPanel->isVisible());
+                expect(!visualizationComponent->isVisible());
+                expect(aboutPanel->getBounds() == juce::Rectangle<int>(0, 52, 720, 368));
+                aboutCloseButton->onClick();
+                expect(!aboutPanel->isVisible());
+                expect(settingsPanel->isVisible());
+                expect(settingsPanel->getBounds() == juce::Rectangle<int>(0, 52, 720, 368));
+                expect(!metricsPanel->isVisible());
+                expect(!visualizationComponent->isVisible());
+
+                settingsButton->onClick();
+                expect(!settingsPanel->isVisible());
+                expect(visualizationComponent->isVisible());
+                editor->setSize(1200, 800);
 
                 if (editLayoutButton != nullptr && doneLayoutButton != nullptr
                     && cancelLayoutButton != nullptr && resetLayoutButton != nullptr

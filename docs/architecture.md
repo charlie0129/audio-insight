@@ -35,6 +35,7 @@ an incidental result of analysis.
 | Signal analysis | Initially use CPU analysis and Apple's Accelerate/vDSP where useful. GPU compute is deferred until profiling demonstrates a benefit. |
 | Frequency presentation | Expose one continuous Linear-to-Logarithmic frequency-spacing control, including intermediate mappings. Spectrum and Spectrogram share the same setting and coordinate transform; they do not have independent frequency scales. |
 | Dashboard interface | Keep one fixed-topology five-tile dashboard with one Spectrum and no separate focus mode. Spectrum, Peak/RMS, Spectrogram, Stereo/correlation, and standards-based Loudness are live. Allow only the four grid-snapped width/height splits defined in [the analyzer interface requirements](analyzer-ui.md). |
+| Utility panels | Keep Settings, Metrics, and About mutually exclusive in presentation without letting About mutate their underlying state. When the dashboard is active on entry, About is a right-side sibling with a live Metal preview, preferring 50% width clamped to 360–700 logical points while leaving at least 320 points for Metal. From already-paused full-content Settings, About remains full-content and paused. Closing reveals current utility state rather than rolling it back. |
 | Interface state | Save analyzer settings and the Metrics toggle as non-automatable per-instance state, and the four-split layout as one versioned per-user global preference. Do not serialize transient history, holds, integration, Settings/About visibility, or uncommitted edits. |
 | Real-time handoff | The audio callback writes only to bounded, non-blocking data structures. Analysis and rendering never make the audio thread wait. |
 | Overflow policy | Prefer current visual data: coalesce or discard the oldest unclaimed analysis input, detect discontinuities by sequence number, and reset temporal analysis state across a gap. Never overwrite a slot being read or delay audio. |
@@ -43,7 +44,7 @@ an incidental result of analysis.
 | Display timing | Pace frames from the active display's refresh cycle, with smooth 60 Hz and 120 Hz/ProMotion behavior where the host and display permit it. Measure the cadence and deadlines actually granted by the display-link update rather than inferring them from the screen's advertised maximum refresh rate. |
 | Performance observability | Offer an opt-in, persisted, per-instance metrics panel in Release builds. Show every collected renderer and analysis metric, exact presented-frame pacing history, per-frame callback-to-presentation latency composition, derived rates, and copyable raw reports without mutating the host process. |
 | DPI support | Treat layout units and render pixels separately and support both regular-density and Retina displays, including live movement between them. |
-| Editor lifecycle | Stop sample capture, analysis, history, display-link activity, and Metal submission when the editor is closed, hidden, or occluded beyond a short debounce. Reopening starts with fresh analysis state. |
+| Editor lifecycle | Stop sample capture, analysis, history, display-link activity, and Metal submission when the editor is closed, hidden, or occluded beyond a short debounce. Reopening starts with fresh analysis state. About preserves the lifecycle state present when it opens: an active dashboard remains live, while already-paused full-content Settings remains paused. |
 | Analyzer milestone | The initial usable baseline was a large real-time FFT spectrum with compact mono/stereo sample-peak/RMS meters. The current dashboard also implements bounded shared-FFT Spectrogram history, fixed-scale Stereo field/correlation, and BS.1770-5 / EBU R128 M/S/I Loudness semantics. |
 | Portability | Keep DSP, analysis, and product state independent of Metal behind a small renderer boundary. The architecture accommodates a future Windows backend, but Windows is not a near-term supported target. |
 | Distribution | A paid Apple Developer account, Developer ID signing, and notarization are out of scope unless this policy is explicitly revisited. See [macOS distribution](macos-distribution.md). |
@@ -277,6 +278,17 @@ audio.
 
 Returning from either inactive state begins a new capture/lifecycle generation;
 the first release does not attempt to reconstruct the missing interval.
+
+A sibling utility panel sharing the editor content area is not host occlusion.
+Metrics retains a compact live Metal preview. About does the same when the
+dashboard is active as it opens, preserving capture, analysis, history, display
+timing, Metal submission, holds, Stereo state, and Loudness integration without
+advancing the capture/lifecycle generation. If About opens from already-paused
+full-content Settings, it remains full-content and preserves that paused state
+instead of reactivating analysis. Closing About reveals current utility state.
+If Settings is revealed on the other side of its 1080-point presentation
+threshold after a resize, its existing lifecycle transition applies. Detailed
+behavior lives in [the analyzer interface requirements](analyzer-ui.md).
 
 JUCE's non-real-time `prepareToPlay` boundary reports the active sample rate and
 mono/stereo layout to the coordinator. A changed format closes capture, cancels
@@ -655,6 +667,13 @@ authorize fake values, background work, or speculative resource allocation.
 
 ### 2026-08-16
 
+- Made About presentation lifecycle-preserving rather than state-restoring. An
+  active dashboard keeps a right-side About panel and compact live Metal preview
+  at a preferred 50% width, clamped to 360–700 logical points while leaving at
+  least 320 points for Metal. Already-paused full-content Settings instead keeps
+  About full-content and paused. About does not mutate or roll back Settings or
+  Metrics state; closing reveals the current state under the current-width
+  Settings presentation rule.
 - Made capture-discontinuity rollover a two-artifact renderer fence with
   generation-qualified acknowledgements, cancellation-safe episode commit,
   post-gap destructive-acquisition retention, and delayed producer
