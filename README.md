@@ -13,6 +13,24 @@ Integrated Loudness.
 
 Also see the corresponding blog: https://blog.chlc.cc/p/building-audio-insight
 
+## Performance architecture
+
+Audio Insight is optimized across both analysis and rendering rather than
+treating a high frame-rate counter as the goal. On macOS, its
+`juce::dsp::FFT` analysis uses Apple's Accelerate/vDSP implementation. Spectrum
+and Spectrogram share each calibrated FFT result, preallocated handoff storage
+keeps the audio callback bounded and non-blocking, and a plugin-module-wide
+two-worker pool avoids creating a thread for every analyzer or plugin instance.
+
+Rendering is handled by a native, display-synchronized Metal backend. All five
+tiles share one canvas, drawable, command buffer, and render pass. The
+Spectrogram keeps calibrated dB values in a circular 16-bit-float (`R16Float`)
+texture, so scrolling changes texture coordinates and palette or range changes
+happen in the shader instead of copying or recalculating the history. The
+default FFT cadence is 60 slices per second, while Metal requests the active
+display's maximum and renders at the delivered display-link cadence. Immutable
+snapshots keep those two rates independent.
+
 ## Using the analyzer dashboard
 
 <img width="1200" height="800" alt="Audio Insight dashboard with all five analyzers" src="https://github.com/user-attachments/assets/cd63ca6e-7976-406d-a028-b7d11b40fe06" />
