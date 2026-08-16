@@ -12,6 +12,7 @@
 #include <condition_variable>
 #include <cstddef>
 #include <cstdint>
+#include <memory>
 #include <mutex>
 #include <numbers>
 #include <span>
@@ -1180,6 +1181,8 @@ public:
                 expect(telemetry.meterCapturedFrameEnd == ordinaryCaptureWindowFrames);
             }
 
+            testAnalysisBacklogResetsSpectrumWithoutCaptureGap();
+
             beginTest("A capture gap publishes a sequenced invalid Spectrum before warm-up");
             {
                 AnalysisCoordinator coordinator;
@@ -2040,8 +2043,118 @@ public:
 #endif
     }
 
-#if defined(JUCE_UNIT_TESTS) && JUCE_UNIT_TESTS
 private:
+    void testAnalysisBacklogResetsSpectrumWithoutCaptureGap()
+    {
+        beginTest("Analysis backlog resets Spectrum without creating a capture gap");
+
+        constexpr auto configuredFftSize = std::size_t { 8192 };
+        constexpr auto queuedFrames = std::size_t { 15'872 };
+        constexpr auto expectedDiscardedFrames = queuedFrames - configuredFftSize;
+        static_assert(queuedFrames % StereoSampleCapture::framesPerSlot == 0);
+
+        struct Fixture final {
+            AnalysisCoordinator coordinator;
+            SpectrogramColumn activationMarker;
+            std::array<float, StereoSampleCapture::framesPerSlot> samples { };
+            AnalysisTelemetry beforeWarmup;
+            VisualizationFrame warmFrame;
+            AnalysisTelemetry beforeBacklog;
+            AnalysisTelemetry queuedTelemetry;
+            VisualizationFrame backlogFrame;
+            SpectrogramColumn backlogColumn;
+            AnalysisTelemetry afterBacklog;
+        };
+
+        // runTest() is intentionally broad and already has a large Debug stack
+        // frame. Keep this regression's sizeable snapshots out of its caller's
+        // remaining stack.
+        auto fixture = std::make_unique<Fixture>();
+        auto& coordinator = fixture->coordinator;
+        coordinator.setSpectrumAnalysisConfiguration(
+            { configuredFftSize, FftWindow::fiveTermFlatTop, 60 });
+        coordinator.setVisualizationActive(true);
+
+        expect(coordinator.copyNextSpectrogramColumn(fixture->activationMarker));
+        expect(fixture->activationMarker.resetMarker);
+
+        fixture->beforeWarmup = coordinator.telemetry();
+        fixture->samples.fill(0.25F);
+        captureRepeated(coordinator, fixture->samples, fixture->samples,
+            configuredFftSize / StereoSampleCapture::framesPerSlot);
+
+        expect(waitForFrame(coordinator, fixture->warmFrame, [](const auto& candidate) {
+            return candidate.spectrumValid
+                && candidate.spectrumCapturedFrameEnd == configuredFftSize;
+        }));
+        expect(waitUntil([&] {
+            return coordinator.telemetry().jobsCompleted > fixture->beforeWarmup.jobsCompleted;
+        }));
+
+        fixture->beforeBacklog = coordinator.telemetry();
+        const auto& beforeBacklog = fixture->beforeBacklog;
+        expect(beforeBacklog.backlogDiscardedFrames == 0);
+        expect(beforeBacklog.capture.reclaimedReadyChunks == 0);
+        expect(beforeBacklog.capture.droppedIncomingChunks == 0);
+        expect(beforeBacklog.capture.overflowEpisodes == 0);
+        expect(beforeBacklog.capture.consumerDiscontinuities == 0);
+
+        // Let the request-rate gate opened by the warm-up expire. The backlog
+        // below is then serviced by exactly one explicit request.
+        std::this_thread::sleep_for(20ms);
+
+        fixture->samples.fill(0.5F);
+        captureRepeated(coordinator, fixture->samples, fixture->samples,
+            queuedFrames / StereoSampleCapture::framesPerSlot);
+
+        fixture->queuedTelemetry = coordinator.telemetry();
+        const auto& queuedTelemetry = fixture->queuedTelemetry;
+        expect(queuedTelemetry.capture.readyFrames == queuedFrames);
+        expect(queuedTelemetry.capture.reclaimedReadyChunks == 0);
+        expect(queuedTelemetry.capture.droppedIncomingChunks == 0);
+        expect(queuedTelemetry.capture.overflowEpisodes == 0);
+        expect(queuedTelemetry.capture.consumerDiscontinuities == 0);
+
+        coordinator.requestAnalysis();
+        expect(waitUntil(
+            [&] { return coordinator.telemetry().jobsCompleted > beforeBacklog.jobsCompleted; }));
+
+        auto& backlogFrame = fixture->backlogFrame;
+        expect(coordinator.copyLatestVisualizationFrame(backlogFrame));
+        expect(backlogFrame.spectrumValid);
+        expect(backlogFrame.spectrumCapturedFrameEnd == configuredFftSize + queuedFrames);
+        expect(backlogFrame.generation == fixture->warmFrame.generation);
+        expect(backlogFrame.fftGeneration == fixture->warmFrame.fftGeneration);
+
+        auto& backlogColumn = fixture->backlogColumn;
+        expect(coordinator.copyNextSpectrogramColumn(backlogColumn));
+        expect(!backlogColumn.resetMarker);
+        expect(!backlogColumn.captureBoundary);
+        expect(backlogColumn.capturedFrameEnd == configuredFftSize + queuedFrames);
+        expect(backlogColumn.capturedFrameEnd > fixture->warmFrame.spectrumCapturedFrameEnd);
+        expect(backlogColumn.captureGeneration == fixture->activationMarker.captureGeneration);
+        expect(backlogColumn.fftGeneration == fixture->activationMarker.fftGeneration);
+        expect(backlogColumn.mappingGeneration == fixture->activationMarker.mappingGeneration);
+        expect(backlogColumn.resetEpoch == fixture->activationMarker.resetEpoch + 1,
+            "The latest-wins truncation did not reset Spectrum temporal state");
+        expect(!coordinator.copyNextSpectrogramColumn(backlogColumn));
+
+        fixture->afterBacklog = coordinator.telemetry();
+        const auto& afterBacklog = fixture->afterBacklog;
+        expect(afterBacklog.backlogDiscardedFrames == expectedDiscardedFrames);
+        expect(afterBacklog.capture.reclaimedReadyChunks == 0);
+        expect(afterBacklog.capture.droppedIncomingChunks == 0);
+        expect(afterBacklog.capture.overflowEpisodes == 0);
+        expect(afterBacklog.capture.consumerDiscontinuities == 0);
+        expect(afterBacklog.captureGeneration == beforeBacklog.captureGeneration);
+        expect(afterBacklog.fftGeneration == beforeBacklog.fftGeneration);
+        expect(afterBacklog.spectrogramMappingGeneration
+            == beforeBacklog.spectrogramMappingGeneration);
+        expect(afterBacklog.jobsCompleted == beforeBacklog.jobsCompleted + 1,
+            "The queued audio was not serviced by exactly one worker job");
+    }
+
+#if defined(JUCE_UNIT_TESTS) && JUCE_UNIT_TESTS
     void runCaptureBoundaryRolloverTests()
     {
         runIndependentCaptureBoundaryGateCase(true);

@@ -1454,7 +1454,7 @@ SpectrogramHistoryTransition spectrogramHistoryTransition(
     const auto historyIsIncompatible = previous->captureGeneration != next.captureGeneration
         || previous->fftGeneration != next.fftGeneration
         || previous->mappingGeneration != next.mappingGeneration
-        || previous->resetEpoch != next.resetEpoch || previous->fftSize != next.fftSize
+        || previous->fftSize != next.fftSize
         || previous->requestedSliceRateHz != next.requestedSliceRateHz || sampleRateChanged
         || dimensionsChanged;
     return { historyIsIncompatible, dimensionsChanged };

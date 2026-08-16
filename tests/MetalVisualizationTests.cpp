@@ -414,7 +414,7 @@ public:
         ++resetChanged.resetEpoch;
         const auto resetTransition
             = detail::spectrogramHistoryTransition(baseSignature, resetChanged);
-        expect(resetTransition.clear);
+        expect(!resetTransition.clear);
         expect(!resetTransition.reallocate);
 
         auto sliceRateChanged = baseSignature;
@@ -431,6 +431,25 @@ public:
             = detail::spectrogramHistoryTransition(baseSignature, invalidSignature);
         expect(!invalidTransition.clear);
         expect(!invalidTransition.reallocate);
+
+        beginTest("A reset-epoch-only transition becomes a timestamp-derived black gap");
+
+        detail::SpectrogramHistoryRing resetGapRing;
+        resetGapRing.configure(baseSignature.columnCount);
+        const auto beforeResetFrameEnd = std::uint64_t { 8'000 };
+        const auto afterResetFrameEnd = std::uint64_t { 16'000 };
+        const auto beforeResetSlot = detail::calculateSpectrogramTimelineSlot(
+            beforeResetFrameEnd, baseSignature.sampleRate, baseSignature.requestedSliceRateHz);
+        const auto afterResetSlot = detail::calculateSpectrogramTimelineSlot(
+            afterResetFrameEnd, resetChanged.sampleRate, resetChanged.requestedSliceRateHz);
+        expect(resetGapRing.append(beforeResetSlot, 1).accepted);
+        const auto afterResetAdvance = resetGapRing.append(afterResetSlot, 2);
+        expect(afterResetAdvance.accepted);
+        expect(afterResetAdvance.gapColumnCount == afterResetSlot - beforeResetSlot - 1);
+        expect(afterResetAdvance.gapColumnCount > 0);
+        expect(resetGapRing.timelineSpan() == afterResetAdvance.gapColumnCount + 2);
+        expect(!resetGapRing.isColumnValid(1));
+        expect(resetGapRing.isColumnValid(afterResetAdvance.writeColumn));
 
         beginTest("Spectrogram response and palettes preserve literal black and luminance order");
 
