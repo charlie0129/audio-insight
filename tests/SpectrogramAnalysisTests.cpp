@@ -182,7 +182,7 @@ public:
             expect(
                 analyzer.reconfigure({ configuredFftSize, FftWindow::rectangular, 15 }, 3, &frame));
             expect(analyzer.reconfigureTemporal(
-                { true, 1'000.0, SpectrumPeakHoldMode::off, 2.0 }, &frame));
+                { 0.0, 1'000.0, SpectrumPeakHoldMode::off, 2.0 }, &frame));
 
             RecordingTransformSink sink;
             expect(analyzer.process({ fullScaleDc.data(), nullptr, fullScaleDc.size(), 4, 1,
@@ -202,8 +202,8 @@ public:
 
             const auto cachedSequence = sink.transforms.back().rawTransformSequence;
             const auto cachedResetEpoch = sink.transforms.back().resetEpoch;
-            expect(analyzer.reconfigureTemporal(
-                { false, 75.0, SpectrumPeakHoldMode::off, 2.0 }, &frame));
+            expect(
+                analyzer.reconfigureTemporal({ 0.0, 0.0, SpectrumPeakHoldMode::off, 2.0 }, &frame));
             expect(analyzer.emitLatestRawTransform(sink));
             expect(sink.transforms.back().rawTransformSequence == cachedSequence);
             expect(sink.transforms.back().resetEpoch == cachedResetEpoch);
@@ -666,8 +666,7 @@ private:
         const auto beforeTemporal = coordinator.telemetry();
         expect(beforeTemporal.spectrogramQueueReadyColumns == 1);
         const auto jobsBeforeTemporal = beforeTemporal.jobsCompleted;
-        coordinator.setSpectrumTemporalConfiguration(
-            { false, 75.0, SpectrumPeakHoldMode::off, 2.0 });
+        coordinator.setSpectrumTemporalConfiguration({ 0.0, 0.0, SpectrumPeakHoldMode::off, 2.0 });
         expect(waitForTelemetry(coordinator, [jobsBeforeTemporal](const AnalysisTelemetry& value) {
             return value.jobsCompleted > jobsBeforeTemporal;
         }));

@@ -221,15 +221,23 @@ bool SpectrumAnalyzer::isSupportedConfiguration(
 bool SpectrumAnalyzer::isSupportedTemporalConfiguration(
     const SpectrumTemporalConfiguration& configuration) noexcept
 {
-    constexpr auto minimumAveragingMilliseconds = 25.0;
-    constexpr auto maximumAveragingMilliseconds = 2'000.0;
     constexpr auto minimumPeakHoldSeconds = 0.25;
     constexpr auto maximumPeakHoldSeconds = 10.0;
 
-    if (!std::isfinite(configuration.averagingMilliseconds)
-        || configuration.averagingMilliseconds < minimumAveragingMilliseconds
-        || configuration.averagingMilliseconds > maximumAveragingMilliseconds
-        || !std::isfinite(configuration.finitePeakHoldSeconds)
+    const auto validAttack = std::isfinite(configuration.attackMilliseconds)
+        && (configuration.attackMilliseconds == 0.0
+            || (configuration.attackMilliseconds
+                    >= SpectrumTemporalConfiguration::minimumAttackMilliseconds
+                && configuration.attackMilliseconds
+                    <= SpectrumTemporalConfiguration::maximumAttackMilliseconds));
+    const auto validRelease = std::isfinite(configuration.releaseMilliseconds)
+        && (configuration.releaseMilliseconds == 0.0
+            || (configuration.releaseMilliseconds
+                    >= SpectrumTemporalConfiguration::minimumReleaseMilliseconds
+                && configuration.releaseMilliseconds
+                    <= SpectrumTemporalConfiguration::maximumReleaseMilliseconds));
+
+    if (!validAttack || !validRelease || !std::isfinite(configuration.finitePeakHoldSeconds)
         || configuration.finitePeakHoldSeconds < minimumPeakHoldSeconds
         || configuration.finitePeakHoldSeconds > maximumPeakHoldSeconds) {
         return false;
@@ -334,10 +342,14 @@ void SpectrumAnalyzer::runTransform(const std::uint64_t generation,
             && capturedFrameEnd > previousTransformCapturedFrameEnd_ && sampleRate_ > 0.0
         ? static_cast<double>(capturedFrameEnd - previousTransformCapturedFrameEnd_) / sampleRate_
         : 0.0;
-    const auto averagingCoefficient = temporalConfiguration_.averagingEnabled
-            && hasSpectrumTemporalState_ && elapsedSeconds > 0.0
-        ? std::exp(-elapsedSeconds / (temporalConfiguration_.averagingMilliseconds * 0.001))
-        : 0.0;
+    const auto averagingCoefficient = [this, elapsedSeconds](const double milliseconds) noexcept {
+        return milliseconds > 0.0 && hasSpectrumTemporalState_ && elapsedSeconds > 0.0
+            ? std::exp(-elapsedSeconds / (milliseconds * 0.001))
+            : 0.0;
+    };
+    const auto attackCoefficient = averagingCoefficient(temporalConfiguration_.attackMilliseconds);
+    const auto releaseCoefficient
+        = averagingCoefficient(temporalConfiguration_.releaseMilliseconds);
     constexpr auto holdDecayDecibelsPerSecond = 12.0;
 
     for (std::size_t bin = 0; bin < configuredBinCount_; ++bin) {
@@ -354,11 +366,13 @@ void SpectrumAnalyzer::runTransform(const std::uint64_t generation,
                   std::min(powerAsDouble, static_cast<double>(std::numeric_limits<float>::max())));
         latestPower_[bin] = currentPower;
 
-        if (!temporalConfiguration_.averagingEnabled || !hasSpectrumTemporalState_) {
+        if (!hasSpectrumTemporalState_) {
             averagedPower_[bin] = currentPower;
         } else {
-            const auto averaged = (averagingCoefficient * averagedPower_[bin])
-                + ((1.0 - averagingCoefficient) * currentPower);
+            const auto coefficient
+                = currentPower >= averagedPower_[bin] ? attackCoefficient : releaseCoefficient;
+            const auto averaged
+                = (coefficient * averagedPower_[bin]) + ((1.0 - coefficient) * currentPower);
             averagedPower_[bin] = static_cast<float>(
                 std::clamp(averaged, 0.0, static_cast<double>(std::numeric_limits<float>::max())));
         }
