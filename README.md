@@ -86,21 +86,37 @@ saving them. **Cancel** or Escape restores the layout from before editing, while
 shared by AUv2 and VST3 instances; it is not stored in an individual DAW
 project.
 
-Spectrum **Temporal averaging** is in **Settings**, together with its floor,
-ceiling, slope, peak-hold, trace-colour, and fill controls. Fresh instances use
-a responsive 75 ms average (roughly `0.37` on the former 0-to-1 **Smooth**
-control); choose **Off** to show each new FFT snapshot without analysis
-averaging. The renderer still applies a fixed, very short interpolation between
-snapshots so a 60 Hz analysis remains fluid on a 120 Hz display.
+Spectrum response is in **Settings**, together with its floor, ceiling, slope,
+peak-hold, trace-colour, and fill controls. Its independent
+**Attack** and **Release** controls average calibrated power in the corresponding
+direction. Fresh instances use Attack **Off**, so bursts rise immediately, and
+a 250 ms Release, so the trace falls more gradually. Both controls offer Off and
+a logarithmic millisecond range; setting both Off shows raw FFT snapshots. Peak
+hold and Spectrogram remain unsmoothed. The renderer also snaps rises
+immediately and uses a bridge with a fixed 6 ms time constant only for falls,
+keeping 60 Hz analysis fluid on a faster display without hiding one-snapshot
+bursts.
 
 Visible response is adjustable, but an FFT analyzer also has unavoidable window
-latency. The default 4096-sample window spans about 85 ms at 48 kHz, the default
-analysis cadence can add up to about 17 ms, and Temporal averaging deliberately
-adds a smoother 75 ms response. For a more immediate display, turn Temporal
-averaging **Off** or lower it and select a 2048- or 1024-sample FFT; smaller FFTs
-trade low-frequency resolution for faster response. Metal's separate 6 ms
-presentation interpolation is only for motion continuity and is not a
-significant source of lag.
+latency. Fresh instances use an 8192-sample five-term flat-top FFT at 60 slices
+per second and 80% logarithmic shared frequency spacing. That FFT window spans
+about 171 ms at 48 kHz, while the analysis cadence can add up to about 17 ms.
+For a shorter window, select a 4096-, 2048-, or 1024-sample FFT; smaller FFTs
+trade low-frequency resolution for faster response. Release affects only the
+falling trace, and Metal's separate presentation bridge has a 6 ms time constant
+only for motion continuity.
+
+While visible, the renderer always requests one exact frame rate equal to the
+active display's reported maximum, without a 120 Hz cap. It falls back to 60 Hz
+if no valid maximum is available and reapplies the request after moving between
+displays. This is best effort: the actual callback and presentation timestamps
+in **Metrics** remain authoritative. There is no display-pacing setting or
+persisted pacing mode.
+
+Analyzer settings use the pre-release schema 3. Older analyzer schemas are
+intentionally replaced with the current defaults; the project does not carry
+analyzer-setting compatibility parameters or migration shims before its first
+public release.
 
 The Spectrogram uses each unsmoothed FFT slice and the same Linear-to-Logarithmic
 frequency spacing as Spectrum. Its literal-black history can use Blue Fire,
@@ -160,6 +176,16 @@ Reusable Metal render buffers are released as soon as their GPU command buffer
 completes. Presentation tracking has independent per-submission lifetime state,
 so a compositor retaining a drawable for several refresh periods does not
 artificially exhaust the render-buffer pool and halve the submission cadence.
+
+Captured metrics identified the earlier seemingly random analyzer resets as
+overflow in the original 16-slot sample queue: all 16 slots became ready, 20
+old chunks were reclaimed, and three input discontinuities reset temporal
+analysis state. Capture now packs audio into 256-frame chunks across 128 slots,
+providing a block-size-independent 32,768-frame capacity (about 683 ms at
+48 kHz). Effective display-link callbacks also request analysis before renderer
+buffer or drawable admission can return early. Metrics exposes ready-frame
+capacity/high-water values, partial packed frames, and overflow episodes for
+long-session verification.
 
 The scrollable detail view exposes every raw renderer, audio-capture, meter,
 scheduler, analysis-job, publication, and freshness metric currently collected,

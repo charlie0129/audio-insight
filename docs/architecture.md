@@ -33,15 +33,15 @@ an incidental result of analysis.
 | Dependencies | Pin JUCE as a Git submodule rather than vendoring its source in this repository or downloading it implicitly during CMake configure. |
 | Graphics | Use a native Metal renderer, hosted in a MetalKit view inside the JUCE editor. On the initial macOS baseline, drive its Metal layer with `CAMetalDisplayLink` rather than JUCE repaint timers or MetalKit's internal timer. Do not use deprecated macOS OpenGL. |
 | Signal analysis | Initially use CPU analysis and Apple's Accelerate/vDSP where useful. GPU compute is deferred until profiling demonstrates a benefit. |
-| Frequency presentation | Expose one continuous Linear-to-Logarithmic frequency-spacing control, including intermediate mappings. Spectrum and Spectrogram share the same setting and coordinate transform; they do not have independent frequency scales. |
+| Frequency presentation | Expose one continuous Linear-to-Logarithmic frequency-spacing control, defaulting to `0.8` and including intermediate mappings. Spectrum and Spectrogram share the same setting and coordinate transform; they do not have independent frequency scales. |
 | Dashboard interface | Keep one fixed-topology five-tile dashboard with one Spectrum and no separate focus mode. Spectrum, Peak/RMS, Spectrogram, Stereo/correlation, and standards-based Loudness are live. Allow only the four grid-snapped width/height splits defined in [the analyzer interface requirements](analyzer-ui.md). |
 | Utility panels | Keep Settings, Metrics, and About mutually exclusive in presentation without letting About mutate their underlying state. When the dashboard is active on entry, About is a right-side sibling with a live Metal preview, preferring 50% width clamped to 360–700 logical points while leaving at least 320 points for Metal. From already-paused full-content Settings, About remains full-content and paused. Closing reveals current utility state rather than rolling it back. |
-| Interface state | Save display pacing, analyzer settings, and the Metrics toggle as non-automatable per-instance state, and the four-split layout as one versioned per-user global preference. Do not serialize transient history, holds, integration, Settings/About visibility, or uncommitted edits. |
+| Interface state | Save analyzer settings in strict schema 3 and the Metrics toggle as non-automatable per-instance state, and the four-split layout as one versioned per-user global preference. Reject older analyzer schemas and keep no analyzer-setting compatibility shims. Display pacing is a fixed renderer policy, not saved state. Do not serialize transient history, holds, integration, Settings/About visibility, or uncommitted edits. |
 | Real-time handoff | The audio callback writes only to bounded, non-blocking data structures. Analysis and rendering never make the audio thread wait. |
 | Overflow policy | Prefer current visual data: coalesce or discard the oldest unclaimed analysis input, detect discontinuities by sequence number, and reset temporal analysis state across a gap. Never overwrite a slot being read or delay audio. |
 | Analysis scheduling | Do not create one thread per visualization. Each instance has a logical coordinator, not a dedicated thread, and submits fairly to a process-wide pool initially bounded to two workers. |
 | Render handoff | Renderers consume stable, immutable snapshots rather than mutable analysis working memory. |
-| Display timing | Offer per-instance **Fixed maximum** and **Adaptive** pacing, defaulting to Fixed maximum. Fixed maximum requests one exact rate equal to the active display's reported maximum; Adaptive requests from `min(60 Hz, maximum)` through that maximum and prefers the maximum. Reapply the selected request when the editor changes display. Both are best-effort Core Animation requests: measure the cadence and deadlines actually granted by the display-link update rather than inferring them from the request or advertised maximum. |
+| Display timing | While visible, always request one exact rate equal to the active display's reported maximum, with 60 Hz as the fallback for an unavailable or invalid maximum. Reapply the request when the editor changes display. This is a best-effort Core Animation request: measure the cadence and deadlines actually granted by the display-link update rather than inferring them from the request or advertised maximum. |
 | Performance observability | Offer an opt-in, persisted, per-instance metrics panel in Release builds. Show every collected renderer and analysis metric, exact presented-frame pacing history, per-frame callback-to-presentation latency composition, derived rates, and copyable raw reports without mutating the host process. |
 | DPI support | Treat layout units and render pixels separately and support both regular-density and Retina displays, including live movement between them. |
 | Editor lifecycle | Stop sample capture, analysis, history, display-link activity, and Metal submission when the editor is closed, hidden, or occluded beyond a short debounce. Reopening starts with fresh analysis state. About preserves the lifecycle state present when it opens: an active dashboard remains live, while already-paused full-content Settings remains paused. |
@@ -135,6 +135,24 @@ uses a latest-wins, discontinuity-aware policy:
 The implementation must use explicit slot ownership or an equivalently safe
 protocol; a producer overwriting an SPSC payload while it may be read is a C++
 data race. Audio pass-through is never affected by analysis overflow.
+
+The original capture queue assigned one of 16 slots to every host callback,
+regardless of block size. A captured report from the observed seemingly random
+dashboard resets reached all 16 ready slots, reclaimed 20 ready chunks, and
+recorded three consumer discontinuities and three corresponding Loudness
+discontinuity resets. That evidence established capture overflow as the reset
+source: the analyzers were correctly clearing temporal state after lost input,
+but queue capacity scaled with host block size. The captured 512-frame workload
+had about 171 ms at 48 kHz; a 64-frame workload would have had only about 21 ms.
+
+The implemented handoff instead packs input into 256-frame chunks across 128
+slots while retaining the same bounded 32,768-frame storage budget. Capacity is
+therefore about 683 ms at 48 kHz, 341 ms at 96 kHz, and 171 ms at 192 kHz,
+independent of host callback size. The healthy producer path claims its next
+slot in constant time; contention permits one bounded scan for free storage or
+the oldest reclaimable ready chunk. Metrics exposes ready frames, their
+high-water mark, total frame capacity, partial packed frames, and overflow
+episodes in addition to the existing slot and discontinuity counters.
 
 One producer-side overflow episode advances the public capture generation once.
 Before any post-gap analyzer state can reach the renderer, the renderer must
@@ -309,18 +327,19 @@ and actual presentation separate measurements instead of guessing from
 14, lowering the deployment target below macOS 14 will require a separately
 validated display-link fallback.
 
-The per-instance Display setting configures that link with one of two Core
-Animation frame-rate ranges. **Fixed maximum**, the default, requests
-`(maximum, maximum, maximum)` using the active screen's reported maximum without
-an Audio Insight 120 Hz cap. **Adaptive** requests
-`(min(60 Hz, maximum), maximum, maximum)`, preferring the maximum while allowing
-macOS to vary the cadence. An unavailable screen maximum falls back to 60 Hz.
-Changing modes reapplies only this presentation request. Changing screens
-reapplies it alongside the normal screen and backing-scale update. Neither
-transition advances an analysis or lifecycle generation, clears histories or
-measurements, or changes the host process's scheduling policy or any thread
-priority. Core Animation may still deliver a different cadence from either
-requested range.
+There is no user-selectable display-pacing mode. While the renderer is visible,
+configure the link with `(maximum, maximum, maximum)` using the active screen's
+reported maximum without an Audio Insight 120 Hz cap. An unavailable or invalid
+screen maximum falls back to 60 Hz. Changing screens reapplies this request
+alongside the normal screen and backing-scale update. It does not advance an
+analysis or lifecycle generation, clear histories or measurements, or change
+the host process's scheduling policy or any thread priority. Core Animation may
+still deliver a cadence different from the exact requested range.
+
+On every effective display-link callback, request analysis near the beginning
+of the callback, before render-buffer admission, drawable acquisition, and
+other renderer exits. Render backpressure or temporary drawable unavailability
+must not suppress non-real-time analysis servicing.
 
 Commit the encoded Metal work before calling plain `present()` on the drawable
 provided by the display-link update. `CAMetalDisplayLink` owns presentation
@@ -385,10 +404,9 @@ copyable text report. GPU completion timing fields and histories are copied
 under short non-audio-thread locks so values and validity counters describe
 coherent groups. Explicit valid, unavailable, and unclassifiable counters keep
 missing Metal timestamps distinct from a measured zero duration or lateness.
-The raw report also identifies the configured pacing mode, active display's
-reported maximum or 60 Hz fallback, and requested minimum, preferred, and
-maximum rates so the request can be compared with actual callback and
-presentation cadence.
+The raw report also identifies the active display's reported maximum or 60 Hz
+fallback and requested minimum, preferred, and maximum rates so the fixed
+request can be compared with actual callback and presentation cadence.
 Native effective-activity transitions stop and restart collection; retained
 values are explicitly marked paused and may be stale. The full report is
 assembled lazily when the user presses Copy, and neither exact 240-entry history
@@ -453,7 +471,15 @@ remain architectural because analysis and rendering share them.
 
 Spectrum and Spectrogram use the same continuous frequency-coordinate mapping.
 The control ranges from linear through intermediate spacing to logarithmic and
-applies to the Spectrum frequency axis and the Spectrogram frequency axis.
+applies to the Spectrum frequency axis and the Spectrogram frequency axis. Its
+default is `0.8`, or 80% of the way from linear to logarithmic.
+
+Spectrum response averages calibrated linear power independently by direction.
+Attack is Off or 5–500 ms and defaults to Off; Release is Off or 25–2000 ms and
+defaults to 250 ms. An Off direction follows the current FFT immediately. Peak
+hold and Spectrogram use unsmoothed power. The renderer separately snaps rises
+immediately and bridges only falls with a fixed, non-user-adjustable 6 ms time
+constant.
 
 The Spectrogram renders time-frequency energy over a literal black background.
 Its intensity palette should read as energy traces: by default, dark blue for
@@ -529,12 +555,13 @@ aggregate, and boundary-value reads so its long-session cost remains visible.
 ### Preliminary reference workload and budgets
 
 Use an optimized arm64 build on the M1 Max reference Mac, stereo audio at 48 kHz,
-a 4096-point Hann-window FFT at 60 analysis updates per second, and meters fed
-from every block. Run separate callback tests at 64, 128, 256, 512, and 1024
-samples with identical warm-up and percentile sample counts. The main rendering
-case is 1200 x 800 logical points at 2400 x 1600 physical pixels; also test a
-1200 x 800-pixel regular-density case. Always log actual backing scale and
-drawable pixel dimensions rather than assuming them. Measure ten minutes of
+an 8192-point five-term flat-top FFT at 60 analysis updates per second, shared
+frequency spacing `0.8`, and meters fed from every block. The default FFT window
+spans about 171 ms at 48 kHz. Run separate callback tests at 64, 128, 256, 512,
+and 1024 samples with identical warm-up and percentile sample counts. The main
+rendering case is 1200 x 800 logical points at 2400 x 1600 physical pixels; also
+test a 1200 x 800-pixel regular-density case. Always log actual backing scale
+and drawable pixel dimensions rather than assuming them. Measure ten minutes of
 steady state after warm-up.
 
 | Area | Preliminary target |
@@ -544,7 +571,7 @@ steady state after warm-up.
 | Meter freshness | Source-data age p99 no greater than 16.7 ms. |
 | Render CPU encoding | p99 no greater than 1 ms per frame. |
 | GPU execution | p99 no greater than 2 ms per frame at the reference Retina size. |
-| Frame delivery | At least 99.5% of display-requested presentations in Fixed maximum at the active display's reported maximum and in Adaptive across the cadence macOS grants; no sustained run of more than two plugin-attributable late frames. |
+| Frame delivery | At least 99.5% of display-requested presentations while requesting the active display's exact reported maximum; no sustained run of more than two plugin-attributable late frames. |
 | Active CPU | Mean total plugin CPU work no greater than 5% of one M1 Max performance core for one visible instance. |
 | Closed editor | Within 250 ms: zero analysis jobs, worker wakeups attributable to that instance, Metal submissions, and sample-handoff copies. Over the following 60 seconds, attributed background CPU is no greater than 0.1% of one core. |
 | Multiple instances | With all processors receiving stereo audio, sixteen instances with one visible retain that visible instance's single-visible latency/frame budgets and all fifteen closed instances meet the closed-editor budget. With four visible at 60 Hz, each delivers at least 99.0% of requested frames, has spectrum snapshot age p99 no greater than 50 ms, and never goes more than 100 ms without publishing a fresh spectrum snapshot. |
@@ -613,10 +640,10 @@ or provide screenshots. Treat that feedback as validation evidence, reproduce
 issues where possible, and record resulting architectural decisions here.
 
 Useful checkpoints include initial host loading, first Metal output, movement
-between regular-density and Retina displays, Fixed maximum and Adaptive pacing
-across available display rates, live resize, and each substantially new
-visualization. Do not claim visual correctness merely because the project
-compiles or a validator passes.
+between regular-density and Retina displays, exact-maximum pacing across
+available display rates, live resize, and each substantially new visualization.
+Do not claim visual correctness merely because the project compiles or a
+validator passes.
 
 ## Licensing and dependency acquisition
 
@@ -660,7 +687,7 @@ files with that copyright plus `SPDX-License-Identifier: AGPL-3.0-or-later`.
    and frame-pacing instrumentation.
 4. Add the bounded handoff, shared worker pool, immutable snapshots, and stereo
    sample-peak/RMS meters.
-5. Add the shared 4096-point FFT path and main spectrum visualization.
+5. Add the configurable shared FFT path and main spectrum visualization.
 6. Meet the preliminary budgets, run host and multi-instance checks, gather user
    visual feedback, and document source/prebuilt distribution.
 7. Build the fixed-topology five-tile Metal shell, numeric-axis text
@@ -705,12 +732,26 @@ authorize fake values, background work, or speculative resource allocation.
 
 ### 2026-08-16
 
-- Added per-instance Fixed maximum and Adaptive display pacing, defaulting to
-  Fixed maximum. Fixed maximum requests the active display's complete reported
-  maximum without a 120 Hz cap; Adaptive permits `min(60 Hz, maximum)` through
-  that maximum and prefers it. Both Core Animation requests are best-effort,
-  remain presentation-only, leave analyzer state and host scheduling untouched,
-  and expose their requested range beside actual cadence telemetry.
+- Removed the short-lived per-instance display-pacing choice after user testing
+  found no material difference between its modes. The renderer now always
+  requests the active display's exact reported maximum without a 120 Hz cap,
+  falls back to 60 Hz when that maximum is unavailable, and exposes the request
+  beside authoritative actual-cadence telemetry without persisting a mode.
+- Changed fresh analyzer defaults to an 8192-point five-term flat-top FFT at 60
+  slices per second and shared frequency spacing `0.8`. At 48 kHz, the default
+  FFT window spans about 171 ms.
+- Replaced symmetric Spectrum Temporal averaging with independent calibrated-
+  power Attack and Release controls. Attack is Off or 5–500 ms and defaults to
+  Off so bursts rise immediately; Release is Off or 25–2000 ms and defaults to
+  250 ms. Peak hold and Spectrogram continue to use unsmoothed power. The Metal
+  bridge now snaps rises immediately and interpolates only falls with a 6 ms
+  time constant.
+- Diagnosed the observed long-running graph resets from captured metrics: the
+  old 16-slot, one-host-callback-per-slot queue filled, reclaimed 20 ready
+  chunks, and produced three analyzer discontinuity resets. Capture now packs
+  256-frame chunks into 128 slots for block-size-independent 32,768-frame
+  capacity, and effective display-link callbacks request analysis before render
+  admission or drawable acquisition can return early.
 - Made Spectrogram Scroll presentation-time fractional with a one-slice cushion
   while retaining discrete dB cells and black timestamp gaps. Upload contention
   now defers column draining and masks pending destinations instead of skipping
@@ -802,11 +843,10 @@ authorize fake values, background work, or speculative resource allocation.
   correlation result.
 - Resolved the remaining panel algorithms, scales, labels, controls, defaults,
   persistence, accessibility, and reset behavior in `docs/analyzer-ui.md`.
-- Moved Floor, Ceiling, and time-based Temporal averaging from the toolbar into
-  the Spectrum settings section. Temporal averaging now operates on calibrated
-  power with Off plus a logarithmic 25–2000 ms range and a responsive 75 ms
-  default. A separate fixed 6 ms renderer interpolation only bridges analysis
-  snapshots at display cadence and is not exposed as a setting.
+- Moved Floor, Ceiling, and time-based Spectrum response controls from the
+  toolbar into the Spectrum settings section. Established calibrated-power
+  analysis and a separate, non-user-adjustable 6 ms presentation bridge; the
+  later Attack/Release decision above supersedes the initial symmetric control.
 - Chose the macOS system monospaced font for the first scale-aware Metal glyph
   atlas, avoiding a bundled font asset while keeping rasterization and cached
   run construction outside the display callback.

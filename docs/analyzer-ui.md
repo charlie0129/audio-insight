@@ -155,11 +155,11 @@ for the dashboard. At narrower editor widths, Settings takes the complete
 content area below the toolbar, becomes vertically scrollable, and the covered
 Metal canvas pauses. The tile topology itself never reflows.
 
-Organize controls into Display, Shared analysis, Spectrum, Peak/RMS,
-Spectrogram, Stereo, and Loudness sections. Settings documented in each panel
-section below live in that inspector. Changes apply immediately and are saved
-with the plugin instance; there is no separate Apply step. Give each section
-with adjustable settings a reset-to-default action. Stereo's initial
+Organize controls into Shared analysis, Spectrum, Peak/RMS, Spectrogram, Stereo,
+and Loudness sections. Display pacing has no setting. Settings documented in
+each panel section below live in that inspector. Changes apply immediately and
+are saved with the plugin instance; there is no separate Apply step. Give each
+section with adjustable settings a reset-to-default action. Stereo's initial
 presentation is deliberately fixed, so its live section states that it has no
 adjustable settings and leaves Reset visibly unavailable. Loudness exposes its
 presentation-only reference setting; the section reset restores `-23 LUFS` and
@@ -167,44 +167,29 @@ does not reset the transient Integrated measurement. Integration is reset only
 by the Loudness tile's explicit RESET action and the lifecycle boundaries
 specified below.
 
-Floor, Ceiling, and Temporal averaging live in the Spectrum section rather than
-the toolbar; do not duplicate them. Temporal averaging exposes Off plus a
-logarithmic 25–2000 ms range and defaults to a responsive 75 ms. It controls the
-average-power analyzer defined below, not display interpolation. The Metal
-renderer separately applies a fixed 6 ms interpolation to bridge analysis
-snapshots smoothly at display refresh rate; that short presentation step is not
+Floor, Ceiling, Attack, and Release live in the Spectrum section rather than the
+toolbar; do not duplicate them. Attack exposes Off or a logarithmic 5–500 ms
+range and defaults to Off. Release exposes Off or a logarithmic 25–2000 ms range
+and defaults to 250 ms. They control the direction-dependent average-power
+analyzer defined below, not display interpolation. The Metal renderer separately
+snaps rises to each new analysis snapshot and applies interpolation with a fixed
+6 ms time constant only to falls; that short presentation bridge is not
 user-adjustable or serialized.
 
-Temporal averaging is the Settings-inspector replacement for the earlier
-normalized `Smooth` control. Its 75 ms default is approximately `0.37` on that
-legacy control's response curve, keeping the initial amount within the requested
-`0.3–0.5` range without retaining an ambiguous unitless control or duplicating it
-in the toolbar.
+### Display pacing policy
 
-### Display pacing
+Display pacing has no user setting and is not persisted. While visible, Audio
+Insight always requests one exact frame rate equal to the active display's
+reported maximum. The request is not capped at 120 Hz; if no valid maximum is
+available, use 60 Hz as the fallback. Reapply it after movement to another
+display.
 
-| Setting | Accepted choices | Default |
-| --- | --- | --- |
-| Frame pacing | Fixed maximum, Adaptive | Fixed maximum |
-
-**Fixed maximum** requests one exact frame rate equal to the active display's
-reported maximum. Audio Insight does not cap that request at 120 Hz, so a future
-display reporting a higher maximum receives that higher request. If no valid
-display maximum is available, use 60 Hz as the fallback.
-
-**Adaptive** requests a Core Animation range from
-`min(60 Hz, display maximum)` through the display maximum and prefers the
-maximum. A display whose maximum is below 60 Hz therefore receives an exact
-request for its own maximum.
-
-Both choices are best-effort requests: macOS, the host, and the compositor may
-deliver another cadence. Actual display-link callbacks and presentation
-timestamps remain authoritative. The setting is non-automatable per-instance
-state, applies immediately, and is reapplied after movement to another display.
-Display Reset restores Fixed maximum. Switching modes changes presentation
-timing only; it does not advance analysis or lifecycle generations, clear
-Spectrogram history, Spectrum state, meter holds, Stereo state, or Loudness
-integration, or change process/thread scheduling priority.
+This is a best-effort Core Animation request: macOS, the host, and the compositor
+may deliver another cadence. Actual display-link callbacks and presentation
+timestamps remain authoritative. Reapplying the request does not advance
+analysis or lifecycle generations, clear Spectrogram history, Spectrum state,
+meter holds, Stereo state, or Loudness integration, or change process/thread
+scheduling priority.
 
 ### Utility-panel exclusivity
 
@@ -264,54 +249,37 @@ rebuild analysis state. Therefore none of the following is host-automatable in
 the initial product:
 
 - layout;
-- display frame pacing;
 - FFT size, window, or requested FFT slice rate;
 - shared frequency spacing;
 - Spectrum or Spectrogram presentation settings;
 - Spectrogram history mode or duration; or
 - panel-specific meter, scope, or loudness presentation settings.
 
-Save display pacing and analyzer configuration as non-automatable per-instance
-plugin state so a DAW project can recall different analyzer views on different
-instances. Keep layout in the global store described above. Metrics remains a
-non-automatable per-instance toggle. Settings visibility, edit-mode working
-state, active history samples, holds, and loudness integration are transient and
-are not serialized.
+Save analyzer configuration as non-automatable per-instance plugin state so a
+DAW project can recall different analyzer views on different instances. Keep
+layout in the global store described above. Metrics remains a non-automatable
+per-instance toggle. Display pacing is fixed policy rather than state. Settings
+visibility, edit-mode working state, active history samples, holds, and loudness
+integration are transient and are not serialized.
 
 After a user-originated analyzer configuration edit, notify the host that
 non-parameter plugin state changed so it can mark the project for re-saving.
 Loading or restoring existing state must not itself be reported as a new edit.
 
-The current analyzer-configuration schema is version 2. It adds Display pacing.
-An analyzer-configuration subtree from schema 1 or any other unknown version is
-intentionally rejected and replaced with current defaults; settings backward
-compatibility is not a requirement before the first public release. Missing or
-malformed values inside a structurally recognized schema-2 tree use their
-documented defaults.
-
-The older `spectrumFloor`, `spectrumCeiling`, and `spectrumSmoothing` parameter
-IDs remain deprecated, non-automatable compatibility shims with their original
-normalized mappings. A state predating the analyzer-configuration subtree may
-still seed the current defaults from those shims:
-
-- preserve the physical floor and ceiling values, clamp them to the new ranges,
-  and lower the floor if necessary to enforce the 24 dB minimum span;
-- map a legacy normalized smoothing value `x <= 0` to Off, otherwise map it to
-  `clamp(15 + 435 * x^2, 25, 2000)` milliseconds, approximating the legacy
-  renderer's release time; and
-- write the result into the versioned per-instance configuration. On later
-  loads that new configuration wins over the compatibility shims.
-
-Legacy DAW automation lanes are intentionally not supported after this
-pre-release migration. The retained shims do not imply compatibility with
-schema-1 analyzer configuration.
+The current analyzer-configuration schema is version 3. Analyzer-configuration
+subtrees from schema 2 or earlier, or any unknown future version, are
+intentionally rejected and replaced with current defaults. There are no
+compatibility parameters or migration shims for earlier analyzer settings;
+settings backward compatibility is not a requirement before the first public
+release. Missing or malformed values inside a structurally recognized schema-3
+tree use their documented defaults.
 
 ## Shared analysis controls
 
 | Setting | Accepted choices | Default |
 | --- | --- | --- |
-| FFT size | 1024, 2048, 4096, 8192, 16384 | 4096 |
-| Window | Rectangular, periodic Hann, four-term Blackman-Harris, five-term flat-top | periodic Hann |
+| FFT size | 1024, 2048, 4096, 8192, 16384 | 8192 |
+| Window | Rectangular, periodic Hann, four-term Blackman-Harris, five-term flat-top | five-term flat-top |
 | Requested FFT slice rate | 15, 30, 60, 120 Hz | 60 Hz |
 
 All non-rectangular windows use the periodic convention. For sample index `n`
@@ -334,9 +302,9 @@ temporal state, and Spectrogram history.
 The requested FFT slice rate controls only new Spectrum FFT snapshots and
 Spectrogram history columns. It does not throttle Peak/RMS capture from every
 audio block, Stereo field/correlation sampling, or Loudness' fixed 100 ms
-measurement completions. It is also not the render rate: Metal follows the
-selected Display pacing request, potentially above 120 Hz when the active
-display reports it, and consumes or interpolates the newest complete snapshot.
+measurement completions. It is also not the render rate: Metal requests the
+active display's exact reported maximum, potentially above 120 Hz, and consumes
+or interpolates the newest complete snapshot.
 The fair, latest-wins scheduler may skip stale FFT work rather than building a
 backlog. Telemetry reports both requested and achieved FFT slice rates.
 
@@ -357,15 +325,17 @@ Use scoped generations rather than one counter that resets unrelated analyzers:
 - A Spectrogram-mapping generation changes with shared frequency spacing. It
   clears mapped Spectrogram history but does not invalidate FFT results or any
   other analyzer.
-- Display pacing, layout, palette, color response/range, and loudness-reference
-  changes are presentation-only and do not advance an analysis generation.
+- Active-display pacing requests, layout, palette, color response/range, and
+  loudness-reference changes are presentation-only and do not advance an
+  analysis generation.
 
 ## Shared frequency spacing
 
 Store one spacing value `s` in `[0, 1]`:
 
 - `0` is Linear;
-- `1` is Logarithmic and is the default; and
+- `1` is Logarithmic;
+- `0.8` is the default; and
 - `0.25`, `0.5`, and `0.75` are labeled intermediate marks, while the control
   remains continuous.
 
@@ -420,22 +390,35 @@ Spectrum remains the dominant real-time FFT visualization.
 | Floor | -180 to -36 dB, 1 dB steps | -90 dB |
 | Ceiling | -24 to +12 dB, 1 dB steps | 0 dB |
 | Minimum visible span | 24 dB | 90 dB from defaults |
-| Temporal averaging | Off or 25–2000 ms, logarithmic control | 75 ms |
+| Attack | Off or 5–500 ms, logarithmic control | Off |
+| Release | Off or 25–2000 ms, logarithmic control | 250 ms |
 | Slope compensation | 0, +3, +4.5, +6 dB/octave, referenced at 1 kHz | 0 dB/octave |
 | Peak-hold duration | Off, 0.25–10 seconds, or Infinite | Off; 2 seconds when first enabled |
 | Hold decay | Fixed at 12 dB/s after a finite hold | 12 dB/s |
 | Trace color | sRGB color value | project cyan |
 | Fill opacity | 0–50%; zero means Off | 18% |
 
-Average power, not already-converted dB values:
+Average calibrated linear power, not already-converted dB values. Compute one
+Attack coefficient and one Release coefficient per transform, then select
+between them independently for every bin according to its direction:
 
 ```text
-a = exp(-elapsed / timeConstant)
-averagePower = a * previousPower + (1 - a) * currentPower
+timeConstantMilliseconds = currentPower >= averagePower ? attack : release
+a = timeConstantMilliseconds is Off
+    ? 0
+    : exp(-elapsedMilliseconds / timeConstantMilliseconds)
+averagePower = a * averagePower + (1 - a) * currentPower
 ```
 
-Rendering interpolation remains separate from this analyzer averaging. Slope
-compensation is presentation-only and the default zero keeps the dB axis
+Off means the value snaps to current power in that direction. With the default
+Attack Off, a rising bin shows a one-snapshot burst immediately while the
+250 ms Release lets it fall more slowly. Setting both to Off exposes raw FFT
+snapshots.
+
+Rendering interpolation remains separate: displayed rises, including the
+peak-hold trace, snap immediately, while falls bridge with the fixed 6 ms time
+constant.
+Slope compensation is presentation-only and the default zero keeps the dB axis
 literal. Peak hold operates on unsmoothed per-bin power; apply the current slope
 to both live and held traces only at presentation. Explicit Clear, capture
 discontinuity, editor reactivation, and FFT/window/sample-rate changes reset
@@ -722,9 +705,9 @@ before reference tests pass.
   and visually consistent across backing-scale changes.
 - Rebuild only pixel-density-dependent resources, such as a glyph atlas, when
   backing scale changes.
-- Preserve the selected display-linked Fixed maximum or Adaptive animation
-  during live editor and tile resize, including active-display maximums above
-  120 Hz, subject to accepted performance gates.
+- Preserve display-linked animation at the requested active-display maximum
+  during live editor and tile resize, including maximums above 120 Hz, subject
+  to accepted performance gates.
 
 ## Editor lifecycle
 
