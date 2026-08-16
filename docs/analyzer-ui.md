@@ -330,9 +330,13 @@ or sample rate changes. A presentation-only spacing change reuses the current
 FFT and does not calculate another FFT. Spectrum remaps immediately;
 Spectrogram starts a new history because its stored rows use the prior mapping.
 
-Generate scale-appropriate “nice” frequency candidates, map them through `u`,
-prioritize endpoints and 1/2/5 multiples, then retain only labels whose measured
-bounds do not overlap. Use integer Hz below 1 kHz and compact kHz above it.
+Generate a bounded hierarchy of scale-appropriate “nice” frequency candidates
+from the current logical axis length and measured glyph bounds; do not maintain
+a hand-enumerated label list. Reserve exact endpoints first, prioritize
+`1/2/5 * 10^n` anchors, then fill the widest mapped gaps with progressively
+finer decimal candidates only while their measured labels remain separated.
+Apply the same deterministic selector to Spectrum and Spectrogram. Use integer
+Hz below 1 kHz and compact kHz above it.
 
 ## Spectrum
 

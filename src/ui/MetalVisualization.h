@@ -19,23 +19,9 @@
 
 namespace audio_insight {
 namespace detail {
-inline constexpr std::array frequencyAxisTickCandidates {
-    20.0F,
-    50.0F,
-    100.0F,
-    200.0F,
-    500.0F,
-    1'000.0F,
-    2'000.0F,
-    5'000.0F,
-    10'000.0F,
-    12'000.0F,
-    15'000.0F,
-    18'000.0F,
-    20'000.0F,
-};
-inline constexpr std::size_t frequencyAxisTickCandidateCount = frequencyAxisTickCandidates.size();
-inline constexpr std::size_t maximumFrequencyAxisTickCount = frequencyAxisTickCandidateCount + 1;
+inline constexpr float maximumFrequencyAxisFrequencyHz = 20'000.0F;
+inline constexpr std::size_t maximumFrequencyAxisCandidateCount = 320;
+inline constexpr std::size_t maximumFrequencyAxisTickCount = 64;
 inline constexpr std::size_t maximumFrequencyAxisLabelGlyphs = 10;
 inline constexpr std::size_t frequencyAxisLabelStorage = maximumFrequencyAxisLabelGlyphs + 1;
 
@@ -326,15 +312,28 @@ struct FrequencyAxisMapping final {
     float spacing = 1.0F;
 };
 
+enum class FrequencyAxisOrientation : std::uint8_t {
+    horizontal,
+    vertical,
+};
+
+/** Measured, scale-adjusted bounds of the monospaced axis glyphs. */
+struct FrequencyAxisLabelMetrics final {
+    float glyphAdvance = 0.0F;
+    float glyphWidth = 0.0F;
+    float glyphHeight = 0.0F;
+};
+
 struct FrequencyAxisTickSelection final {
     struct Tick final {
         float frequencyHz = 0.0F;
-        std::size_t candidateIndex = frequencyAxisTickCandidateCount;
-        bool usesUpperEndpointLabel = false;
+        std::uint32_t labelFrequencyHz = 0;
     };
 
     std::array<Tick, maximumFrequencyAxisTickCount> ticks { };
     std::size_t count = 0;
+    std::size_t generatedCandidateCount = 0;
+    bool candidateCapacityExceeded = false;
 };
 
 struct SpectrumDecibelTicks final {
@@ -359,17 +358,17 @@ struct SpectrumDecibelTicks final {
     float frequencyHz, std::array<char, frequencyAxisLabelStorage>& destination) noexcept;
 
 /**
-    Selects premeasured nice-label candidates without overlap.
+    Generates and selects bounded nice-label candidates without overlap.
 
-    labelExtents contains widths for a horizontal axis or heights for a
-    vertical axis. Endpoint candidates are admitted first; the remaining 1/2/5
-    multiples are culled against those measured intervals. No allocation or
-    text formatting occurs here.
+    Exact endpoints are attempted first, followed by 1/2/5 anchors. If both
+    endpoints cannot coexist, the lower endpoint remains. Remaining candidates
+    are generated from the current mapped length and measured glyph bounds,
+    then admitted into the largest available gaps. No allocation occurs.
 */
 [[nodiscard]] FrequencyAxisTickSelection selectFrequencyAxisTicks(
     const FrequencyAxisMapping& mapping, float axisLength,
-    const std::array<float, frequencyAxisTickCandidateCount>& labelExtents,
-    float upperEndpointLabelExtent, float minimumGap = 4.0F) noexcept;
+    const FrequencyAxisLabelMetrics& labelMetrics, FrequencyAxisOrientation orientation,
+    float minimumGap = 4.0F) noexcept;
 
 [[nodiscard]] int chooseSpectrumDecibelTickStep(
     float floorDecibels, float ceilingDecibels, float axisLength) noexcept;

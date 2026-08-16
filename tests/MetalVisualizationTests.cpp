@@ -88,10 +88,8 @@ public:
         expectEquals(detail::mapFrequencyToUnit(lowNyquistMapping, 20.0F), 0.0F);
         expectEquals(detail::mapFrequencyToUnit(lowNyquistMapping, 11'025.0F), 1.0F);
         auto previousPosition = 0.0F;
-        for (const auto frequency : detail::frequencyAxisTickCandidates) {
-            if (frequency > lowNyquistMapping.maximumFrequencyHz)
-                continue;
-
+        for (auto frequency = 20.0F; frequency <= lowNyquistMapping.maximumFrequencyHz;
+            frequency += 37.0F) {
             const auto position = detail::mapFrequencyToUnit(lowNyquistMapping, frequency);
             expect(position >= previousPosition);
             previousPosition = position;
@@ -368,54 +366,44 @@ public:
 
         beginTest("Frequency tick selection retains exact endpoints and culls collisions");
 
-        std::array<float, detail::frequencyAxisTickCandidateCount> compactExtents { };
-        compactExtents.fill(10.0F);
-        const auto lowNyquistTicks = detail::selectFrequencyAxisTicks(
-            { 20.0F, 11'025.0F, 1.0F }, 2'000.0F, compactExtents, 10.0F);
-        expectEquals(lowNyquistTicks.count, std::size_t { 10 });
-        expectEquals(lowNyquistTicks.ticks[0].frequencyHz, 20.0F);
-        expectEquals(lowNyquistTicks.ticks[lowNyquistTicks.count - 1].frequencyHz, 11'025.0F);
-        expect(lowNyquistTicks.ticks[lowNyquistTicks.count - 1].usesUpperEndpointLabel);
-        for (std::size_t index = 1; index < lowNyquistTicks.count; ++index)
-            expect(lowNyquistTicks.ticks[index - 1].frequencyHz
-                < lowNyquistTicks.ticks[index].frequencyHz);
-
-        const auto deduplicatedEndpoint
-            = detail::selectFrequencyAxisTicks(logarithmicMapping, 1'000.0F, compactExtents, 10.0F);
-        expect(deduplicatedEndpoint.count >= 10);
-        expect(deduplicatedEndpoint.count < detail::frequencyAxisTickCandidateCount);
-        expectEquals(
-            deduplicatedEndpoint.ticks[deduplicatedEndpoint.count - 1].frequencyHz, 20'000.0F);
-        expect(!deduplicatedEndpoint.ticks[deduplicatedEndpoint.count - 1].usesUpperEndpointLabel);
-
-        std::array<float, detail::frequencyAxisTickCandidateCount> wideExtents { };
-        wideExtents.fill(30.0F);
-        const detail::FrequencyAxisMapping narrowLinearMapping { 20.0F, 200.0F, 0.0F };
-        const auto culledTicks
-            = detail::selectFrequencyAxisTicks(narrowLinearMapping, 180.0F, wideExtents, 30.0F);
-        expectEquals(culledTicks.count, std::size_t { 3 });
-        expectEquals(culledTicks.ticks[0].frequencyHz, 20.0F);
-        expectEquals(culledTicks.ticks[1].frequencyHz, 100.0F);
-        expectEquals(culledTicks.ticks[2].frequencyHz, 200.0F);
-
-        const auto verifyNoOverlap = [this](const detail::FrequencyAxisMapping& mapping,
+        constexpr detail::FrequencyAxisLabelMetrics compactMetrics { 0.0F, 10.0F, 10.0F };
+        constexpr detail::FrequencyAxisLabelMetrics wideMetrics { 0.0F, 30.0F, 12.0F };
+        constexpr detail::FrequencyAxisLabelMetrics spaciousMetrics { 0.0F, 36.0F, 12.0F };
+        constexpr detail::FrequencyAxisLabelMetrics measuredMetrics { 6.0F, 7.0F, 12.0F };
+        const auto labelExtent = [](const detail::FrequencyAxisTickSelection::Tick& tick,
+                                     const detail::FrequencyAxisLabelMetrics& metrics,
+                                     const detail::FrequencyAxisOrientation orientation) {
+            std::array<char, detail::frequencyAxisLabelStorage> label { };
+            const auto glyphCount = detail::formatFrequencyAxisLabel(tick.frequencyHz, label);
+            return orientation == detail::FrequencyAxisOrientation::horizontal
+                ? metrics.glyphWidth + (static_cast<float>(glyphCount - 1) * metrics.glyphAdvance)
+                : metrics.glyphHeight;
+        };
+        const auto verifyNoOverlap = [this, &labelExtent](
+                                         const detail::FrequencyAxisMapping& mapping,
                                          const float axisLength,
                                          const detail::FrequencyAxisTickSelection& selection,
-                                         const auto& candidateExtents, const float endpointExtent) {
+                                         const detail::FrequencyAxisLabelMetrics& metrics,
+                                         const detail::FrequencyAxisOrientation orientation) {
             auto previousEnd = -4.0F;
             for (std::size_t index = 0; index < selection.count; ++index) {
                 const auto& tick = selection.ticks[index];
-                const auto extent = tick.usesUpperEndpointLabel
-                    ? endpointExtent
-                    : candidateExtents[tick.candidateIndex];
+                const auto extent = labelExtent(tick, metrics, orientation);
                 const auto centre
                     = detail::mapFrequencyToUnit(mapping, tick.frequencyHz) * axisLength;
                 const auto start = std::clamp(centre - (extent * 0.5F), 0.0F, axisLength - extent);
                 expect(start >= previousEnd + 4.0F - 0.0001F);
                 previousEnd = start + extent;
+                expect(tick.frequencyHz >= mapping.minimumFrequencyHz);
+                expect(tick.frequencyHz <= mapping.maximumFrequencyHz);
+                expectEquals(static_cast<std::uint64_t>(tick.labelFrequencyHz),
+                    static_cast<std::uint64_t>(std::lround(tick.frequencyHz)));
+                if (index != 0)
+                    expect(selection.ticks[index - 1].frequencyHz < tick.frequencyHz);
             }
+            expect(selection.count <= detail::maximumFrequencyAxisTickCount);
+            expect(selection.generatedCandidateCount <= detail::maximumFrequencyAxisCandidateCount);
         };
-        verifyNoOverlap(logarithmicMapping, 1'000.0F, deduplicatedEndpoint, compactExtents, 10.0F);
         const auto containsFrequency
             = [](const detail::FrequencyAxisTickSelection& selection, const float frequency) {
                   for (std::size_t index = 0; index < selection.count; ++index) {
@@ -425,48 +413,127 @@ public:
 
                   return false;
               };
-        verifyNoOverlap(narrowLinearMapping, 180.0F, culledTicks, wideExtents, 30.0F);
 
-        std::array<float, detail::frequencyAxisTickCandidateCount> spaciousExtents { };
-        spaciousExtents.fill(40.0F);
-        const auto spaciousLinearTicks
-            = detail::selectFrequencyAxisTicks(linearMapping, 800.0F, spaciousExtents, 40.0F);
-        expect(containsFrequency(spaciousLinearTicks, 12'000.0F));
-        expect(containsFrequency(spaciousLinearTicks, 15'000.0F));
-        expect(containsFrequency(spaciousLinearTicks, 18'000.0F));
-        verifyNoOverlap(linearMapping, 800.0F, spaciousLinearTicks, spaciousExtents, 40.0F);
+        const auto lowNyquistTicks = detail::selectFrequencyAxisTicks({ 20.0F, 11'025.0F, 1.0F },
+            2'000.0F, compactMetrics, detail::FrequencyAxisOrientation::horizontal);
+        expect(lowNyquistTicks.count > 2);
+        expectEquals(lowNyquistTicks.ticks[0].frequencyHz, 20.0F);
+        expectEquals(lowNyquistTicks.ticks[lowNyquistTicks.count - 1].frequencyHz, 11'025.0F);
+        expectEquals(static_cast<std::uint64_t>(
+                         lowNyquistTicks.ticks[lowNyquistTicks.count - 1].labelFrequencyHz),
+            std::uint64_t { 11'025 });
+        expect(!lowNyquistTicks.candidateCapacityExceeded);
+        verifyNoOverlap({ 20.0F, 11'025.0F, 1.0F }, 2'000.0F, lowNyquistTicks, compactMetrics,
+            detail::FrequencyAxisOrientation::horizontal);
 
-        const auto spaciousLogarithmicTicks
-            = detail::selectFrequencyAxisTicks(logarithmicMapping, 800.0F, spaciousExtents, 40.0F);
+        const detail::FrequencyAxisMapping fractionalNyquistMapping { 20.0F, 11'025.4F, 0.65F };
+        const auto fractionalNyquistTicks
+            = detail::selectFrequencyAxisTicks(fractionalNyquistMapping, 2'000.0F, compactMetrics,
+                detail::FrequencyAxisOrientation::horizontal);
+        expectWithinAbsoluteError(
+            fractionalNyquistTicks.ticks[fractionalNyquistTicks.count - 1].frequencyHz, 11'025.4F,
+            0.001F);
+        expectEquals(
+            static_cast<std::uint64_t>(
+                fractionalNyquistTicks.ticks[fractionalNyquistTicks.count - 1].labelFrequencyHz),
+            std::uint64_t { 11'025 });
+        verifyNoOverlap(fractionalNyquistMapping, 2'000.0F, fractionalNyquistTicks, compactMetrics,
+            detail::FrequencyAxisOrientation::horizontal);
+
+        const auto deduplicatedEndpoint = detail::selectFrequencyAxisTicks(logarithmicMapping,
+            1'000.0F, compactMetrics, detail::FrequencyAxisOrientation::horizontal);
+        expect(deduplicatedEndpoint.count > 2);
+        expectEquals(
+            deduplicatedEndpoint.ticks[deduplicatedEndpoint.count - 1].frequencyHz, 20'000.0F);
+        verifyNoOverlap(logarithmicMapping, 1'000.0F, deduplicatedEndpoint, compactMetrics,
+            detail::FrequencyAxisOrientation::horizontal);
+
+        const detail::FrequencyAxisMapping narrowLinearMapping { 20.0F, 200.0F, 0.0F };
+        const auto culledTicks = detail::selectFrequencyAxisTicks(
+            narrowLinearMapping, 180.0F, wideMetrics, detail::FrequencyAxisOrientation::horizontal);
+        expectEquals(culledTicks.ticks[0].frequencyHz, 20.0F);
+        expect(containsFrequency(culledTicks, 100.0F));
+        expectEquals(culledTicks.ticks[culledTicks.count - 1].frequencyHz, 200.0F);
+        verifyNoOverlap(narrowLinearMapping, 180.0F, culledTicks, wideMetrics,
+            detail::FrequencyAxisOrientation::horizontal);
+
+        const auto spaciousLinearTicks = detail::selectFrequencyAxisTicks(
+            linearMapping, 800.0F, spaciousMetrics, detail::FrequencyAxisOrientation::horizontal);
+        constexpr std::array requestedLinearLabels { 3'000.0F, 6'000.0F, 8'000.0F, 12'000.0F,
+            14'000.0F, 15'000.0F, 16'000.0F, 18'000.0F };
+        for (const auto frequency : requestedLinearLabels)
+            expect(containsFrequency(spaciousLinearTicks, frequency));
+        expect(!spaciousLinearTicks.candidateCapacityExceeded);
+        verifyNoOverlap(linearMapping, 800.0F, spaciousLinearTicks, spaciousMetrics,
+            detail::FrequencyAxisOrientation::horizontal);
+
+        const auto measuredSpaciousLinearTicks = detail::selectFrequencyAxisTicks(
+            linearMapping, 1'200.0F, measuredMetrics, detail::FrequencyAxisOrientation::horizontal);
+        for (const auto frequency : requestedLinearLabels)
+            expect(containsFrequency(measuredSpaciousLinearTicks, frequency));
+        verifyNoOverlap(linearMapping, 1'200.0F, measuredSpaciousLinearTicks, measuredMetrics,
+            detail::FrequencyAxisOrientation::horizontal);
+
+        const auto compactLinearTicks = detail::selectFrequencyAxisTicks(
+            linearMapping, 420.0F, spaciousMetrics, detail::FrequencyAxisOrientation::horizontal);
+        expect(compactLinearTicks.count < spaciousLinearTicks.count);
+        verifyNoOverlap(linearMapping, 420.0F, compactLinearTicks, spaciousMetrics,
+            detail::FrequencyAxisOrientation::horizontal);
+
+        const auto spaciousLogarithmicTicks = detail::selectFrequencyAxisTicks(logarithmicMapping,
+            800.0F, spaciousMetrics, detail::FrequencyAxisOrientation::horizontal);
         expect(!containsFrequency(spaciousLogarithmicTicks, 12'000.0F));
         expect(!containsFrequency(spaciousLogarithmicTicks, 15'000.0F));
         expect(!containsFrequency(spaciousLogarithmicTicks, 18'000.0F));
         expect(containsFrequency(spaciousLogarithmicTicks, 10'000.0F));
         expect(containsFrequency(spaciousLogarithmicTicks, 20'000.0F));
-        verifyNoOverlap(
-            logarithmicMapping, 800.0F, spaciousLogarithmicTicks, spaciousExtents, 40.0F);
+        verifyNoOverlap(logarithmicMapping, 800.0F, spaciousLogarithmicTicks, spaciousMetrics,
+            detail::FrequencyAxisOrientation::horizontal);
 
-        std::array<float, detail::frequencyAxisTickCandidateCount> verticalLinearExtents { };
-        verticalLinearExtents.fill(12.0F);
-        const auto verticalLinearTicks
-            = detail::selectFrequencyAxisTicks(linearMapping, 300.0F, verticalLinearExtents, 12.0F);
+        const auto verticalLinearTicks = detail::selectFrequencyAxisTicks(
+            linearMapping, 400.0F, spaciousMetrics, detail::FrequencyAxisOrientation::vertical);
         expect(containsFrequency(verticalLinearTicks, 12'000.0F));
         expect(containsFrequency(verticalLinearTicks, 15'000.0F));
         expect(containsFrequency(verticalLinearTicks, 18'000.0F));
-        verifyNoOverlap(linearMapping, 300.0F, verticalLinearTicks, verticalLinearExtents, 12.0F);
+        verifyNoOverlap(linearMapping, 400.0F, verticalLinearTicks, spaciousMetrics,
+            detail::FrequencyAxisOrientation::vertical);
 
-        std::array<float, detail::frequencyAxisTickCandidateCount> verticalExtents { };
-        verticalExtents.fill(12.0F);
-        const auto verticalTicks
-            = detail::selectFrequencyAxisTicks(logarithmicMapping, 140.0F, verticalExtents, 12.0F);
-        expect(verticalTicks.count < detail::frequencyAxisTickCandidateCount);
-        verifyNoOverlap(logarithmicMapping, 140.0F, verticalTicks, verticalExtents, 12.0F);
+        for (auto spacingIndex = 0; spacingIndex <= 10; ++spacingIndex) {
+            const auto spacing = static_cast<float>(spacingIndex) * 0.1F;
+            const detail::FrequencyAxisMapping mapping { 20.0F, 20'000.0F, spacing };
+            const auto horizontal = detail::selectFrequencyAxisTicks(
+                mapping, 800.0F, measuredMetrics, detail::FrequencyAxisOrientation::horizontal);
+            const auto repeated = detail::selectFrequencyAxisTicks(
+                mapping, 800.0F, measuredMetrics, detail::FrequencyAxisOrientation::horizontal);
+            expectEquals(horizontal.count, repeated.count);
+            for (std::size_t index = 0; index < horizontal.count; ++index)
+                expectEquals(
+                    horizontal.ticks[index].frequencyHz, repeated.ticks[index].frequencyHz);
+            expect(!horizontal.candidateCapacityExceeded);
+            verifyNoOverlap(mapping, 800.0F, horizontal, measuredMetrics,
+                detail::FrequencyAxisOrientation::horizontal);
 
-        std::array<float, detail::frequencyAxisTickCandidateCount> impossibleExtents { };
-        impossibleExtents.fill(30.0F);
-        const auto impossibleTicks
-            = detail::selectFrequencyAxisTicks(logarithmicMapping, 30.0F, impossibleExtents, 30.0F);
+            const auto vertical = detail::selectFrequencyAxisTicks(
+                mapping, 240.0F, measuredMetrics, detail::FrequencyAxisOrientation::vertical);
+            expect(!vertical.candidateCapacityExceeded);
+            verifyNoOverlap(mapping, 240.0F, vertical, measuredMetrics,
+                detail::FrequencyAxisOrientation::vertical);
+        }
+
+        const auto capacityTicks = detail::selectFrequencyAxisTicks(linearMapping, 2'560.0F,
+            { 0.0F, 1.0F, 1.0F }, detail::FrequencyAxisOrientation::horizontal);
+        expectEquals(capacityTicks.count, detail::maximumFrequencyAxisTickCount);
+        expect(!capacityTicks.candidateCapacityExceeded);
+        verifyNoOverlap(linearMapping, 2'560.0F, capacityTicks, { 0.0F, 1.0F, 1.0F },
+            detail::FrequencyAxisOrientation::horizontal);
+
+        const auto impossibleTicks = detail::selectFrequencyAxisTicks(
+            logarithmicMapping, 30.0F, wideMetrics, detail::FrequencyAxisOrientation::horizontal);
         expectEquals(impossibleTicks.count, std::size_t { 1 });
+
+        const auto invalidMetrics = detail::selectFrequencyAxisTicks(logarithmicMapping, 800.0F,
+            { 4.0F, 0.0F, 12.0F }, detail::FrequencyAxisOrientation::horizontal);
+        expectEquals(invalidMetrics.count, std::size_t { 0 });
 
         beginTest("Spectrum decibel ticks use accepted steps and 28-point label spacing");
 
@@ -884,7 +951,7 @@ public:
         beginTest("Axis and meter geometry remain within the fixed Metal vertex buffer");
 
         expectEquals(detail::MetalVisualizationGeometryLimits::maximumGeneratedVertices,
-            std::size_t { 53'986 });
+            std::size_t { 60'586 });
         expect(detail::MetalVisualizationGeometryLimits::maximumGeneratedVertices
             <= detail::MetalVisualizationGeometryLimits::vertexCapacity);
         expectEquals(

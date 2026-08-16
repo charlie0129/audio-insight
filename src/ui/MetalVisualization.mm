@@ -110,12 +110,12 @@ std::size_t formatFrequencyAxisLabel(
     destination.fill('\0');
 
     if (!std::isfinite(frequencyHz) || frequencyHz < 0.0F
-        || frequencyHz > frequencyAxisTickCandidates.back()) {
+        || frequencyHz > maximumFrequencyAxisFrequencyHz) {
         return 0;
     }
 
     const auto roundedFrequency = static_cast<int>(
-        std::lround(std::clamp(frequencyHz, 0.0F, frequencyAxisTickCandidates.back())));
+        std::lround(std::clamp(frequencyHz, 0.0F, maximumFrequencyAxisFrequencyHz)));
     auto* cursor = destination.data();
     auto* const end = destination.data() + maximumFrequencyAxisLabelGlyphs;
     const auto appendCharacter = [&](const char character) noexcept {
@@ -178,123 +178,255 @@ std::size_t formatFrequencyAxisLabel(
 }
 
 FrequencyAxisTickSelection selectFrequencyAxisTicks(const FrequencyAxisMapping& mapping,
-    const float axisLength, const std::array<float, frequencyAxisTickCandidateCount>& labelExtents,
-    const float upperEndpointLabelExtent, const float minimumGap) noexcept
+    const float axisLength, const FrequencyAxisLabelMetrics& labelMetrics,
+    const FrequencyAxisOrientation orientation, const float minimumGap) noexcept
 {
     FrequencyAxisTickSelection result;
 
     if (!std::isfinite(axisLength) || axisLength <= 0.0F
         || !std::isfinite(mapping.minimumFrequencyHz) || !std::isfinite(mapping.maximumFrequencyHz)
-        || mapping.maximumFrequencyHz <= mapping.minimumFrequencyHz) {
+        || mapping.minimumFrequencyHz <= 0.0F
+        || mapping.maximumFrequencyHz <= mapping.minimumFrequencyHz
+        || mapping.maximumFrequencyHz > maximumFrequencyAxisFrequencyHz
+        || !std::isfinite(labelMetrics.glyphAdvance) || labelMetrics.glyphAdvance < 0.0F
+        || !std::isfinite(labelMetrics.glyphWidth) || labelMetrics.glyphWidth <= 0.0F
+        || !std::isfinite(labelMetrics.glyphHeight) || labelMetrics.glyphHeight <= 0.0F) {
         return result;
     }
 
     const auto safeGap = std::max(0.0F, std::isfinite(minimumGap) ? minimumGap : 0.0F);
+    enum class CandidateTier : std::uint8_t {
+        endpoint,
+        anchor,
+        coarse,
+        fine,
+    };
     struct Candidate final {
         float frequencyHz = 0.0F;
         float intervalStart = 0.0F;
         float intervalEnd = 0.0F;
-        std::size_t candidateIndex = frequencyAxisTickCandidateCount;
-        bool usesUpperEndpointLabel = false;
+        std::uint32_t labelFrequencyHz = 0;
+        CandidateTier tier = CandidateTier::fine;
         bool selected = false;
     };
-    std::array<Candidate, maximumFrequencyAxisTickCount> candidates { };
+    std::array<Candidate, maximumFrequencyAxisCandidateCount> candidates { };
     std::size_t candidateCount = 0;
 
-    const auto appendCandidate
-        = [&](const float frequency, const float extent, const std::size_t candidateIndex,
-              const bool usesUpperEndpointLabel) noexcept {
-              if (candidateCount >= candidates.size() || !std::isfinite(extent) || extent <= 0.0F
-                  || extent > axisLength) {
-                  return;
-              }
+    const auto labelExtent = [&](const float frequency) noexcept {
+        std::array<char, frequencyAxisLabelStorage> label { };
+        const auto glyphCount = formatFrequencyAxisLabel(frequency, label);
+        if (glyphCount == 0)
+            return 0.0F;
 
-              const auto centre = mapFrequencyToUnit(mapping, frequency) * axisLength;
-              const auto start = std::clamp(centre - (extent * 0.5F), 0.0F, axisLength - extent);
-              candidates[candidateCount++] = {
-                  frequency,
-                  start,
-                  start + extent,
-                  candidateIndex,
-                  usesUpperEndpointLabel,
-                  false,
-              };
-          };
+        return orientation == FrequencyAxisOrientation::horizontal ? labelMetrics.glyphWidth
+                + (static_cast<float>(glyphCount - 1) * labelMetrics.glyphAdvance)
+                                                                   : labelMetrics.glyphHeight;
+    };
+    const auto frequenciesMatch = [](const float first, const float second) noexcept {
+        return std::abs(first - second) <= std::max(0.01F, std::max(first, second) * 0.000001F);
+    };
+    const auto appendCandidate = [&](const float requestedFrequency,
+                                     const CandidateTier tier) noexcept {
+        if (!std::isfinite(requestedFrequency) || requestedFrequency < mapping.minimumFrequencyHz
+            || requestedFrequency > mapping.maximumFrequencyHz) {
+            return maximumFrequencyAxisCandidateCount;
+        }
 
-    for (std::size_t index = 0; index < frequencyAxisTickCandidates.size(); ++index) {
-        const auto frequency = frequencyAxisTickCandidates[index];
-        if (frequency < mapping.minimumFrequencyHz || frequency > mapping.maximumFrequencyHz)
-            continue;
-
-        appendCandidate(frequency, labelExtents[index], index, false);
-    }
-
-    const auto lastCandidateMatchesEndpoint = candidateCount != 0
-        && std::abs(candidates[candidateCount - 1].frequencyHz - mapping.maximumFrequencyHz)
-            <= std::max(0.01F, mapping.maximumFrequencyHz * 0.000001F);
-    if (!lastCandidateMatchesEndpoint) {
-        appendCandidate(mapping.maximumFrequencyHz, upperEndpointLabelExtent,
-            frequencyAxisTickCandidateCount, true);
-    }
-
-    const auto trySelect = [&](const std::size_t candidate) noexcept {
-        if (candidate >= candidateCount || candidates[candidate].selected)
-            return;
-
-        for (std::size_t selected = 0; selected < candidateCount; ++selected) {
-            if (!candidates[selected].selected)
+        for (std::size_t index = 0; index < candidateCount; ++index) {
+            if (!frequenciesMatch(candidates[index].frequencyHz, requestedFrequency))
                 continue;
 
-            const auto separated
-                = candidates[candidate].intervalEnd + safeGap <= candidates[selected].intervalStart
-                || candidates[selected].intervalEnd + safeGap
-                    <= candidates[candidate].intervalStart;
-            if (!separated)
-                return;
+            candidates[index].tier = std::min(candidates[index].tier, tier);
+            return index;
         }
 
-        candidates[candidate].selected = true;
+        const auto extent = labelExtent(requestedFrequency);
+        if (!std::isfinite(extent) || extent <= 0.0F || extent > axisLength)
+            return maximumFrequencyAxisCandidateCount;
+
+        if (candidateCount >= candidates.size()) {
+            result.candidateCapacityExceeded = true;
+            return maximumFrequencyAxisCandidateCount;
+        }
+
+        const auto centre = mapFrequencyToUnit(mapping, requestedFrequency) * axisLength;
+        const auto start = std::clamp(centre - (extent * 0.5F), 0.0F, axisLength - extent);
+        const auto labelFrequency = static_cast<std::uint32_t>(
+            std::lround(std::clamp(requestedFrequency, 0.0F, maximumFrequencyAxisFrequencyHz)));
+        candidates[candidateCount]
+            = { requestedFrequency, start, start + extent, labelFrequency, tier, false };
+        return candidateCount++;
     };
 
-    if (candidateCount == 0)
+    const auto lowerEndpoint = appendCandidate(mapping.minimumFrequencyHz, CandidateTier::endpoint);
+    const auto upperEndpoint = appendCandidate(mapping.maximumFrequencyHz, CandidateTier::endpoint);
+
+    constexpr std::array anchorMultipliers { 1.0F, 2.0F, 5.0F };
+    for (const auto multiplier : anchorMultipliers) {
+        for (auto decade = 1.0F; decade <= maximumFrequencyAxisFrequencyHz; decade *= 10.0F) {
+            const auto frequency = multiplier * decade;
+            if (frequency > maximumFrequencyAxisFrequencyHz)
+                break;
+
+            appendCandidate(frequency, CandidateTier::anchor);
+        }
+    }
+
+    auto referenceExtent = 0.0F;
+    for (std::size_t candidate = 0; candidate < candidateCount; ++candidate) {
+        referenceExtent = std::max(referenceExtent,
+            candidates[candidate].intervalEnd - candidates[candidate].intervalStart);
+    }
+    if (referenceExtent <= 0.0F)
         return result;
 
-    trySelect(0);
-    trySelect(candidateCount - 1);
+    const auto availableTickCount = static_cast<std::size_t>(std::max(
+        1.0F, std::floor((axisLength + safeGap) / std::max(1.0F, referenceExtent + safeGap))));
+    const auto desiredTickCount
+        = std::clamp(availableTickCount, std::size_t { 2 }, maximumFrequencyAxisTickCount);
+    const auto rawStep
+        = static_cast<double>(mapping.maximumFrequencyHz - mapping.minimumFrequencyHz)
+        / static_cast<double>(desiredTickCount - 1);
+    const auto niceStepAtLeast = [](const double step) noexcept {
+        if (!std::isfinite(step) || step <= 1.0)
+            return 1.0;
 
-    // Prefer decade labels before the remaining 2x and 5x multiples. The
-    // secondary 15/12/18 kHz order then fills the widest high-frequency gap
-    // from its centre outward when the transformed axis has room. Endpoints
-    // above were already reserved, so narrow panels retain both anchors.
-    constexpr std::array<std::size_t, frequencyAxisTickCandidateCount> priority {
-        2,
-        5,
-        8,
-        3,
-        6,
-        12,
-        0,
-        1,
-        4,
-        7,
-        10,
-        9,
-        11,
+        const auto magnitude = std::pow(10.0, std::floor(std::log10(step)));
+        const auto normalised = step / magnitude;
+        if (normalised <= 1.0)
+            return magnitude;
+        if (normalised <= 2.0)
+            return 2.0 * magnitude;
+        if (normalised <= 5.0)
+            return 5.0 * magnitude;
+        return 10.0 * magnitude;
     };
-    for (const auto candidateIndex : priority) {
-        for (std::size_t candidate = 0; candidate < candidateCount; ++candidate) {
-            if (candidates[candidate].candidateIndex == candidateIndex)
-                trySelect(candidate);
+    const auto nextFinerNiceStep = [](const double step) noexcept {
+        if (!std::isfinite(step) || step <= 1.0)
+            return 1.0;
+
+        const auto magnitude = std::pow(10.0, std::floor(std::log10(step)));
+        const auto normalised = step / magnitude;
+        if (normalised <= 1.000001)
+            return std::max(1.0, 5.0 * magnitude * 0.1);
+        if (normalised <= 2.000001)
+            return std::max(1.0, magnitude);
+        return std::max(1.0, 2.0 * magnitude);
+    };
+    const auto coarseStep = niceStepAtLeast(rawStep);
+    const auto fineStep = nextFinerNiceStep(coarseStep);
+    const auto appendGrid = [&](const double step, const CandidateTier tier) noexcept {
+        if (!std::isfinite(step) || step < 1.0)
+            return;
+
+        const auto firstMultiple
+            = static_cast<std::int64_t>(std::ceil(mapping.minimumFrequencyHz / step));
+        const auto lastMultiple
+            = static_cast<std::int64_t>(std::floor(mapping.maximumFrequencyHz / step));
+        for (auto multiple = firstMultiple; multiple <= lastMultiple; ++multiple) {
+            appendCandidate(
+                static_cast<float>(std::round(static_cast<double>(multiple) * step)), tier);
+        }
+    };
+    appendGrid(coarseStep, CandidateTier::coarse);
+
+    constexpr std::array secondaryLogarithmicMultipliers { 3.0F, 4.0F, 6.0F, 7.0F, 8.0F, 9.0F };
+    for (const auto multiplier : secondaryLogarithmicMultipliers) {
+        for (auto decade = 1.0F; decade <= maximumFrequencyAxisFrequencyHz; decade *= 10.0F) {
+            const auto frequency = multiplier * decade;
+            if (frequency > maximumFrequencyAxisFrequencyHz)
+                break;
+
+            appendCandidate(frequency, CandidateTier::coarse);
+        }
+    }
+    appendGrid(fineStep, CandidateTier::fine);
+    result.generatedCandidateCount = candidateCount;
+    std::array<std::size_t, maximumFrequencyAxisTickCount> selectedIndices { };
+    std::size_t selectedCount = 0;
+
+    const auto canSelect = [&](const std::size_t candidate, const float gap) noexcept {
+        if (candidate >= candidateCount || candidates[candidate].selected)
+            return false;
+
+        for (std::size_t selected = 0; selected < selectedCount; ++selected) {
+            const auto selectedCandidate = selectedIndices[selected];
+
+            const auto separated = candidates[candidate].intervalEnd + gap
+                    <= candidates[selectedCandidate].intervalStart
+                || candidates[selectedCandidate].intervalEnd + gap
+                    <= candidates[candidate].intervalStart;
+            if (!separated)
+                return false;
+        }
+
+        return true;
+    };
+    const auto select = [&](const std::size_t candidate) noexcept {
+        if (!canSelect(candidate, safeGap) || selectedCount >= selectedIndices.size())
+            return false;
+
+        candidates[candidate].selected = true;
+        selectedIndices[selectedCount++] = candidate;
+        return true;
+    };
+    select(lowerEndpoint);
+    select(upperEndpoint);
+
+    for (auto tier = CandidateTier::anchor; tier <= CandidateTier::fine;
+        tier = static_cast<CandidateTier>(static_cast<std::uint8_t>(tier) + 1U)) {
+        for (;;) {
+            auto bestCandidate = maximumFrequencyAxisCandidateCount;
+            auto bestClearance = -1.0F;
+
+            for (std::size_t candidate = 0; candidate < candidateCount; ++candidate) {
+                if (candidates[candidate].tier != tier || !canSelect(candidate, safeGap))
+                    continue;
+
+                auto minimumClearance = std::numeric_limits<float>::max();
+                for (std::size_t selected = 0; selected < selectedCount; ++selected) {
+                    const auto selectedCandidate = selectedIndices[selected];
+
+                    const auto clearance = candidates[candidate].intervalEnd
+                            <= candidates[selectedCandidate].intervalStart
+                        ? candidates[selectedCandidate].intervalStart
+                            - candidates[candidate].intervalEnd
+                        : candidates[candidate].intervalStart
+                            - candidates[selectedCandidate].intervalEnd;
+                    minimumClearance = std::min(minimumClearance, clearance);
+                }
+
+                const auto isBetter = minimumClearance > bestClearance + 0.0001F
+                    || (std::abs(minimumClearance - bestClearance) <= 0.0001F
+                        && (bestCandidate >= candidateCount
+                            || candidates[candidate].frequencyHz
+                                < candidates[bestCandidate].frequencyHz));
+                if (isBetter) {
+                    bestCandidate = candidate;
+                    bestClearance = minimumClearance;
+                }
+            }
+
+            if (bestCandidate >= candidateCount || !select(bestCandidate))
+                break;
+
+            if (selectedCount >= selectedIndices.size())
+                break;
         }
     }
 
-    for (std::size_t candidate = 0; candidate < candidateCount; ++candidate) {
-        if (!candidates[candidate].selected)
-            continue;
-
-        result.ticks[result.count++] = { candidates[candidate].frequencyHz,
-            candidates[candidate].candidateIndex, candidates[candidate].usesUpperEndpointLabel };
+    for (std::size_t selected = 0; selected < selectedCount; ++selected) {
+        const auto candidate = selectedIndices[selected];
+        result.ticks[result.count++] = {
+            candidates[candidate].frequencyHz,
+            candidates[candidate].labelFrequencyHz,
+        };
     }
+    std::sort(result.ticks.begin(),
+        result.ticks.begin() + static_cast<std::ptrdiff_t>(result.count),
+        [](const auto& first, const auto& second) noexcept {
+            return first.frequencyHz < second.frequencyHz;
+        });
 
     return result;
 }
@@ -1127,10 +1259,6 @@ constexpr std::array<std::string_view, cachedFixedTextRunCount> cachedFixedTextS
     "Peak / RMS", "Spectrogram", "Stereo / Correlation", "Loudness", "CLEAR", "L", "R", "M", "OVER",
     "MONO", "RESET", "S", "I" };
 
-constexpr std::array<std::string_view, frequencyAxisTickCandidateCount>
-    cachedFrequencyAxisTextStrings { "20 Hz", "50 Hz", "100 Hz", "200 Hz", "500 Hz", "1 kHz",
-        "2 kHz", "5 kHz", "10 kHz", "12 kHz", "15 kHz", "18 kHz", "20 kHz" };
-
 constexpr std::array<std::string_view, peakRmsMajorDecibelTicks.size()>
     cachedPeakRmsTickTextStrings { "-60", "-48", "-36", "-24", "-12", "-6", "0", "+3" };
 
@@ -1188,11 +1316,6 @@ static_assert(cachedFixedTextStrings[clearTextRunIndex].size()
 static_assert(MetalVisualizationGeometryLimits::maximumGeneratedVertices <= maximumVertexCount);
 static_assert([] {
     for (const auto text : cachedFixedTextStrings) {
-        if (text.size() > maximumCachedTextGlyphs)
-            return false;
-    }
-
-    for (const auto text : cachedFrequencyAxisTextStrings) {
         if (text.size() > maximumCachedTextGlyphs)
             return false;
     }
@@ -1269,6 +1392,43 @@ struct CachedMonospacedTextRun {
     std::uint8_t glyphCount = 0;
 };
 
+struct FrequencyAxisTickCache final {
+    std::array<std::uint32_t, 8> key { };
+    FrequencyAxisTickSelection selection;
+    bool valid = false;
+};
+
+std::uint32_t frequencyTickKeyBits(const float value) noexcept
+{
+    std::uint32_t bits = 0;
+    static_assert(sizeof(bits) == sizeof(value));
+    std::memcpy(&bits, &value, sizeof(bits));
+    return bits;
+}
+
+const FrequencyAxisTickSelection& selectCachedFrequencyAxisTicks(FrequencyAxisTickCache& cache,
+    const FrequencyAxisMapping& mapping, const float axisLength,
+    const FrequencyAxisLabelMetrics& metrics, const FrequencyAxisOrientation orientation) noexcept
+{
+    const std::array key {
+        frequencyTickKeyBits(mapping.minimumFrequencyHz),
+        frequencyTickKeyBits(mapping.maximumFrequencyHz),
+        frequencyTickKeyBits(mapping.spacing),
+        frequencyTickKeyBits(axisLength),
+        frequencyTickKeyBits(metrics.glyphAdvance),
+        frequencyTickKeyBits(metrics.glyphWidth),
+        frequencyTickKeyBits(metrics.glyphHeight),
+        static_cast<std::uint32_t>(orientation),
+    };
+    if (!cache.valid || cache.key != key) {
+        cache.key = key;
+        cache.selection = selectFrequencyAxisTicks(mapping, axisLength, metrics, orientation);
+        cache.valid = true;
+    }
+
+    return cache.selection;
+}
+
 std::uint8_t atlasIndexForAscii(const char character) noexcept
 {
     const auto value = static_cast<unsigned char>(character);
@@ -1277,12 +1437,12 @@ std::uint8_t atlasIndexForAscii(const char character) noexcept
             : static_cast<unsigned char>('?' - printableAsciiFirst));
 }
 
-const std::array<CachedMonospacedTextRun, 20'001>& cachedFrequencyEndpointTextRuns() noexcept
+const std::array<CachedMonospacedTextRun, 20'001>& cachedFrequencyTextRuns() noexcept
 {
     // This density-independent table is built once during the first glyph-atlas
     // initialization, never lazily from a display callback. It makes every
-    // integer-Hz upper endpoint through 20 kHz available without per-instance
-    // strings or callback-time formatting.
+    // dynamically selected integer-Hz label through 20 kHz available without
+    // per-instance strings or callback-time formatting.
     static const auto runs = [] {
         std::array<CachedMonospacedTextRun, 20'001> result { };
 
@@ -3591,7 +3751,6 @@ private:
     id<MTLTexture> spectrogramPaletteTexture = nil;
     id<MTLTexture> spectrogramHistoryTexture = nil;
     std::array<CachedTextRun, cachedFixedTextRunCount> cachedFixedTextRuns { };
-    std::array<CachedTextRun, frequencyAxisTickCandidateCount> cachedFrequencyAxisTextRuns { };
     std::array<CachedTextRun, cachedDecibelTickCount> cachedDecibelTextRuns { };
     std::array<CachedTextRun, peakRmsMajorDecibelTicks.size()> cachedPeakRmsTickTextRuns { };
     std::array<GlyphAtlasEntry, glyphAtlasGlyphCount> cachedGlyphAtlasEntries { };
@@ -3601,6 +3760,8 @@ private:
     float maximumCachedDecibelTextWidth = 0.0F;
     float maximumCachedPeakRmsTickTextWidth = 0.0F;
     double glyphAtlasBackingScale = 0.0;
+    mutable FrequencyAxisTickCache spectrumFrequencyTickCache;
+    mutable FrequencyAxisTickCache spectrogramFrequencyTickCache;
     juce::String initializationError;
     bool metalReady = false;
     std::atomic<std::uint64_t> packedSpectrumSettings { 0 };
@@ -4120,13 +4281,6 @@ private:
         for (std::size_t index = 0; index < cachedFixedTextStrings.size(); ++index)
             newCachedFixedTextRuns[index] = makeCachedTextRun(cachedFixedTextStrings[index]);
 
-        std::array<CachedTextRun, frequencyAxisTickCandidateCount>
-            newCachedFrequencyAxisTextRuns { };
-        for (std::size_t index = 0; index < cachedFrequencyAxisTextStrings.size(); ++index) {
-            newCachedFrequencyAxisTextRuns[index]
-                = makeCachedTextRun(cachedFrequencyAxisTextStrings[index]);
-        }
-
         std::array<CachedTextRun, cachedDecibelTickCount> newCachedDecibelTextRuns { };
         auto newMaximumCachedDecibelTextWidth = 0.0F;
         for (std::size_t index = 0; index < newCachedDecibelTextRuns.size(); ++index) {
@@ -4166,14 +4320,13 @@ private:
         // Force construction of the immutable, density-independent endpoint
         // and meter-readout tables here. Later display callbacks only index
         // already-formatted runs.
-        juce::ignoreUnused(cachedFrequencyEndpointTextRuns());
+        juce::ignoreUnused(cachedFrequencyTextRuns());
         juce::ignoreUnused(cachedPeakRmsReadoutTextRuns(), cachedLoudnessReadoutTextRuns(),
             cachedMinusInfinityTextRun(), cachedStereoCorrelationTextRuns(), cachedEmDashTextRun());
 
         [glyphAtlasTexture release];
         glyphAtlasTexture = newTexture;
         cachedFixedTextRuns = newCachedFixedTextRuns;
-        cachedFrequencyAxisTextRuns = newCachedFrequencyAxisTextRuns;
         cachedDecibelTextRuns = newCachedDecibelTextRuns;
         cachedPeakRmsTickTextRuns = newCachedPeakRmsTickTextRuns;
         cachedGlyphAtlasEntries = atlasEntries;
@@ -5038,21 +5191,16 @@ private:
             maximumFrequency,
             settings.frequencySpacing,
         };
-        const auto upperEndpointFrequency = static_cast<std::size_t>(std::lround(maximumFrequency));
-        const auto& upperEndpointTextRun = cachedFrequencyEndpointTextRuns()[std::min<std::size_t>(
-            upperEndpointFrequency, cachedFrequencyEndpointTextRuns().size() - 1)];
-        const auto upperEndpointTextWidth
-            = monospacedTextRunWidth(upperEndpointTextRun) * axisTextScale;
-        std::array<float, frequencyAxisTickCandidateCount> frequencyLabelWidths { };
-        std::array<float, frequencyAxisTickCandidateCount> frequencyLabelHeights { };
-        auto maximumFrequencyLabelWidth = upperEndpointTextWidth;
-        for (std::size_t index = 0; index < cachedFrequencyAxisTextRuns.size(); ++index) {
-            frequencyLabelWidths[index] = cachedFrequencyAxisTextRuns[index].width * axisTextScale;
-            frequencyLabelHeights[index]
-                = cachedFrequencyAxisTextRuns[index].height * axisTextScale;
-            maximumFrequencyLabelWidth
-                = std::max(maximumFrequencyLabelWidth, frequencyLabelWidths[index]);
-        }
+        const FrequencyAxisLabelMetrics frequencyLabelMetrics {
+            cachedGlyphAdvance * axisTextScale,
+            cachedGlyphCellWidth * axisTextScale,
+            axisTextHeight,
+        };
+        const auto frequencyTextRun
+            = [](const std::uint32_t labelFrequencyHz) noexcept -> const CachedMonospacedTextRun& {
+            const auto& runs = cachedFrequencyTextRuns();
+            return runs[std::min<std::size_t>(labelFrequencyHz, runs.size() - 1)];
+        };
 
         const auto spectrumPanel = toRenderRect(dashboardLayout[DashboardPanel::spectrum], height);
         const auto spectrumClearLayout = calculateSpectrumClearLayout(
@@ -5081,8 +5229,9 @@ private:
         };
 
         constexpr auto gridColour = simd_float4 { 0.16F, 0.20F, 0.27F, 0.62F };
-        const auto spectrumFrequencyTicks = selectFrequencyAxisTicks(
-            frequencyMapping, spectrumPlot.width(), frequencyLabelWidths, upperEndpointTextWidth);
+        const auto& spectrumFrequencyTicks
+            = selectCachedFrequencyAxisTicks(spectrumFrequencyTickCache, frequencyMapping,
+                spectrumPlot.width(), frequencyLabelMetrics, FrequencyAxisOrientation::horizontal);
         const auto spectrumDecibelTicks = makeSpectrumDecibelTicks(
             settings.floorDecibels, settings.ceilingDecibels, spectrumPlot.height());
 
@@ -5199,10 +5348,17 @@ private:
         batches.spectrumControls.count = cursor - batches.spectrumControls.start;
         const auto spectrogramPanel
             = toRenderRect(dashboardLayout[DashboardPanel::spectrogram], height);
+        const auto spectrogramPlotWithoutLabels = insetRenderRect(
+            spectrogramPanel, 0.0F, 8.0F, 8.0F, headerHeight(spectrogramPanel) + 7.0F);
+        const auto& spectrogramFrequencyTicks = selectCachedFrequencyAxisTicks(
+            spectrogramFrequencyTickCache, frequencyMapping, spectrogramPlotWithoutLabels.height(),
+            frequencyLabelMetrics, FrequencyAxisOrientation::vertical);
+        // Keep the plot edge fixed while dynamic labels appear and disappear.
+        const auto maximumFrequencyLabelWidth = frequencyLabelMetrics.glyphWidth
+            + (static_cast<float>(maximumFrequencyAxisLabelGlyphs - 1)
+                * frequencyLabelMetrics.glyphAdvance);
         const auto spectrogramPlot = insetRenderRect(spectrogramPanel,
             maximumFrequencyLabelWidth + 8.0F, 8.0F, 8.0F, headerHeight(spectrogramPanel) + 7.0F);
-        const auto spectrogramFrequencyTicks = selectFrequencyAxisTicks(
-            frequencyMapping, spectrogramPlot.height(), frequencyLabelHeights, axisTextHeight);
         constexpr auto spectrogramTickColour = simd_float4 { 0.19F, 0.25F, 0.33F, 0.78F };
         batches.spectrogramHistory.start = cursor;
         if (spectrogramHistoryTexture != nil && spectrogramHistoryRing.columnCount() != 0
@@ -5664,24 +5820,12 @@ private:
                     ++tickIndex) {
                     const auto& tick = spectrumFrequencyTicks.ticks[tickIndex];
                     const auto centreX = frequencyToX(tick.frequencyHz);
-
-                    if (tick.usesUpperEndpointLabel) {
-                        const auto labelX = std::clamp(centreX - (upperEndpointTextWidth * 0.5F),
-                            spectrumPlot.left,
-                            std::max(
-                                spectrumPlot.left, spectrumPlot.right - upperEndpointTextWidth));
-                        appendMonospacedTextRun(upperEndpointTextRun, labelX,
-                            spectrumPlot.bottom - axisTextHeight - 4.0F, axisTextScale,
-                            axisTextColour);
-                    } else if (tick.candidateIndex < cachedFrequencyAxisTextRuns.size()) {
-                        const auto& run = cachedFrequencyAxisTextRuns[tick.candidateIndex];
-                        const auto labelWidth = run.width * axisTextScale;
-                        const auto labelX
-                            = std::clamp(centreX - (labelWidth * 0.5F), spectrumPlot.left,
-                                std::max(spectrumPlot.left, spectrumPlot.right - labelWidth));
-                        appendTextRun(run, labelX, spectrumPlot.bottom - axisTextHeight - 4.0F,
-                            axisTextScale, axisTextColour);
-                    }
+                    const auto& run = frequencyTextRun(tick.labelFrequencyHz);
+                    const auto labelWidth = monospacedTextRunWidth(run) * axisTextScale;
+                    const auto labelX = std::clamp(centreX - (labelWidth * 0.5F), spectrumPlot.left,
+                        std::max(spectrumPlot.left, spectrumPlot.right - labelWidth));
+                    appendMonospacedTextRun(run, labelX,
+                        spectrumPlot.bottom - axisTextHeight - 4.0F, axisTextScale, axisTextColour);
                 }
 
                 for (std::size_t tickIndex = 0; tickIndex < spectrumDecibelTicks.count;
@@ -5710,24 +5854,13 @@ private:
                     const auto& tick = spectrogramFrequencyTicks.ticks[tickIndex];
                     const auto unit = mapFrequencyToUnit(frequencyMapping, tick.frequencyHz);
                     const auto centreY = spectrogramPlot.bottom + (unit * spectrogramPlot.height());
-
-                    if (tick.usesUpperEndpointLabel) {
-                        const auto labelY = std::clamp(centreY - (axisTextHeight * 0.5F),
-                            spectrogramPlot.bottom,
+                    const auto& run = frequencyTextRun(tick.labelFrequencyHz);
+                    const auto labelWidth = monospacedTextRunWidth(run) * axisTextScale;
+                    const auto labelY
+                        = std::clamp(centreY - (axisTextHeight * 0.5F), spectrogramPlot.bottom,
                             std::max(spectrogramPlot.bottom, spectrogramPlot.top - axisTextHeight));
-                        appendMonospacedTextRun(upperEndpointTextRun,
-                            spectrogramPlot.left - upperEndpointTextWidth - 5.0F, labelY,
-                            axisTextScale, axisTextColour);
-                    } else if (tick.candidateIndex < cachedFrequencyAxisTextRuns.size()) {
-                        const auto& run = cachedFrequencyAxisTextRuns[tick.candidateIndex];
-                        const auto labelWidth = run.width * axisTextScale;
-                        const auto labelHeight = run.height * axisTextScale;
-                        const auto labelY = std::clamp(centreY - (labelHeight * 0.5F),
-                            spectrogramPlot.bottom,
-                            std::max(spectrogramPlot.bottom, spectrogramPlot.top - labelHeight));
-                        appendTextRun(run, spectrogramPlot.left - labelWidth - 5.0F, labelY,
-                            axisTextScale, axisTextColour);
-                    }
+                    appendMonospacedTextRun(run, spectrogramPlot.left - labelWidth - 5.0F, labelY,
+                        axisTextScale, axisTextColour);
                 }
             } else if (panel == DashboardPanel::stereoField) {
                 constexpr auto monoTextColour = simd_float4 { 0.64F, 0.76F, 0.84F, 0.94F };
