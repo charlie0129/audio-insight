@@ -232,6 +232,8 @@ target_sources(AudioInsight
         src/ui/DashboardLayoutEdit.h
         src/ui/DashboardLayoutStore.cpp
         src/ui/DashboardLayoutStore.h
+        src/ui/EditorMouseMoveFilter.h
+        src/ui/EditorMouseMoveFilter.mm
         src/ui/EditorUtilityState.cpp
         src/ui/EditorUtilityState.h
         src/ui/FrameLatencyHistory.cpp
@@ -316,6 +318,8 @@ source_group(TREE "${CMAKE_CURRENT_SOURCE_DIR}" FILES
     src/ui/DashboardLayoutEdit.h
     src/ui/DashboardLayoutStore.cpp
     src/ui/DashboardLayoutStore.h
+    src/ui/EditorMouseMoveFilter.h
+    src/ui/EditorMouseMoveFilter.mm
     src/ui/EditorUtilityState.cpp
     src/ui/EditorUtilityState.h
     src/ui/FrameLatencyHistory.cpp
@@ -383,6 +387,8 @@ if(BUILD_TESTING)
             src/ui/DashboardLayoutEdit.h
             src/ui/DashboardLayoutStore.cpp
             src/ui/DashboardLayoutStore.h
+            src/ui/EditorMouseMoveFilter.h
+            src/ui/EditorMouseMoveFilter.mm
             src/ui/EditorUtilityState.cpp
             src/ui/EditorUtilityState.h
             src/ui/FrameLatencyHistory.cpp
@@ -403,6 +409,7 @@ if(BUILD_TESTING)
             tests/DashboardLayoutTests.cpp
             tests/DashboardLayoutEditTests.cpp
             tests/DashboardLayoutStoreTests.cpp
+            tests/EditorMouseMoveFilterTests.cpp
             tests/EditorUtilityStateTests.cpp
             tests/FrameLatencyHistoryTests.cpp
             tests/LoudnessAnalyzerTests.cpp
@@ -500,6 +507,8 @@ if(BUILD_TESTING)
         src/ui/DashboardLayoutEdit.h
         src/ui/DashboardLayoutStore.cpp
         src/ui/DashboardLayoutStore.h
+        src/ui/EditorMouseMoveFilter.h
+        src/ui/EditorMouseMoveFilter.mm
         src/ui/EditorUtilityState.cpp
         src/ui/EditorUtilityState.h
         src/ui/FrameLatencyHistory.cpp
@@ -520,6 +529,7 @@ if(BUILD_TESTING)
         tests/DashboardLayoutTests.cpp
         tests/DashboardLayoutEditTests.cpp
         tests/DashboardLayoutStoreTests.cpp
+        tests/EditorMouseMoveFilterTests.cpp
         tests/EditorUtilityStateTests.cpp
         tests/FrameLatencyHistoryTests.cpp
         tests/LoudnessAnalyzerTests.cpp

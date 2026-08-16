@@ -6,6 +6,7 @@
 #include "../ui/AnalyzerSettingsPanel.h"
 #include "../ui/DashboardLayoutEdit.h"
 #include "../ui/DashboardLayoutStore.h"
+#include "../ui/EditorMouseMoveFilter.h"
 #include "../ui/EditorUtilityState.h"
 #include "../ui/MetalVisualization.h"
 #include "../ui/PerformanceMetricsPanel.h"
@@ -68,6 +69,7 @@ private:
     PerformanceMetricsPanel metricsPanel;
     EditorUtilityState utilityState;
     AnalyzerSettingsPanel settingsPanel;
+    std::unique_ptr<EditorMouseMoveFilter> mouseMoveFilter;
 
     juce::TextButton editLayoutButton { "Edit layout" };
     juce::TextButton doneLayoutButton { "Done" };

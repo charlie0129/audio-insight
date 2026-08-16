@@ -273,7 +273,9 @@ PluginEditor::PluginEditor(PluginProcessor& processorToUse, VisualizationDataSou
       metricsPanel(
           [this] {
               return PerformanceMetricsSnapshot { visualization.getRenderTelemetry(),
-                  processor_.getAnalysisTelemetry() };
+                  processor_.getAnalysisTelemetry(),
+                  mouseMoveFilter != nullptr ? mouseMoveFilter->getTelemetry()
+                                             : EditorMouseMoveFilterTelemetry { } };
           },
           [this] { visualization.resetRenderTelemetry(); },
           [this] { return visualization.isEffectivelyRendering(); },
@@ -370,11 +372,14 @@ PluginEditor::PluginEditor(PluginProcessor& processorToUse, VisualizationDataSou
     synchronizeMetricsRequestedFromParameter();
     updateUtilityPresentation();
     setSize(1200, 800);
+    mouseMoveFilter = std::make_unique<EditorMouseMoveFilter>(
+        *this, [this] { return dashboardLayoutEdit.isEditing(); });
     updateRenderingState();
 }
 
 PluginEditor::~PluginEditor()
 {
+    mouseMoveFilter.reset();
     shuttingDown.store(true, std::memory_order_release);
     stopTimer();
     processor_.removeAnalyzerConfigurationListener(this);
@@ -412,6 +417,9 @@ void PluginEditor::paint(juce::Graphics& graphics)
 
 void PluginEditor::resized()
 {
+    if (mouseMoveFilter != nullptr)
+        mouseMoveFilter->resetTarget();
+
     auto bounds = getLocalBounds();
     auto controls = bounds.removeFromTop(controlStripHeight).reduced(12, 8);
 
@@ -490,6 +498,8 @@ void PluginEditor::resized()
 
 void PluginEditor::visibilityChanged()
 {
+    if (mouseMoveFilter != nullptr)
+        mouseMoveFilter->resetTarget();
     updateRenderingState();
 }
 
@@ -515,16 +525,22 @@ void PluginEditor::timerCallback()
 
 void PluginEditor::componentMovedOrResized(bool, bool)
 {
+    if (mouseMoveFilter != nullptr)
+        mouseMoveFilter->resetTarget();
     updateRenderingState();
 }
 
 void PluginEditor::componentPeerChanged()
 {
+    if (mouseMoveFilter != nullptr)
+        mouseMoveFilter->resetTarget();
     updateRenderingState();
 }
 
 void PluginEditor::componentVisibilityChanged()
 {
+    if (mouseMoveFilter != nullptr)
+        mouseMoveFilter->resetTarget();
     updateRenderingState();
 }
 

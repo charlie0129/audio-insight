@@ -2,6 +2,7 @@
 
 #pragma once
 
+#include "EditorMouseMoveFilter.h"
 #include "MetalVisualization.h"
 #include "analysis/AnalysisCoordinator.h"
 
@@ -18,6 +19,7 @@ namespace audio_insight {
 struct PerformanceMetricsSnapshot {
     MetalRenderTelemetry metal;
     AnalysisTelemetry analysis;
+    EditorMouseMoveFilterTelemetry editorInput;
 };
 
 enum class PerformanceMetricKind { raw, derivedRate, derivedStatistic };

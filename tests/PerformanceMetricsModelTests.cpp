@@ -45,6 +45,7 @@ consteval std::size_t aggregateFieldCount()
 static_assert(aggregateFieldCount<PresentedFrameIntervalSample>() == 2);
 static_assert(aggregateFieldCount<FrameLatencySample>() == 9);
 static_assert(aggregateFieldCount<MetalRenderTelemetry>() == 103);
+static_assert(aggregateFieldCount<EditorMouseMoveFilterTelemetry>() == 5);
 static_assert(aggregateFieldCount<StereoSampleCapture::Telemetry>() == 14);
 static_assert(aggregateFieldCount<StereoMeterAccumulator::Telemetry>() == 7);
 static_assert(aggregateFieldCount<AudioCallbackBlockTelemetry>() == 5);
@@ -55,6 +56,11 @@ static_assert(aggregateFieldCount<LoudnessMeasurement>() == 19);
 static_assert(aggregateFieldCount<AnalysisTelemetry>() == 73);
 
 constexpr auto expectedRawFieldNames = std::to_array<std::string_view>({
+    "editorInput.mouseMoveFilterActive",
+    "editorInput.mouseMovedEvents",
+    "editorInput.forwardedMouseMovedEvents",
+    "editorInput.suppressedMouseMovedEvents",
+    "editorInput.layoutEditBypassedMouseMovedEvents",
     "metal.epoch",
     "metal.displayLinkCallbacks",
     "metal.submittedFrames",
@@ -350,7 +356,7 @@ constexpr auto expectedRawFieldNames = std::to_array<std::string_view>({
     "analysis.peakRmsUserResets",
     "analysis.spectrumUserClears",
 });
-static_assert(expectedRawFieldNames.size() == 294);
+static_assert(expectedRawFieldNames.size() == 299);
 
 const PerformanceMetricRate* findRate(
     const PerformanceMetricsViewModel& view, const std::string_view sourceFieldName)
@@ -395,6 +401,33 @@ public:
 
     void runTest() override
     {
+        testCase(
+            "Editor mouse-move filtering is observable as raw counters and live rates", [this] {
+                PerformanceMetricsModel model;
+                PerformanceMetricsSnapshot snapshot;
+                snapshot.metal.epoch = 2;
+                snapshot.editorInput = { 100, 3, 97, 0, true };
+
+                auto view = model.update(snapshot, 1.0);
+                const auto* active = findRawRow(view, "editorInput.mouseMoveFilterActive");
+                const auto* suppressed = findRawRow(view, "editorInput.suppressedMouseMovedEvents");
+                expect(active != nullptr && active->rawValue == "true");
+                expect(suppressed != nullptr && suppressed->rawValue == "97");
+
+                snapshot.editorInput = { 220, 5, 215, 0, true };
+                view = model.update(snapshot, 2.0);
+                const auto* receivedRate = findRate(view, "editorInput.mouseMovedEvents");
+                const auto* forwardedRate = findRate(view, "editorInput.forwardedMouseMovedEvents");
+                const auto* suppressedRate
+                    = findRate(view, "editorInput.suppressedMouseMovedEvents");
+                expect(receivedRate != nullptr && receivedRate->available
+                    && receivedRate->counterDelta == 120);
+                expect(forwardedRate != nullptr && forwardedRate->available
+                    && forwardedRate->counterDelta == 2);
+                expect(suppressedRate != nullptr && suppressedRate->available
+                    && suppressedRate->counterDelta == 118);
+            });
+
         testCase("Exact active-display request is explicit in raw telemetry", [this] {
             PerformanceMetricsModel model;
             PerformanceMetricsSnapshot snapshot;

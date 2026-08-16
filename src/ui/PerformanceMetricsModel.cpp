@@ -266,6 +266,7 @@ void appendRawSections(
 {
     const auto& metal = snapshot.metal;
     const auto& analysis = snapshot.analysis;
+    const auto& editorInput = snapshot.editorInput;
 
     PerformanceMetricGroup status { "Renderer status and surface", { } };
     status.rows.emplace_back(rawUnsigned("metal.epoch", "Telemetry epoch", metal.epoch));
@@ -918,6 +919,21 @@ void appendRawSections(
     freshness.rows.emplace_back(rawUnsigned(
         "analysis.spectrumUserClears", "Spectrum user clears", analysis.spectrumUserClears));
     sections.emplace_back(std::move(freshness));
+
+    PerformanceMetricGroup editorMouseInput { "Editor mouse input", { } };
+    editorMouseInput.rows.emplace_back(rawBoolean("editorInput.mouseMoveFilterActive",
+        "Scoped mouse-move filter active", editorInput.filterActive));
+    editorMouseInput.rows.emplace_back(rawUnsigned("editorInput.mouseMovedEvents",
+        "In-editor mouse-moved events", editorInput.mouseMovedEvents, "events"));
+    editorMouseInput.rows.emplace_back(rawUnsigned("editorInput.forwardedMouseMovedEvents",
+        "Mouse-moved events forwarded", editorInput.forwardedMouseMovedEvents, "events"));
+    editorMouseInput.rows.emplace_back(rawUnsigned("editorInput.suppressedMouseMovedEvents",
+        "Redundant mouse-moved events suppressed", editorInput.suppressedMouseMovedEvents,
+        "events"));
+    editorMouseInput.rows.emplace_back(rawUnsigned("editorInput.layoutEditBypassedMouseMovedEvents",
+        "Layout-edit mouse moves bypassed", editorInput.layoutEditBypassedMouseMovedEvents,
+        "events"));
+    sections.emplace_back(std::move(editorMouseInput));
 }
 
 void appendRate(std::vector<PerformanceMetricRate>& rates, std::string sourceFieldName,
@@ -970,6 +986,21 @@ void buildRates(const PerformanceMetricsSnapshot& current,
     const PerformanceMetricsSnapshot& previous, const double elapsedSeconds,
     const bool baselineIsValid, std::vector<PerformanceMetricRate>& rates)
 {
+    appendRate(rates, "editorInput.mouseMovedEvents", "In-editor mouse-moved events", "events/s",
+        current.editorInput.mouseMovedEvents, previous.editorInput.mouseMovedEvents, elapsedSeconds,
+        baselineIsValid);
+    appendRate(rates, "editorInput.forwardedMouseMovedEvents", "Forwarded mouse-moved events",
+        "events/s", current.editorInput.forwardedMouseMovedEvents,
+        previous.editorInput.forwardedMouseMovedEvents, elapsedSeconds, baselineIsValid);
+    appendRate(rates, "editorInput.suppressedMouseMovedEvents",
+        "Suppressed redundant mouse-moved events", "events/s",
+        current.editorInput.suppressedMouseMovedEvents,
+        previous.editorInput.suppressedMouseMovedEvents, elapsedSeconds, baselineIsValid);
+    appendRate(rates, "editorInput.layoutEditBypassedMouseMovedEvents",
+        "Layout-edit mouse moves bypassed", "events/s",
+        current.editorInput.layoutEditBypassedMouseMovedEvents,
+        previous.editorInput.layoutEditBypassedMouseMovedEvents, elapsedSeconds, baselineIsValid);
+
     const auto addMetal = [&](std::string fieldName, std::string label, std::string unit,
                               const std::uint64_t currentValue, const std::uint64_t previousValue) {
         appendRate(rates, std::move(fieldName), std::move(label), std::move(unit), currentValue,
