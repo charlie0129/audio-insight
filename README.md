@@ -59,11 +59,6 @@ displays. This is best effort: the actual callback and presentation timestamps
 in **Metrics** remain authoritative. There is no display-pacing setting or
 persisted pacing mode.
 
-Analyzer settings use the pre-release schema 3. Older analyzer schemas are
-intentionally replaced with the current defaults; the project does not carry
-analyzer-setting compatibility parameters or migration shims before its first
-public release.
-
 <img width="1200" height="800" alt="Audio Insight spectrogram settings" src="https://github.com/user-attachments/assets/4e973871-3176-47f6-a1d2-a50ca504fa97" />
 
 The Spectrogram uses each unsmoothed FFT slice and the same Linear-to-Logarithmic
@@ -126,16 +121,6 @@ Reusable Metal render buffers are released as soon as their GPU command buffer
 completes. Presentation tracking has independent per-submission lifetime state,
 so a compositor retaining a drawable for several refresh periods does not
 artificially exhaust the render-buffer pool and halve the submission cadence.
-
-Captured metrics identified the earlier seemingly random analyzer resets as
-overflow in the original 16-slot sample queue: all 16 slots became ready, 20
-old chunks were reclaimed, and three input discontinuities reset temporal
-analysis state. Capture now packs audio into 256-frame chunks across 128 slots,
-providing a block-size-independent 32,768-frame capacity (about 683 ms at
-48 kHz). Effective display-link callbacks also request analysis before renderer
-buffer or drawable admission can return early. Metrics exposes ready-frame
-capacity/high-water values, partial packed frames, and overflow episodes for
-long-session verification.
 
 <img width="515" height="746" alt="Audio Insight performance metrics detail view" src="https://github.com/user-attachments/assets/97c09aa8-877b-4139-96f2-a3d2837abec6" />
 
